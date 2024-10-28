@@ -25,7 +25,7 @@ class TrajectorySimulator(Node):
         self.steps = 100  # Number of trajectory steps to simulate
         self.smoothness = 10  # Number of interpolation points between key points
 
-        self.publish_rate = 10  # Hz
+        self.publish_rate = 10.0  # Hz
 
         # Generate random (smoothed) trajectories
         self.uav_trajectory = self.generate_trajectory(self.uav_start, self.steps, is_uav=True, smooth = True)
@@ -141,7 +141,7 @@ class TrajectorySimulator(Node):
             uav_transform = TransformStamped()
             uav_transform.header.stamp = self.get_clock().now().to_msg()
             uav_transform.header.frame_id = 'world'
-            uav_transform.child_frame_id = 'uav'
+            uav_transform.child_frame_id = 'uav_gt'
 
             uav_transform.transform.translation.x = float(self.uav_trajectory[self.current_point][0])
             uav_transform.transform.translation.y = float(self.uav_trajectory[self.current_point][1])
@@ -172,7 +172,7 @@ class TrajectorySimulator(Node):
 
         tag_transform = TransformStamped()
         tag_transform.header.stamp = self.get_clock().now().to_msg()
-        tag_transform.header.frame_id = 'uav'
+        tag_transform.header.frame_id = 'uav_gt'
         tag_transform.child_frame_id = label
 
         tag_transform.transform.translation.x = position[0]

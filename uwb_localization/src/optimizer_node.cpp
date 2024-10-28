@@ -1,10 +1,13 @@
 #include <rclcpp/rclcpp.hpp>
 #include <std_msgs/msg/float32.hpp>
+#include <geometry_msgs/msg/transform_stamped.hpp>
+#include <tf2_ros/transform_broadcaster.h>
 
 #include <ceres/ceres.h>
 #include <ceres/rotation.h>
 #include <Eigen/Core>
 #include <vector>
+#include <sstream>
 
 
 
@@ -12,38 +15,39 @@ class UWBOptimizationNode : public rclcpp::Node {
 
 public:
 
-  UWBOptimizationNode() : Node("optimizer_node") {
+    UWBOptimizationNode() : Node("uwb_optimization_node"), roll_(0.0), pitch_(0.0), yaw_(0.0) {
     
-      // Initialize subscriptions for 8 distance measurement topics
-      for (int i = 0; i < 2; ++i) {
+    // Initialize subscriptions for 8 distance measurement topics
+    int count = 0;
+    for (int i = 0; i < 2; ++i) {
         for(int j = 0; j < 4; ++j){
-          std::string topic_name = "/range/t" + std::to_string(i+1) + 'a' + std::to_string(j+1); /*TODO: parametrize topic names*/
-          auto callback = [this, i](const std_msgs::msg::Float32::SharedPtr msg) {
-              this->measurement_callback(i, msg);
-          };
-          distance_subs_.emplace_back(this->create_subscription<std_msgs::msg::Float32>(
-              topic_name, 10, callback));
-          
-          count_++;
-
+            std::string topic_name = "/range/t" + std::to_string(i+1) + 'a' + std::to_string(j+1); /*TODO: parametrize topic names*/
+            auto callback = [this, count](const std_msgs::msg::Float32::SharedPtr msg) {
+                this->measurement_callback(count, msg);
+            };
+            distance_subs_.emplace_back(this->create_subscription<std_msgs::msg::Float32>(
+                topic_name, 10, callback));
+            
+            count++;
         }
-      }
+    }
 
-      // Initial guesses for optimization
-      q_ = {1.0, 0.0, 0.0, 0.0};  // Quaternion (w, x, y, z)
-      t_ = {0.0, 0.0, 0.0};       // Translation (x, y, z)
+    // Create publisher/broadcaster for optimized transformation
+    tf_publisher_ = this->create_publisher<geometry_msgs::msg::TransformStamped>("uwb_optimization_node/optimized_T", 10);
+    tf_broadcaster_ = std::make_shared<tf2_ros::TransformBroadcaster>(this);
 
-      RCLCPP_INFO(this->get_logger(), "UWB Optimization Node initialized.");
+
+    // Known roll and pitch values
+    roll_ = 0.0;   // Example roll in radians
+    pitch_ = 0.0;  // Example pitch in radians
+    yaw_ = 0.0;    // Initial guess for yaw
+
+    t_ = {0.0, 0.0, 0.0};       // Translation (x, y, z)
+
+    RCLCPP_INFO(this->get_logger(), "UWB Optimization Node initialized.");
   }
 
 private:
-
-  int count_ = 0;
-  std::vector<rclcpp::Subscription<std_msgs::msg::Float32>::SharedPtr> distance_subs_;
-  std::array<double, 8> measurements_;
-  std::array<bool, 8> received_measurements_ = {false};
-  std::array<double, 4> q_;  // Quaternion (w, x, y, z)
-  std::array<double, 3> t_;  // Translation (x, y, z)
 
   // Callback for each measurement
   void measurement_callback(int index, const std_msgs::msg::Float32::SharedPtr msg) {
@@ -58,73 +62,139 @@ private:
       }
   }
 
+  void publish_transform(const Eigen::Matrix4d& T) {
+    
+        geometry_msgs::msg::TransformStamped transform_msg;
+        transform_msg.header.stamp = this->now();
+        transform_msg.header.frame_id = "ground_vehicle";  // Adjust frame_id as needed
+        transform_msg.child_frame_id = "uav_opt";            // Adjust child_frame_id as needed
+
+        // Extract translation
+        transform_msg.transform.translation.x = T(0, 3);
+        transform_msg.transform.translation.y = T(1, 3);
+        transform_msg.transform.translation.z = T(2, 3);
+
+        // Extract rotation (Convert Eigen rotation matrix to quaternion)
+        Eigen::Matrix3d rotation_matrix = T.block<3, 3>(0, 0);
+        Eigen::Quaterniond q(rotation_matrix);
+
+        transform_msg.transform.rotation.x = q.x();
+        transform_msg.transform.rotation.y = q.y();
+        transform_msg.transform.rotation.z = q.z();
+        transform_msg.transform.rotation.w = q.w();
+
+        // Publish the transform
+        tf_publisher_->publish(transform_msg);
+        // Broadcast the transform
+        tf_broadcaster_->sendTransform(transform_msg);
+}
+
+
+  // Build transformation matrix from roll, pitch, optimized yaw, and translation vector
+    Eigen::Matrix4d build_transformation_matrix(double roll, double pitch, double yaw, const std::array<double, 3>& t) {
+        Eigen::Matrix3d R;
+        R = Eigen::AngleAxisd(yaw, Eigen::Vector3d::UnitZ()) *
+            Eigen::AngleAxisd(pitch, Eigen::Vector3d::UnitY()) *
+            Eigen::AngleAxisd(roll, Eigen::Vector3d::UnitX());
+
+        Eigen::Matrix4d T = Eigen::Matrix4d::Identity();
+        T.block<3, 3>(0, 0) = R;
+        T(0, 3) = t[0];
+        T(1, 3) = t[1];
+        T(2, 3) = t[2];
+
+        return T;
+    }
+
    // Run the optimization once all measurements are received
   void run_optimization() {
-      ceres::Problem problem;
+        ceres::Problem problem;
 
-      // Define anchor and tag positions (replace with actual positions)
-      std::vector<Eigen::Vector3d> anchors = { /* anchor positions */ };
-      std::vector<Eigen::Vector3d> tags = { /* tag positions */ };
+        // Define anchor and tag positions (replace with actual positions)
+        std::vector<Eigen::Vector3d> anchors = { {0.5, 0.5, 0.5}, {-0.5, -0.5, 0.5}, {0.5, -0.5, -0.5}, {-0.5, 0.5, -0.5} };
+        std::vector<Eigen::Vector3d> tags = { {0.5, 0.5, 0.25}, {-0.5, -0.5, 0.25} };
 
       // Add residual blocks for each measurement
-      for (size_t i = 0; i < tags.size(); ++i) {
-          for (size_t j = 0; j < anchors.size(); ++j) {
-              ceres::CostFunction* cost_function =
-                  UWBResidual::Create(anchors[j], tags[i], measurements_[i * 4 + j]);
-              problem.AddResidualBlock(cost_function, nullptr, q_.data(), t_.data());
-          }
-      }
+        for (size_t i = 0; i < tags.size(); ++i) {
+            for (size_t j = 0; j < anchors.size(); ++j) {
+                ceres::CostFunction* cost_function =
+                    UWBResidual::Create(anchors[j], tags[i], measurements_[i * 4 + j], roll_, pitch_);
+                problem.AddResidualBlock(cost_function, nullptr, &yaw_, t_.data());
+            }
+        }
 
-      // Set the quaternion parameterization
-      problem.SetParameterization(q_.data(), new ceres::QuaternionParameterization());
+        // Configure solver options
+        ceres::Solver::Options options;
+        options.linear_solver_type = ceres::DENSE_QR;
+        options.minimizer_progress_to_stdout = true;
 
-      // Configure solver options
-      ceres::Solver::Options options;
-      options.linear_solver_type = ceres::DENSE_QR;
-      options.minimizer_progress_to_stdout = true;
+        // Solve
+        ceres::Solver::Summary summary;
+        ceres::Solve(options, &problem, &summary);
+        RCLCPP_INFO(this->get_logger(), summary.FullReport().c_str());
 
-      // Solve
-      ceres::Solver::Summary summary;
-      ceres::Solve(options, &problem, &summary);
-      RCLCPP_INFO(this->get_logger(), summary.FullReport().c_str());
+        // Construct transformation matrix T with optimized yaw, roll, pitch, and translation
+        Eigen::Matrix4d T = build_transformation_matrix(roll_, pitch_, yaw_, t_);
 
-      // Output the optimized values
-      RCLCPP_INFO(this->get_logger(), "Optimized quaternion: [%f, %f, %f, %f]", q_[0], q_[1], q_[2], q_[3]);
-      RCLCPP_INFO(this->get_logger(), "Optimized translation: [%f, %f, %f]", t_[0], t_[1], t_[2]);
+        // Convert Eigen::Matrix4d to a string
+        std::stringstream ss;
+        ss << T;
+        RCLCPP_INFO(this->get_logger(), "Optimized Transformation Matrix:\n%s", ss.str().c_str());
+
+        publish_transform(T);
+
   }
 
   // Residual struct for Ceres
   struct UWBResidual {
-      UWBResidual(const Eigen::Vector3d& anchor, const Eigen::Vector3d& tag, double measured_distance)
-          : anchor_(anchor), tag_(tag), measured_distance_(measured_distance) {}
+        UWBResidual(const Eigen::Vector3d& anchor, const Eigen::Vector3d& tag, double measured_distance, double roll, double pitch)
+            : anchor_(anchor), tag_(tag), measured_distance_(measured_distance), roll_(roll), pitch_(pitch) {}
 
-      template <typename T>
-      bool operator()(const T* const q, const T* const t, T* residual) const {
-          T anchor_transformed[3];
-          ceres::QuaternionRotatePoint(q, anchor_.data(), anchor_transformed);
+        template <typename T>
+        bool operator()(const T* const yaw, const T* const t, T* residual) const {
+                // Build rotation matrix using roll, pitch, and variable yaw
+                Eigen::Matrix<T, 3, 3> R;
+                R = Eigen::AngleAxis<T>(yaw[0], Eigen::Matrix<T, 3, 1>::UnitZ()) *
+                    Eigen::AngleAxis<T>(T(pitch_), Eigen::Matrix<T, 3, 1>::UnitY()) *
+                    Eigen::AngleAxis<T>(T(roll_), Eigen::Matrix<T, 3, 1>::UnitX());
 
-          anchor_transformed[0] += t[0];
-          anchor_transformed[1] += t[1];
-          anchor_transformed[2] += t[2];
+                // Transform the anchor point
+                Eigen::Matrix<T, 3, 1> anchor_transformed = R * anchor_.cast<T>() + Eigen::Matrix<T, 3, 1>(t[0], t[1], t[2]);
 
-          T dx = T(tag_(0)) - anchor_transformed[0];
-          T dy = T(tag_(1)) - anchor_transformed[1];
-          T dz = T(tag_(2)) - anchor_transformed[2];
-          T predicted_distance = ceres::sqrt(dx * dx + dy * dy + dz * dz);
+                // Calculate the predicted distance
+                T dx = T(tag_(0)) - anchor_transformed[0];
+                T dy = T(tag_(1)) - anchor_transformed[1];
+                T dz = T(tag_(2)) - anchor_transformed[2];
+                T predicted_distance = ceres::sqrt(dx * dx + dy * dy + dz * dz);
 
-          residual[0] = T(measured_distance_) - predicted_distance;
-          return true;
-      }
+                // Residual as (measured - predicted)
+                residual[0] = T(measured_distance_) - predicted_distance;
+                return true;
+        }
 
-      static ceres::CostFunction* Create(const Eigen::Vector3d& anchor, const Eigen::Vector3d& tag, double measured_distance) {
-          return (new ceres::AutoDiffCostFunction<UWBResidual, 1, 4, 3>(
-              new UWBResidual(anchor, tag, measured_distance)));
-      }
+      static ceres::CostFunction* Create(const Eigen::Vector3d& anchor, const Eigen::Vector3d& tag, double measured_distance, double roll, double pitch) {
+            return (new ceres::AutoDiffCostFunction<UWBResidual, 1, 1, 3>(
+                new UWBResidual(anchor, tag, measured_distance, roll, pitch)));
+        }
 
-      const Eigen::Vector3d anchor_;
-      const Eigen::Vector3d tag_;
-      const double measured_distance_;
+        const Eigen::Vector3d anchor_;
+        const Eigen::Vector3d tag_;
+        const double measured_distance_;
+        const double roll_;
+        const double pitch_;
   };
+
+    std::vector<rclcpp::Subscription<std_msgs::msg::Float32>::SharedPtr> distance_subs_;
+    rclcpp::Publisher<geometry_msgs::msg::TransformStamped>::SharedPtr tf_publisher_;
+    std::shared_ptr<tf2_ros::TransformBroadcaster> tf_broadcaster_;
+
+    std::array<double, 8> measurements_;
+    std::array<bool, 8> received_measurements_ = {false};
+
+    // Known roll and pitch, and yaw to be optimized
+    double roll_, pitch_;
+    double yaw_;
+    std::array<double, 3> t_;  // Translation vector (x, y, z)
 
 };
 int main(int argc, char** argv) {
