@@ -64,18 +64,21 @@ private:
 
   void publish_transform(const Eigen::Matrix4d& T) {
     
+        
+        Eigen::Matrix4d That_st = T.inverse();
+
         geometry_msgs::msg::TransformStamped transform_msg;
         transform_msg.header.stamp = this->now();
         transform_msg.header.frame_id = "ground_vehicle";  // Adjust frame_id as needed
         transform_msg.child_frame_id = "uav_opt";            // Adjust child_frame_id as needed
 
         // Extract translation
-        transform_msg.transform.translation.x = T(0, 3);
-        transform_msg.transform.translation.y = T(1, 3);
-        transform_msg.transform.translation.z = T(2, 3);
+        transform_msg.transform.translation.x = That_st(0, 3);
+        transform_msg.transform.translation.y = That_st(1, 3);
+        transform_msg.transform.translation.z = That_st(2, 3);
 
         // Extract rotation (Convert Eigen rotation matrix to quaternion)
-        Eigen::Matrix3d rotation_matrix = T.block<3, 3>(0, 0);
+        Eigen::Matrix3d rotation_matrix = That_st.block<3, 3>(0, 0);
         Eigen::Quaterniond q(rotation_matrix);
 
         transform_msg.transform.rotation.x = q.x();
@@ -134,14 +137,14 @@ private:
         RCLCPP_INFO(this->get_logger(), summary.FullReport().c_str());
 
         // Construct transformation matrix T with optimized yaw, roll, pitch, and translation
-        Eigen::Matrix4d T = build_transformation_matrix(roll_, pitch_, yaw_, t_);
+        Eigen::Matrix4d That_ts = build_transformation_matrix(roll_, pitch_, yaw_, t_);
 
         // Convert Eigen::Matrix4d to a string
         std::stringstream ss;
-        ss << T;
+        ss << That_ts;
         RCLCPP_INFO(this->get_logger(), "Optimized Transformation Matrix:\n%s", ss.str().c_str());
 
-        publish_transform(T);
+        publish_transform(That_ts);
 
   }
 

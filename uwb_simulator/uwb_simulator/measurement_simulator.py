@@ -23,7 +23,16 @@ class MeasurementSimulator(Node):
         super().__init__('measurement_simulator')
         self.get_logger().info("Measurement Simulator Node Started")
 
-        self.rate = 10.0
+        #Declare params
+        self.declare_parameters(
+            namespace='',
+            parameters=[
+                ('measurement_noise_std', 0.1),
+                ('pub_rate', 10.0)
+            ])
+
+        self.measurement_noise_std = self.get_parameter("measurement_noise_std").value
+        self.rate = self.get_parameter("pub_rate").value
 
         self.tf_buffer = Buffer()
         self.tf_listener = TransformListener(self.tf_buffer, self)
@@ -91,27 +100,15 @@ class MeasurementSimulator(Node):
 
         try:
                 gt_target = self.tf_buffer.lookup_transform(
+                    'world',
                     'uav_gt',
-                    'world',
                     rclpy.time.Time())
-                                            
-        except TransformException as ex:
-                self.get_logger().info(
-                    f'Could not transform world to uav_gt: {ex}')
-                return
-        
-        try:
+                
                 gt_source = self.tf_buffer.lookup_transform(
-                    'ground_vehicle',
                     'world',
+                    'ground_vehicle',
                     rclpy.time.Time())
-                                            
-        except TransformException as ex:
-                self.get_logger().info(
-                    f'Could not transform world to ground_vehicle: {ex}')
-                return
-        
-        try:
+
                 that_ts = self.tf_buffer.lookup_transform(
                     'uav_opt',
                     'ground_vehicle',
@@ -121,15 +118,16 @@ class MeasurementSimulator(Node):
                                                                 self.transform_stamped_to_matrix(gt_target), 
                                                                 self.transform_stamped_to_matrix(that_ts))
 
-                print("rotation error (deg):")
-                print(detR)
-                print("translation error (m):")
-                print(dett)
+
+                self.get_logger().info(
+                f'rotation error (deg): {detR}, translation error (m): {dett}')
+                                                        
                                             
         except TransformException as ex:
                 self.get_logger().info(
-                    f'Could not transform ground_vehicle to uav_opt: {ex}')
+                    f'Could not transform: {ex}')
                 return
+        
 
     #Publish simulated measures from tag1 to anchors using simulated ground truth
 
@@ -150,7 +148,7 @@ class MeasurementSimulator(Node):
                     rclpy.time.Time())
                 
                 distance = Float32()
-                distance.data = np.sqrt(t.transform.translation.x**2 + t.transform.translation.y**2 + t.transform.translation.z**2) + np.random.normal(0, 0.1)
+                distance.data = np.sqrt(t.transform.translation.x**2 + t.transform.translation.y**2 + t.transform.translation.z**2) + np.random.normal(0, self.measurement_noise_std)
                 
             except TransformException as ex:
                 self.get_logger().info(
@@ -179,7 +177,7 @@ class MeasurementSimulator(Node):
                     rclpy.time.Time())
                 
                 distance = Float32()
-                distance.data = np.sqrt(t.transform.translation.x**2 + t.transform.translation.y**2 + t.transform.translation.z**2) + np.random.normal(0, 0.1)
+                distance.data = np.sqrt(t.transform.translation.x**2 + t.transform.translation.y**2 + t.transform.translation.z**2) + np.random.normal(0, self.measurement_noise_std)
                 
             except TransformException as ex:
                 self.get_logger().info(

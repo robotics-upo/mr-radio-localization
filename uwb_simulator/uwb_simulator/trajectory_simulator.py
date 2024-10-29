@@ -19,13 +19,41 @@ class TrajectorySimulator(Node):
         super().__init__('trajectory_simulator')
         self.get_logger().info("Trajectory Simulator Node Started")
 
+        self.declare_parameters(
+            namespace='',
+            parameters=[
+                ('total_steps', 100),
+                ('pub_rate', 10.0),
+                ('anchors_location.a1', [0.0, 0.0, 0.0]),
+                ('anchors_location.a2', [0.0, 0.0, 0.0]),
+                ('anchors_location.a3', [0.0, 0.0, 0.0]),
+                ('anchors_location.a4', [0.0, 0.0, 0.0]),
+                ('tags_location.t1', [0.0, 0.0, 0.0]),
+                ('tags_location.t2', [0.0, 0.0, 0.0])
+            ])
+
         # Parameters
+
         self.uav_start = np.array([0, 0, 2])  # UAV starts at (0, 0, 2)
         self.ground_start = np.array([0, 0, 0])  # Ground vehicle starts at (0, 0, 0)
-        self.steps = 100  # Number of trajectory steps to simulate
+        self.steps = self.get_parameter('total_steps').value
         self.smoothness = 10  # Number of interpolation points between key points
 
-        self.publish_rate = 10.0  # Hz
+        self.publish_rate = self.get_parameter('pub_rate').value
+
+        # Retrieve anchor and tag locations and convert them to numpy arrays
+        anchors_location = {
+            "a1": np.array(self.get_parameter('anchors_location.a1').value),
+            "a2": np.array(self.get_parameter('anchors_location.a2').value),
+            "a3": np.array(self.get_parameter('anchors_location.a3').value),
+            "a4": np.array(self.get_parameter('anchors_location.a4').value),
+        }
+
+        tags_location = {
+            "t1": np.array(self.get_parameter('tags_location.t1').value),
+            "t2": np.array(self.get_parameter('tags_location.t2').value),
+        }
+
 
         # Generate random (smoothed) trajectories
         self.uav_trajectory = self.generate_trajectory(self.uav_start, self.steps, is_uav=True, smooth = True)
@@ -48,36 +76,37 @@ class TrajectorySimulator(Node):
         self.tf_static_broadcaster = StaticTransformBroadcaster(self)
 
         # Create tags in UAV frame
-        self.create_tag(np.array([0.5, 0.5, 0.25]), 't1')
-        self.create_tag(np.array([-0.5, -0.5, 0.25]), 't2')
+        self.create_tag(tags_location['t1'], 't1')
+        self.create_tag(tags_location['t2'], 't2')
 
         # Create anchors in ground vehicle frame
-        self.create_anchor(np.array([0.5, 0.5, 0.5]), 'a1')
-        self.create_anchor(np.array([-0.5, -0.5, 0.5]), 'a2')
-        self.create_anchor(np.array([0.5, -0.5, -0.5]), 'a3')
-        self.create_anchor(np.array([-0.5, 0.5, -0.5]), 'a4')
+        self.create_anchor(anchors_location['a1'], 'a1')
+        self.create_anchor(anchors_location['a2'], 'a2')
+        self.create_anchor(anchors_location['a3'], 'a3')
+        self.create_anchor(anchors_location['a4'], 'a4')
 
 
         self.create_timer(1./self.publish_rate, self.transform_publisher)
 
 
     def random_curvature(self):
-        return random.uniform(-0.5, 0.5)
+
+        curvature = random.uniform(-0.25, 0.25)
+        steps = random.randint(5,15)
+        
+        return curvature, steps
 
     def generate_trajectory(self, start, steps, is_uav=False, smooth = False):
         key_points = [start]
         direction = np.array([1, 0, 0])  # Start heading along the x-axis
-        curvature = self.random_curvature()
-
-        few_steps = random.randint(2,10)
+        curvature, few_steps = self.random_curvature()
         j = 0
 
         for i in range(steps):
 
             #Change curvature every random number of steps
             if(j > few_steps):
-                curvature = self.random_curvature()
-                few_steps = random.randint(2,10)
+                curvature, few_steps = self.random_curvature()
                 j = 0
             # Apply curvature to direction (2D rotation in the x-y plane)
             direction = np.dot(np.array([[np.cos(curvature), -np.sin(curvature), 0],
