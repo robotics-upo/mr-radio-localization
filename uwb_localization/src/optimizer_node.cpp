@@ -8,7 +8,9 @@
 #include <Eigen/Core>
 #include <vector>
 #include <sstream>
-
+#include <deque>
+#include <Eigen/Dense>
+#include <utility>
 
 
 class UWBOptimizationNode : public rclcpp::Node {
@@ -42,7 +44,9 @@ public:
     pitch_ = 0.0;  // Example pitch in radians
     yaw_ = 0.0;    // Initial guess for yaw
 
-    t_ = {0.0, 0.0, 0.0};       // Translation (x, y, z)
+    t_ = {0.0, 0.0, -2.0};       // Translation (x, y, z)
+
+    window_size_ = 5;
 
     RCLCPP_INFO(this->get_logger(), "UWB Optimization Node initialized.");
   }
@@ -62,34 +66,86 @@ private:
       }
   }
 
-  void publish_transform(const Eigen::Matrix4d& T) {
+  std::pair<std::array<double, 3>, double> moving_average(const double yaw, const std::array<double, 3>& t) {
     
+        // Add new values to history
+        translation_history_.push_back(t);
+        yaw_history_.push_back(yaw);
+
+        // Remove oldest if history exceeds desired size
+        if (translation_history_.size() > window_size_) {
+            translation_history_.pop_front();
+            yaw_history_.pop_front();
+        }
+        
+        // Compute average translation
+        std::array<double, 3> smoothed_translation = {0.0, 0.0, 0.0};
+        for (const auto& t : translation_history_) {
+            smoothed_translation[0] += t[0];
+            smoothed_translation[1] += t[1];
+            smoothed_translation[2] += t[2];
+        }
+        smoothed_translation[0] /= translation_history_.size();
+        smoothed_translation[1] /= translation_history_.size();
+        smoothed_translation[2] /= translation_history_.size();
+
+        double smoothed_yaw = 0.0;
+        for (const auto& theta : yaw_history_) {
+            smoothed_yaw += theta;
+        }
+        smoothed_yaw /= yaw_history_.size();
+
+        return {smoothed_translation, smoothed_yaw};
+}
+
+  void publish_transform(const Eigen::Matrix4d& T) {
+
+
+        geometry_msgs::msg::TransformStamped that_ts_msg;
+        that_ts_msg.header.stamp = this->now();
+
+        // Extract translation
+        that_ts_msg.transform.translation.x = T(0, 3);
+        that_ts_msg.transform.translation.y = T(1, 3);
+        that_ts_msg.transform.translation.z = T(2, 3);
+
+        // Extract rotation (Convert Eigen rotation matrix to quaternion)
+        Eigen::Matrix3d rotation_matrix_that_ts = T.block<3, 3>(0, 0);
+        Eigen::Quaterniond q_that_ts(rotation_matrix_that_ts);
+
+        that_ts_msg.transform.rotation.x = q_that_ts.x();
+        that_ts_msg.transform.rotation.y = q_that_ts.y();
+        that_ts_msg.transform.rotation.z = q_that_ts.z();
+        that_ts_msg.transform.rotation.w = q_that_ts.w();
+        
+        /*Create the inverse to publish to tf tree*/
         
         Eigen::Matrix4d That_st = T.inverse();
 
-        geometry_msgs::msg::TransformStamped transform_msg;
-        transform_msg.header.stamp = this->now();
-        transform_msg.header.frame_id = "ground_vehicle";  // Adjust frame_id as needed
-        transform_msg.child_frame_id = "uav_opt";            // Adjust child_frame_id as needed
+        geometry_msgs::msg::TransformStamped that_st_msg;
+        that_st_msg.header.stamp = that_ts_msg.header.stamp;
+        that_st_msg.header.frame_id = "ground_vehicle";  // Adjust frame_id as needed
+        that_st_msg.child_frame_id = "uav_opt";            // Adjust child_frame_id as needed
 
         // Extract translation
-        transform_msg.transform.translation.x = That_st(0, 3);
-        transform_msg.transform.translation.y = That_st(1, 3);
-        transform_msg.transform.translation.z = That_st(2, 3);
+        that_st_msg.transform.translation.x = That_st(0, 3);
+        that_st_msg.transform.translation.y = That_st(1, 3);
+        that_st_msg.transform.translation.z = That_st(2, 3);
 
         // Extract rotation (Convert Eigen rotation matrix to quaternion)
-        Eigen::Matrix3d rotation_matrix = That_st.block<3, 3>(0, 0);
-        Eigen::Quaterniond q(rotation_matrix);
+        Eigen::Matrix3d rotation_matrix_that_st = That_st.block<3, 3>(0, 0);
+        Eigen::Quaterniond q_that_st(rotation_matrix_that_st);
 
-        transform_msg.transform.rotation.x = q.x();
-        transform_msg.transform.rotation.y = q.y();
-        transform_msg.transform.rotation.z = q.z();
-        transform_msg.transform.rotation.w = q.w();
+        that_st_msg.transform.rotation.x = q_that_st.x();
+        that_st_msg.transform.rotation.y = q_that_st.y();
+        that_st_msg.transform.rotation.z = q_that_st.z();
+        that_st_msg.transform.rotation.w = q_that_st.w();
 
-        // Publish the transform
-        tf_publisher_->publish(transform_msg);
-        // Broadcast the transform
-        tf_broadcaster_->sendTransform(transform_msg);
+
+        // Publish the estimated transform
+        tf_publisher_->publish(that_ts_msg);
+        // Broadcast the inverse transform
+        tf_broadcaster_->sendTransform(that_st_msg);
 }
 
 
@@ -129,12 +185,22 @@ private:
         // Configure solver options
         ceres::Solver::Options options;
         options.linear_solver_type = ceres::DENSE_QR;
+
+        // // Use Levenberg-Marquardt (default):
+        // options.minimizer_type = ceres::TRUST_REGION;
+        // options.trust_region_strategy_type = ceres::LEVENBERG_MARQUARDT;
+
         options.minimizer_progress_to_stdout = true;
 
         // Solve
         ceres::Solver::Summary summary;
         ceres::Solve(options, &problem, &summary);
         RCLCPP_INFO(this->get_logger(), summary.FullReport().c_str());
+
+        /*Run moving average*/
+        auto [t_avg, yaw_avg] = moving_average(yaw_, t_);
+        t_ = t_avg;
+        yaw_ = yaw_avg;
 
         // Construct transformation matrix T with optimized yaw, roll, pitch, and translation
         Eigen::Matrix4d That_ts = build_transformation_matrix(roll_, pitch_, yaw_, t_);
@@ -198,6 +264,10 @@ private:
     double roll_, pitch_;
     double yaw_;
     std::array<double, 3> t_;  // Translation vector (x, y, z)
+
+    std::deque<std::array<double, 3>> translation_history_;
+    std::deque<double> yaw_history_;
+    int window_size_;
 
 };
 int main(int argc, char** argv) {

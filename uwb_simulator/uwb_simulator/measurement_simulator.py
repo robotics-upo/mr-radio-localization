@@ -13,7 +13,7 @@ from tf2_ros import TransformException
 from tf2_ros.buffer import Buffer
 from tf2_ros.transform_listener import TransformListener
 from geometry_msgs.msg import TransformStamped
-from std_msgs.msg import Float32
+from std_msgs.msg import Float32, Float32MultiArray
 import time
 
 class MeasurementSimulator(Node):
@@ -47,6 +47,9 @@ class MeasurementSimulator(Node):
         self.t2a2_publisher = self.create_publisher(Float32, 'range/t2a2', 1)
         self.t2a3_publisher = self.create_publisher(Float32, 'range/t2a3', 1)
         self.t2a4_publisher = self.create_publisher(Float32, 'range/t2a4', 1)
+
+        #Publish ground truth errors
+        self.error_publisher = self.create_publisher(Float32MultiArray, 'optimization/metrics', 1)
 
         self.timer1 = self.create_timer(1./self.rate, self.on_timer_t1)
         self.timer2 = self.create_timer(1./self.rate, self.on_timer_t2)
@@ -108,19 +111,29 @@ class MeasurementSimulator(Node):
                     'world',
                     'ground_vehicle',
                     rclpy.time.Time())
+                
+                # that_ts = self.tf_buffer.lookup_transform(
+                #     'uav_opt',
+                #     'ground_vehicle',
+                #     rclpy.time.Time())
+                
+                that_ts = msg
 
-                that_ts = self.tf_buffer.lookup_transform(
-                    'uav_opt',
-                    'ground_vehicle',
-                    rclpy.time.Time())              
                         
                 detR, dett = self.compute_transformation_errors(self.transform_stamped_to_matrix(gt_source), 
                                                                 self.transform_stamped_to_matrix(gt_target), 
                                                                 self.transform_stamped_to_matrix(that_ts))
 
 
-                self.get_logger().info(
-                f'rotation error (deg): {detR}, translation error (m): {dett}')
+                metrics = Float32MultiArray()
+                metrics.data = [detR, dett]  # Set both values at once
+
+
+                self.error_publisher.publish(metrics)
+
+
+                # self.get_logger().info(
+                # f'rotation error (deg): {detR}, translation error (m): {dett}', throttle_duration_sec=1)
                                                         
                                             
         except TransformException as ex:

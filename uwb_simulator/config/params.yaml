@@ -4,6 +4,8 @@ measurement_simulator:
     pub_rate: 10.0
 trajectory_simulator:
   ros__parameters:
+    load_trajectory: True
+    trajectory_name: "trajectory1"
     total_steps: 100
     pub_rate: 10.0
     anchors_location:

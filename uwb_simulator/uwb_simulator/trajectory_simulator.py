@@ -22,6 +22,8 @@ class TrajectorySimulator(Node):
         self.declare_parameters(
             namespace='',
             parameters=[
+                ('load_trajectory', False),
+                ('trajectory_name', "trajectory1"),
                 ('total_steps', 100),
                 ('pub_rate', 10.0),
                 ('anchors_location.a1', [0.0, 0.0, 0.0]),
@@ -54,19 +56,52 @@ class TrajectorySimulator(Node):
             "t2": np.array(self.get_parameter('tags_location.t2').value),
         }
 
+        self.load_trajectory = self.get_parameter('load_trajectory').value
+        self.trajectory_name = self.get_parameter('trajectory_name').value
 
-        # Generate random (smoothed) trajectories
-        self.uav_trajectory = self.generate_trajectory(self.uav_start, self.steps, is_uav=True, smooth = True)
-        self.get_logger().info('Generated UAV trajectory with %d points' % (len(self.uav_trajectory)))
 
-        self.ground_trajectory = self.generate_trajectory(self.ground_start, self.steps, smooth = True)
-        self.get_logger().info('Generated ground vehicle trajectory with %d points' % (len(self.ground_trajectory)))
+        self.get_logger().info("Load trajectory is: " +  str(self.load_trajectory))
 
+
+        if(self.load_trajectory == False):
+
+            self.get_logger().info("Generating trajectory" +  self.trajectory_name)
+
+            # Generate random (smoothed) trajectories
+            self.uav_trajectory = self.generate_trajectory(self.uav_start, self.steps, is_uav=True, smooth = True)
+            self.get_logger().info('Generated UAV trajectory with %d points' % (len(self.uav_trajectory)))
+
+            self.ground_trajectory = self.generate_trajectory(self.ground_start, self.steps, smooth = True)
+            self.get_logger().info('Generated ground vehicle trajectory with %d points' % (len(self.ground_trajectory)))
+
+            #Store and save trajectory
+            self.trajectory = np.zeros((len(self.uav_trajectory), 3, 2))
+            self.trajectory[:,:,0] = self.uav_trajectory
+            self.trajectory[:,:,1] = self.ground_trajectory
+
+            np.save(self.trajectory_name + '.npy', self.trajectory)
+        
+        else:
+
+            self.get_logger().info("Loading trajectory: " + self.trajectory_name)
+
+            try: 
+                self.trajectory = np.load(self.trajectory_name + '.npy')
+                self.uav_trajectory = self.trajectory[:,:,0]
+                self.ground_trajectory = self.trajectory[:,:,1]
+                self.get_logger().info('Read ground vehicle trajectory with size ' + str(np.shape(self.ground_trajectory)))
+                self.get_logger().info('Read UAV trajectory trajectory with size' + str(np.shape(self.uav_trajectory)))
+
+            except OSError as ex:
+                self.get_logger().info(f'Error reading trajectory: {ex}')
+                return
 
         # Plot the trajectories
         self.plot_trajectories()
 
         self.num_points = min(len(self.uav_trajectory), len(self.ground_trajectory))
+        self.get_logger().info('Trajectory length: ' + str(self.num_points))
+
         self.current_point = 0 #initialize iterator
 
         # Create a TransformBroadcaster
@@ -165,6 +200,8 @@ class TrajectorySimulator(Node):
     def transform_publisher(self):
 
         if(self.current_point < self.num_points):
+
+            self.get_logger().info(f'Point {self.current_point}/{self.num_points}', throttle_duration_sec=1)
             
             # Create and send UAV transform
             uav_transform = TransformStamped()
@@ -194,6 +231,11 @@ class TrajectorySimulator(Node):
             self.tf_broadcaster.sendTransform(ground_transform)
 
             self.current_point += 1
+        
+        else:
+            
+            self.get_logger().warning('Trajectory Finished')
+
 
     def create_tag(self, position, label):
 
