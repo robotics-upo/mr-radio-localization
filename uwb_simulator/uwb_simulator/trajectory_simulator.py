@@ -133,7 +133,7 @@ class TrajectorySimulator(Node):
 
     def generate_trajectory(self, start, steps, is_uav=False, smooth = False):
         key_points = [start]
-        direction = np.array([1, 0, 0])  # Start heading along the x-axis
+        direction = np.array([0.1, 0, 0])  # Start heading along the x-axis, 10 cm each step
         curvature, few_steps = self.random_curvature()
         j = 0
 

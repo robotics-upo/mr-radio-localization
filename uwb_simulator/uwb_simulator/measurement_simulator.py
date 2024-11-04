@@ -162,14 +162,13 @@ class MeasurementSimulator(Node):
                 
                 distance = Float32()
                 distance.data = np.sqrt(t.transform.translation.x**2 + t.transform.translation.y**2 + t.transform.translation.z**2) + np.random.normal(0, self.measurement_noise_std)
-                
+                publisher.publish(distance)
+
             except TransformException as ex:
                 self.get_logger().info(
                     f'Could not transform t1 to {anchor}: {ex}')
                 return
         
-            publisher.publish(distance)
-
 
     #Publish simulated measures from tag2 to anchors
 
@@ -191,14 +190,13 @@ class MeasurementSimulator(Node):
                 
                 distance = Float32()
                 distance.data = np.sqrt(t.transform.translation.x**2 + t.transform.translation.y**2 + t.transform.translation.z**2) + np.random.normal(0, self.measurement_noise_std)
-                
+                publisher.publish(distance)
+      
             except TransformException as ex:
                 self.get_logger().info(
                     f'Could not transform t2 to {anchor}: {ex}')
                 return
         
-            publisher.publish(distance)
-
 
 
 def main(args=None):
