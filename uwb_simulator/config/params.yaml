@@ -1,0 +1,18 @@
+measurement_simulator:
+  ros__parameters:
+    measurement_noise_std: 0.1
+    pub_rate: 10.0
+trajectory_simulator:
+  ros__parameters:
+    load_trajectory: True
+    trajectory_name: "trajectory1"
+    total_steps: 100
+    pub_rate: 10.0
+    anchors_location:
+      a1: [0.5, 0.5, 0.5]
+      a2: [-0.5, -0.5, 0.5]
+      a3: [0.5, -0.5, -0.5]
+      a4: [-0.5, 0.5, -0.5]
+    tags_location:
+      t1: [0.5, 0.5, 0.25]
+      t2: [-0.5, -0.5, 0.25]
