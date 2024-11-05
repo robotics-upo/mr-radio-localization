@@ -45,8 +45,8 @@ public:
     eliko_distances_sub_ = this->create_subscription<eliko_messages::msg::DistancesList>(
                 "/eliko/Distances", 10, std::bind(&ElikoOptimizationNode::distances_coords_cb_, this, std::placeholders::_1));
     
-    eliko_tags_coords_sub_ = this->create_subscription<eliko_messages::msg::TagCoordsList>(
-                "/eliko/TagCoords", 10, std::bind(&ElikoOptimizationNode::tags_coords_cb_, this, std::placeholders::_1));
+    // eliko_tags_coords_sub_ = this->create_subscription<eliko_messages::msg::TagCoordsList>(
+    //             "/eliko/TagCoords", 10, std::bind(&ElikoOptimizationNode::tags_coords_cb_, this, std::placeholders::_1));
 
     eliko_anchors_coords_sub_ = this->create_subscription<eliko_messages::msg::AnchorCoordsList>(
                 "/eliko/AnchorCoords", 10, std::bind(&ElikoOptimizationNode::anchors_coords_cb_, this, std::placeholders::_1));
@@ -66,6 +66,9 @@ public:
     tag_positions_ = {
         {"0x001155", {0.5, 0.5, 0.25}}, {"0x001397", {-0.5, -0.5, 0.25}}
     };
+
+    eliko_frame_id_ = "arco/eliko"; //frame of the eliko system-> same as robot frame
+    uav_frame_id_ = "base_link";
 
     // Known roll and pitch values
     roll_ = 0.0;   // Example roll in radians
@@ -187,8 +190,8 @@ private:
 
         geometry_msgs::msg::TransformStamped that_st_msg;
         that_st_msg.header.stamp = that_ts_msg.header.stamp;
-        that_st_msg.header.frame_id = "ground_vehicle";  // Adjust frame_id as needed
-        that_st_msg.child_frame_id = "uav_opt";            // Adjust child_frame_id as needed
+        that_st_msg.header.frame_id = eliko_frame_id_;  // Adjust frame_id as needed
+        that_st_msg.child_frame_id = uav_frame_id_;            // Adjust child_frame_id as needed
 
         // Extract translation
         that_st_msg.transform.translation.x = That_st(0, 3);
@@ -258,22 +261,26 @@ private:
             // Solve
             ceres::Solver::Summary summary;
             ceres::Solve(options, &problem, &summary);
-            RCLCPP_INFO(this->get_logger(), summary.FullReport().c_str());
+            RCLCPP_INFO(this->get_logger(), summary.BriefReport().c_str());
 
-            /*Run moving average*/
-            auto [t_avg, yaw_avg] = moving_average(yaw_, t_);
-            t_ = t_avg;
-            yaw_ = yaw_avg;
+            // Update if optimization converged
+            if (summary.termination_type == ceres::CONVERGENCE){
 
-            // Construct transformation matrix T with optimized yaw, roll, pitch, and translation
-            Eigen::Matrix4d That_ts = build_transformation_matrix(roll_, pitch_, yaw_, t_);
+                /*Run moving average*/
+                auto [t_avg, yaw_avg] = moving_average(yaw_, t_);
+                t_ = t_avg;
+                yaw_ = yaw_avg;
 
-            // Convert Eigen::Matrix4d to a string
-            std::stringstream ss;
-            ss << That_ts;
-            RCLCPP_INFO(this->get_logger(), "Optimized Transformation Matrix:\n%s", ss.str().c_str());
+                // Construct transformation matrix T with optimized yaw, roll, pitch, and translation
+                Eigen::Matrix4d That_ts = build_transformation_matrix(roll_, pitch_, yaw_, t_);
 
-            publish_transform(That_ts);
+                // Convert Eigen::Matrix4d to a string
+                std::stringstream ss;
+                ss << That_ts;
+                RCLCPP_INFO(this->get_logger(), "Optimized Transformation Matrix:\n%s", ss.str().c_str());
+
+                publish_transform(That_ts);
+            }
 
     }
 
@@ -336,6 +343,8 @@ private:
 
     std::unordered_map<std::string, Eigen::Vector3d> anchor_positions_;
     std::unordered_map<std::string, Eigen::Vector3d> tag_positions_;
+
+    std::string eliko_frame_id_, uav_frame_id_;
 
     // Known roll and pitch, and yaw to be optimized
     double roll_, pitch_;
