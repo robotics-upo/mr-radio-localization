@@ -35,6 +35,14 @@ struct PairHash {
     }
 };
 
+
+struct Sample {
+    std::array<double, 3> translation;
+    double yaw;
+    rclcpp::Time timestamp;  // e.g., seconds since epoch
+};
+
+
 class ElikoOptimizationNode : public rclcpp::Node {
 
 public:
@@ -46,9 +54,6 @@ public:
     eliko_distances_sub_ = this->create_subscription<eliko_messages::msg::DistancesList>(
                 "/eliko/Distances", 10, std::bind(&ElikoOptimizationNode::distances_coords_cb_, this, std::placeholders::_1));
     
-    // eliko_tags_coords_sub_ = this->create_subscription<eliko_messages::msg::TagCoordsList>(
-    //             "/eliko/TagCoords", 10, std::bind(&ElikoOptimizationNode::tags_coords_cb_, this, std::placeholders::_1));
-
     // eliko_anchors_coords_sub_ = this->create_subscription<eliko_messages::msg::AnchorCoordsList>(
     //             "/eliko/AnchorCoords", 10, std::bind(&ElikoOptimizationNode::anchors_coords_cb_, this, std::placeholders::_1));
     
@@ -60,7 +65,7 @@ public:
     tf_broadcaster_ = std::make_shared<tf2_ros::TransformBroadcaster>(this);
 
     optimizer_time_window_s_ = 0.2; //use only messages in this window for optimization
-    min_measurements_ = 3; //min number of measurements for running optimizer
+    min_measurements_ = 4; //min number of measurements for running optimizer
 
     optimization_timer_ = this->create_wall_timer(
             std::chrono::milliseconds(int(optimizer_time_window_s_*1000)), std::bind(&ElikoOptimizationNode::optimizer_cb_, this));
@@ -128,7 +133,27 @@ private:
         //Ensure at least one measurement from each of the tags
         if(current_measurements_.size() >= min_measurements_){
             RCLCPP_INFO(this->get_logger(), "[Eliko optimizer node] Running optimizer with %ld measurements", current_measurements_.size());
-            run_optimization();
+            
+            //Update transforms after convergence
+            if(run_optimization()){
+                
+                /*Run moving average*/
+                Sample sample {t_, yaw_, current_time};
+                auto [smoothed_translation, smoothed_yaw] = moving_average(sample);
+                //Update for initial estimation of following step
+                t_ = smoothed_translation;
+                yaw_ = smoothed_yaw;
+
+                // Construct transformation matrix T with optimized yaw, roll, pitch, and translation
+                Eigen::Matrix4d That_ts = build_transformation_matrix(roll_, pitch_, yaw_, t_);
+                publish_transform(That_ts, current_time);
+            }
+
+            else{
+                RCLCPP_INFO(this->get_logger(), "[Eliko optimizer node] Optimizer did not converge");
+            }
+
+
         }
         else{
             RCLCPP_WARN(this->get_logger(), "[Eliko optimizer node] Not enough data to run optimization");
@@ -140,17 +165,6 @@ private:
 
     }
 
-
-
-//   void tags_coords_cb_(const eliko_messages::msg::TagCoordsList::SharedPtr msg) {
-//         // Update tag coordinates based on received data
-//         for (const auto& tag_coord : msg->tag_coords) {
-//             Eigen::Vector3d position(tag_coord.x_coord, tag_coord.y_coord, tag_coord.z_coord);
-//             tag_positions_[tag_coord.tag_sn] = position;
-
-//             RCLCPP_DEBUG(this->get_logger(), "[Eliko optimizer node] Tag %s coordinates: [%.2f, %.2f, %.2f]", tag_coord.tag_sn.c_str(), position[0], position[1], position[2]);
-//         }
-//   }
 
 //    void anchors_coords_cb_(const eliko_messages::msg::AnchorCoordsList::SharedPtr msg) {
 //      // Update anchor coordinates based on received data
@@ -173,43 +187,47 @@ private:
         }
 
 
-  std::pair<std::array<double, 3>, double> moving_average(const double yaw, const std::array<double, 3>& t) {
-    
-        // Add new values to history
-        translation_history_.push_back(t);
-        yaw_history_.push_back(yaw);
-
-        // Remove oldest if history exceeds desired size
-        if (translation_history_.size() > moving_average_window_size_) {
-            translation_history_.pop_front();
-            yaw_history_.pop_front();
-        }
+    std::pair<std::array<double, 3>, double> moving_average(const Sample &sample) {
         
-        // Compute average translation
-        std::array<double, 3> smoothed_translation = {0.0, 0.0, 0.0};
-        for (const auto& t : translation_history_) {
-            smoothed_translation[0] += t[0];
-            smoothed_translation[1] += t[1];
-            smoothed_translation[2] += t[2];
-        }
-        smoothed_translation[0] /= translation_history_.size();
-        smoothed_translation[1] /= translation_history_.size();
-        smoothed_translation[2] /= translation_history_.size();
+            // Add the new sample with timestamp
+            sample_history_.push_back(sample);
 
-        double smoothed_yaw = 0.0;
-        for (const auto& theta : yaw_history_) {
-            smoothed_yaw += theta;
-        }
-        smoothed_yaw /= yaw_history_.size();
+            // Remove samples that are too old or if we exceed the window size
+            while (!sample_history_.empty() &&
+                (sample_history_.size() > moving_average_window_size_ || 
+                    sample.timestamp - sample_history_.front().timestamp > rclcpp::Duration::from_seconds(optimizer_time_window_s_*moving_average_window_size_))) {
+                sample_history_.pop_front();
+            }
 
-        return {smoothed_translation, smoothed_yaw};
-}
+            // Initialize smoothed values
+            std::array<double, 3> smoothed_translation = {0.0, 0.0, 0.0};
+            double smoothed_yaw = 0.0;
 
-    void publish_transform(const Eigen::Matrix4d& T) {
+            // Accumulate translation and yaw values
+            for (const auto& sample : sample_history_) {
+                smoothed_translation[0] += sample.translation[0];
+                smoothed_translation[1] += sample.translation[1];
+                smoothed_translation[2] += sample.translation[2];
+                smoothed_yaw += sample.yaw;
+            }
+
+            // Divide by the number of samples to get the average
+            size_t num_samples = sample_history_.size();
+            if (num_samples > 0) {
+                smoothed_translation[0] /= num_samples;
+                smoothed_translation[1] /= num_samples;
+                smoothed_translation[2] /= num_samples;
+                smoothed_yaw /= num_samples;
+            }
+            
+            return {smoothed_translation, smoothed_yaw};
+    }
+
+    void publish_transform(const Eigen::Matrix4d& T, const rclcpp::Time &current_time) {
 
 
         geometry_msgs::msg::TransformStamped that_ts_msg;
-        that_ts_msg.header.stamp = this->now();
+        that_ts_msg.header.stamp = current_time;
 
         // Extract translation
         that_ts_msg.transform.translation.x = T(0, 3);
@@ -273,9 +291,13 @@ private:
     }
 
     // Run the optimization once all measurements are received
-    void run_optimization() {
+    bool run_optimization() {
 
             ceres::Problem problem;
+
+            // Temporary variables to hold optimized results
+            std::array<double, 3> temp_t = t_;
+            double temp_yaw = yaw_;
 
             // Dynamically add residuals for available measurements
             for (const auto& [key, distance] : current_measurements_) {
@@ -286,7 +308,7 @@ private:
                     
                     // Create cost function with the received distance
                     ceres::CostFunction* cost_function = UWBResidual::Create(anchor_pos, tag_pos, distance, roll_, pitch_);
-                    problem.AddResidualBlock(cost_function, nullptr, &yaw_, t_.data());
+                    problem.AddResidualBlock(cost_function, nullptr, &temp_yaw, temp_t.data());
                 }
             }
 
@@ -305,19 +327,14 @@ private:
             ceres::Solve(options, &problem, &summary);
             RCLCPP_INFO(this->get_logger(), summary.BriefReport().c_str());
 
-            // Update if optimization converged
+            // Notify and update values if optimization converged
             if (summary.termination_type == ceres::CONVERGENCE){
-
-                /*Run moving average*/
-                auto [t_avg, yaw_avg] = moving_average(yaw_, t_);
-                t_ = t_avg;
-                yaw_ = yaw_avg;
-
-                // Construct transformation matrix T with optimized yaw, roll, pitch, and translation
-                Eigen::Matrix4d That_ts = build_transformation_matrix(roll_, pitch_, yaw_, t_);
-
-                publish_transform(That_ts);
-            }
+                t_ = temp_t;
+                yaw_ = temp_yaw;
+                return true;
+            } 
+            
+            return false;
 
     }
 
@@ -363,7 +380,6 @@ private:
     
     rclcpp::Subscription<eliko_messages::msg::DistancesList>::SharedPtr eliko_distances_sub_;
     // rclcpp::Subscription<eliko_messages::msg::AnchorCoordsList>::SharedPtr eliko_anchors_coords_sub_;
-    // rclcpp::Subscription<eliko_messages::msg::TagCoordsList>::SharedPtr eliko_tags_coords_sub_;
     rclcpp::Subscription<geometry_msgs::msg::QuaternionStamped>::SharedPtr dji_attitude_sub_;
     rclcpp::TimerBase::SharedPtr optimization_timer_;
 
@@ -372,9 +388,6 @@ private:
 
     rclcpp::Publisher<geometry_msgs::msg::TransformStamped>::SharedPtr tf_publisher_;
     std::shared_ptr<tf2_ros::TransformBroadcaster> tf_broadcaster_;
-
-    std::array<double, 8> measurements_;
-    std::array<bool, 8> received_measurements_ = {false};
 
     std::unordered_map<std::string, Eigen::Vector3d> anchor_positions_;
     std::unordered_map<std::string, Eigen::Vector3d> tag_positions_;
@@ -386,8 +399,8 @@ private:
     double yaw_;
     std::array<double, 3> t_;  // Translation vector (x, y, z)
 
-    std::deque<std::array<double, 3>> translation_history_;
-    std::deque<double> yaw_history_;
+    std::deque<Sample> sample_history_;
+
     size_t moving_average_window_size_;
     size_t min_measurements_;
     double optimizer_time_window_s_;
