@@ -5,14 +5,26 @@ measurement_simulator:
 trajectory_simulator:
   ros__parameters:
     load_trajectory: True
-    trajectory_name: "trajectory_short"
+    trajectory_name: "trajectory_short2"
     total_steps: 100
     pub_rate: 10.0
-    anchors_location:
-      a1: [0.5, 0.5, 0.5]
-      a2: [-0.5, -0.5, 0.5]
-      a3: [0.5, -0.5, -0.5]
-      a4: [-0.5, 0.5, -0.5]
-    tags_location:
-      t1: [0.5, 0.5, 0.25]
-      t2: [-0.5, -0.5, 0.25]
+    anchors:
+      a1:
+        id: "0x0009D6" 
+        position: [-0.32, 0.3, 0.875]
+      a2:
+        id: "0x0009E5"
+        position: [0.32, -0.3, 0.875]
+      a3:
+        id: "0x0016FA" 
+        position: [0.32, 0.3, 0.33]
+      a4:
+        id: "0x0016CF"
+        position: [-0.32, -0.3, 0.33]
+    tags:
+      t1: 
+        id: "0x001155"
+        position: [-0.24, -0.24, -0.06]
+      t2: 
+        id: "0x001397"
+        position: [0.24, 0.24, -0.06]
