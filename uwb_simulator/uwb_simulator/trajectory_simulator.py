@@ -7,7 +7,9 @@ import random
 import matplotlib.pyplot as plt
 from mpl_toolkits.mplot3d import Axes3D
 from scipy.interpolate import CubicSpline
+from scipy.spatial.transform import Rotation as R
 
+import tf_transformations
 import tf2_ros
 from tf2_ros.static_transform_broadcaster import StaticTransformBroadcaster
 from geometry_msgs.msg import TransformStamped
@@ -213,7 +215,24 @@ class TrajectorySimulator(Node):
             uav_transform.transform.translation.x = float(self.uav_trajectory[self.current_point][0])
             uav_transform.transform.translation.y = float(self.uav_trajectory[self.current_point][1])
             uav_transform.transform.translation.z = float(self.uav_trajectory[self.current_point][2])
-            uav_transform.transform.rotation.w = 1.0  # No rotation for simplicity
+
+            # Add small noise to roll and pitch, keep yaw at 0 for simplicity
+            roll_noise = np.deg2rad(np.random.normal(0.0, 1.0))  # ±0.5 degrees of noise
+            pitch_noise = np.deg2rad(np.random.normal(0.0, 1.0)) # ±0.5 degrees of noise
+            yaw = 0.0  # No noise on yaw for simplicity
+
+            # Create a rotation with the noisy roll and pitch
+            noisy_rotation = R.from_euler('xyz', [roll_noise, pitch_noise, yaw])
+            # Assuming noisy_rotation is a 3x3 rotation matrix
+            T_rot = np.eye(4)  # Start with an identity 4x4 matrix
+            T_rot[:3, :3] = noisy_rotation.as_matrix()  # Insert the 3x3 rotation part
+            noisy_quat = tf_transformations.quaternion_from_matrix(T_rot)
+
+            # Assign the quaternion to the transform's rotation
+            uav_transform.transform.rotation.x = noisy_quat[0]
+            uav_transform.transform.rotation.y = noisy_quat[1]
+            uav_transform.transform.rotation.z = noisy_quat[2]
+            uav_transform.transform.rotation.w = noisy_quat[3]
 
             self.tf_broadcaster.sendTransform(uav_transform)
 

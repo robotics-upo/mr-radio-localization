@@ -12,7 +12,7 @@ import tf2_ros
 from tf2_ros import TransformException
 from tf2_ros.buffer import Buffer
 from tf2_ros.transform_listener import TransformListener
-from geometry_msgs.msg import TransformStamped
+from geometry_msgs.msg import TransformStamped, QuaternionStamped
 from std_msgs.msg import Float32, Float32MultiArray
 from visualization_msgs.msg import Marker, MarkerArray  # Import Marker messages
 from eliko_messages.msg import Distances, DistancesList
@@ -62,7 +62,10 @@ class MeasurementSimulatorEliko(Node):
         self.uav_opt_markers = MarkerArray()
         self.arco_gt_markers = MarkerArray()
 
-        # Create measurement publisher tag1
+        #Create publisher to simulate orientation changes
+        self.attitude_pub = self.create_publisher(QuaternionStamped, 'dji_sdk/attitude', 1)
+
+        # Create measurement publisher tags
         self.distances_publisher = self.create_publisher(DistancesList, 'eliko/Distances', 1)
 
         #Publish ground truth errors
@@ -75,10 +78,9 @@ class MeasurementSimulatorEliko(Node):
 
         self.timer1 = self.create_timer(1./self.rate, self.on_timer_t1)
         self.timer2 = self.create_timer(1./self.rate, self.on_timer_t2)
+        self.timer_att = self.create_timer(1./self.rate, self.on_timer_att)
         
 
-        # Calculate error using ground truth and optimized T
-        self.get_logger().warning("callback setup")
         self.optimized_tf_sub = self.create_subscription(
             TransformStamped,
             'eliko_optimization_node/optimized_T',
@@ -143,6 +145,7 @@ class MeasurementSimulatorEliko(Node):
         T_ts = np.linalg.inv(gt_target) @ gt_source
         # # Example converting a rotation matrix to Euler angles
         Te = np.linalg.inv(That_ts) @ T_ts
+
         Re = R.from_matrix(Te[:3,:3])
         te = Te[:3,3]
         dett = np.linalg.norm(te)
@@ -150,16 +153,6 @@ class MeasurementSimulatorEliko(Node):
 
         return detR, dett
     
-    def compute_transformation_errors_alt(self, gt_target, opt_target):
-    
-        # # Example converting a rotation matrix to Euler angles
-        Te = opt_target @ np.linalg.inv(gt_target)
-        Re = R.from_matrix(Te[:3,:3])
-        te = Te[:3,3]
-        dett = np.linalg.norm(te)
-        detR = np.linalg.norm(Re.as_euler('zxy', degrees=True))
-
-        return detR, dett
     
     def create_marker(self, transform, marker_list, frame_id, marker_ns, color):
         
@@ -189,32 +182,30 @@ class MeasurementSimulatorEliko(Node):
     def optimized_tf_cb(self, msg):
 
         try:
-                that_ts = msg
+                that_ts_msg = msg
 
                 gt_target = self.tf_buffer.lookup_transform(
                     'world',
                     'uav_gt',
-                    that_ts.header.stamp)
+                    that_ts_msg.header.stamp)
                                
                 gt_source = self.tf_buffer.lookup_transform(
                     'world',
                     'ground_vehicle',
-                    that_ts.header.stamp)
+                    that_ts_msg.header.stamp)
 
                 #visualization
                 T_w_s = self.transform_stamped_to_matrix(gt_source)
                 T_w_t = self.transform_stamped_to_matrix(gt_target)
-                That_t_s = self.transform_stamped_to_matrix(that_ts)
+                That_t_s = self.transform_stamped_to_matrix(that_ts_msg)
                 That_w_t = T_w_s  @ np.linalg.inv(That_t_s)
                          
                 detR, dett = self.compute_transformation_errors(T_w_s, 
                                                                 T_w_t, 
                                                                 That_t_s)
                 
-                # detR, dett = self.compute_transformation_errors_alt(T_w_t, That_w_t)
 
-
-                opt_target = self.matrix_to_transform_stamped(That_w_t, "world", "uav_opt", that_ts.header.stamp)
+                opt_target = self.matrix_to_transform_stamped(That_w_t, "world", "uav_opt", that_ts_msg.header.stamp)
                 
                 self.create_marker(opt_target, self.uav_opt_markers, "world", "uav_opt_marker", [0.0, 0.0, 1.0])
                 self.create_marker(gt_target, self.uav_gt_markers, "world", "uav_gt_marker", [0.0, 1.0, 0.0])
@@ -235,6 +226,29 @@ class MeasurementSimulatorEliko(Node):
                     f'Could not transform: {ex}')
                 return
         
+    def on_timer_att(self):
+
+        try:
+                t = self.tf_buffer.lookup_transform(
+                    'world',
+                    'uav_gt',
+                    rclpy.time.Time())
+                
+                quaternion_msg = QuaternionStamped()
+                quaternion_msg.header.stamp = t.header.stamp  # Use the same timestamp as the transform
+                quaternion_msg.header.frame_id = t.header.frame_id
+
+                # Copy the orientation (quaternion) from the transform
+                quaternion_msg.quaternion = t.transform.rotation
+
+                # Publish the QuaternionStamped message
+                self.attitude_pub.publish(quaternion_msg)
+
+                
+        except TransformException as ex:
+            self.get_logger().info(
+                f'Could not transform world to uav_gt: {ex}')
+            return
 
     #Publish simulated measures from tag1 to anchors using simulated ground truth
 
