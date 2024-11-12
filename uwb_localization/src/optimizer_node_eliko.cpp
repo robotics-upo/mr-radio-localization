@@ -4,6 +4,7 @@
 #include <tf2_ros/transform_broadcaster.h>
 
 #include <tf2/LinearMath/Quaternion.h>
+#include <tf2/LinearMath/Matrix3x3.h>
 #include <tf2_geometry_msgs/tf2_geometry_msgs.hpp>
 #include "geometry_msgs/msg/quaternion_stamped.hpp"
 
@@ -64,8 +65,8 @@ public:
     tf_publisher_ = this->create_publisher<geometry_msgs::msg::TransformStamped>("eliko_optimization_node/optimized_T", 10);
     tf_broadcaster_ = std::make_shared<tf2_ros::TransformBroadcaster>(this);
 
-    optimizer_time_window_s_ = 0.2; //use only messages in this window for optimization
-    min_measurements_ = 4; //min number of measurements for running optimizer
+    optimizer_time_window_s_ = 0.1; //use only messages in this window for optimization
+    min_measurements_ = 1; //min number of measurements for running optimizer
 
     optimization_timer_ = this->create_wall_timer(
             std::chrono::milliseconds(int(optimizer_time_window_s_*1000)), std::bind(&ElikoOptimizationNode::optimizer_cb_, this));
@@ -79,8 +80,8 @@ public:
         {"0x001155", {-0.24, -0.24, -0.06}}, {"0x001397", {0.24, 0.24, -0.06}}
     };
 
-    eliko_frame_id_ = "arco/eliko"; //frame of the eliko system-> same as robot frame
-    uav_frame_id_ = "base_link";
+    eliko_frame_id_ = "ground_vehicle"; //frame of the eliko system-> arco/eliko, for simulation use "ground_vehicle"
+    uav_frame_id_ = "uav_opt"; //frame of the uav -> "base_link", for simulation use "uav_opt"
 
     // Known roll and pitch values
     roll_ = 0.0;   // Example roll in radians
@@ -112,7 +113,7 @@ private:
 
         rclcpp::Time current_time = this->get_clock()->now();
 
-        if(!distances_t1_.anchor_distances.empty() && current_time - distances_t1_.header.stamp < rclcpp::Duration::from_seconds(optimizer_time_window_s_)){
+        if(!distances_t1_.anchor_distances.empty()){
             for (const auto& distance_msg : distances_t1_.anchor_distances) {
                     // Store distance measurements using (anchor_sn, tag_sn) as key
                     MeasurementKey key(distance_msg.anchor_sn, distance_msg.tag_sn);
@@ -121,7 +122,7 @@ private:
             RCLCPP_DEBUG(this->get_logger(), "[Eliko optimizer node] Using %ld measurements from t1", distances_t1_.anchor_distances.size());
         }
 
-        if(!distances_t2_.anchor_distances.empty() && current_time - distances_t2_.header.stamp < rclcpp::Duration::from_seconds(optimizer_time_window_s_)){
+        if(!distances_t2_.anchor_distances.empty()){
             for (const auto& distance_msg : distances_t2_.anchor_distances) {
                     // Store distance measurements using (anchor_sn, tag_sn) as key
                     MeasurementKey key(distance_msg.anchor_sn, distance_msg.tag_sn);
@@ -159,6 +160,7 @@ private:
             RCLCPP_WARN(this->get_logger(), "[Eliko optimizer node] Not enough data to run optimization");
         }
 
+        /*Clear measurements in this window*/
         current_measurements_.clear();
         distances_t1_.anchor_distances.clear();
         distances_t2_.anchor_distances.clear();
@@ -203,12 +205,18 @@ private:
             std::array<double, 3> smoothed_translation = {0.0, 0.0, 0.0};
             double smoothed_yaw = 0.0;
 
+            // Initialize accumulators for circular mean of yaw
+            double sum_sin = 0.0;
+            double sum_cos = 0.0;
+
             // Accumulate translation and yaw values
             for (const auto& sample : sample_history_) {
                 smoothed_translation[0] += sample.translation[0];
                 smoothed_translation[1] += sample.translation[1];
                 smoothed_translation[2] += sample.translation[2];
-                smoothed_yaw += sample.yaw;
+                // Convert yaw to sine and cosine, then accumulate
+                sum_sin += std::sin(sample.yaw);
+                sum_cos += std::cos(sample.yaw);
             }
 
             // Divide by the number of samples to get the average
@@ -217,8 +225,9 @@ private:
                 smoothed_translation[0] /= num_samples;
                 smoothed_translation[1] /= num_samples;
                 smoothed_translation[2] /= num_samples;
-                smoothed_yaw /= num_samples;
-            }
+                // Calculate average yaw from the averaged sine and cosine
+                smoothed_yaw = std::atan2(sum_sin / num_samples, sum_cos / num_samples);            
+                }
             
             return {smoothed_translation, smoothed_yaw};
     }
@@ -236,7 +245,16 @@ private:
 
         // Extract rotation (Convert Eigen rotation matrix to quaternion)
         Eigen::Matrix3d rotation_matrix_that_ts = T.block<3, 3>(0, 0);
-        Eigen::Quaterniond q_that_ts(rotation_matrix_that_ts);
+        
+        tf2::Matrix3x3 tf2_rotation_matrix(
+        rotation_matrix_that_ts(0, 0), rotation_matrix_that_ts(0, 1), rotation_matrix_that_ts(0, 2),
+        rotation_matrix_that_ts(1, 0), rotation_matrix_that_ts(1, 1), rotation_matrix_that_ts(1, 2),
+        rotation_matrix_that_ts(2, 0), rotation_matrix_that_ts(2, 1), rotation_matrix_that_ts(2, 2)
+        );
+
+        // Create a quaternion from the tf2::Matrix3x3 rotation matrix
+        tf2::Quaternion q_that_ts;
+        tf2_rotation_matrix.getRotation(q_that_ts);
 
         that_ts_msg.transform.rotation.x = q_that_ts.x();
         that_ts_msg.transform.rotation.y = q_that_ts.y();
@@ -257,9 +275,17 @@ private:
         that_st_msg.transform.translation.y = That_st(1, 3);
         that_st_msg.transform.translation.z = That_st(2, 3);
 
-        // Extract rotation (Convert Eigen rotation matrix to quaternion)
+        // Convert Eigen rotation matrix of inverse transform to tf2 Matrix3x3
         Eigen::Matrix3d rotation_matrix_that_st = That_st.block<3, 3>(0, 0);
-        Eigen::Quaterniond q_that_st(rotation_matrix_that_st);
+        tf2::Matrix3x3 tf2_rotation_matrix_that_st(
+            rotation_matrix_that_st(0, 0), rotation_matrix_that_st(0, 1), rotation_matrix_that_st(0, 2),
+            rotation_matrix_that_st(1, 0), rotation_matrix_that_st(1, 1), rotation_matrix_that_st(1, 2),
+            rotation_matrix_that_st(2, 0), rotation_matrix_that_st(2, 1), rotation_matrix_that_st(2, 2)
+        );
+
+        // Create a quaternion from the tf2::Matrix3x3 rotation matrix
+        tf2::Quaternion q_that_st;
+        tf2_rotation_matrix_that_st.getRotation(q_that_st);
 
         that_st_msg.transform.rotation.x = q_that_st.x();
         that_st_msg.transform.rotation.y = q_that_st.y();
@@ -296,8 +322,8 @@ private:
             ceres::Problem problem;
 
             // Temporary variables to hold optimized results
-            std::array<double, 3> temp_t = t_;
-            double temp_yaw = yaw_;
+            std::array<double, 3> t = t_;
+            double yaw = yaw_;
 
             // Dynamically add residuals for available measurements
             for (const auto& [key, distance] : current_measurements_) {
@@ -308,7 +334,7 @@ private:
                     
                     // Create cost function with the received distance
                     ceres::CostFunction* cost_function = UWBResidual::Create(anchor_pos, tag_pos, distance, roll_, pitch_);
-                    problem.AddResidualBlock(cost_function, nullptr, &temp_yaw, temp_t.data());
+                    problem.AddResidualBlock(cost_function, nullptr, &yaw, t.data());
                 }
             }
 
@@ -329,8 +355,8 @@ private:
 
             // Notify and update values if optimization converged
             if (summary.termination_type == ceres::CONVERGENCE){
-                t_ = temp_t;
-                yaw_ = temp_yaw;
+                t_ = t;
+                yaw_ = yaw;
                 return true;
             } 
             

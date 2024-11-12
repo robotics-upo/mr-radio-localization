@@ -14,6 +14,7 @@ from tf2_ros.buffer import Buffer
 from tf2_ros.transform_listener import TransformListener
 from geometry_msgs.msg import TransformStamped
 from std_msgs.msg import Float32, Float32MultiArray
+from visualization_msgs.msg import Marker, MarkerArray  # Import Marker messages
 from eliko_messages.msg import Distances, DistancesList
 import time
 
@@ -57,16 +58,27 @@ class MeasurementSimulatorEliko(Node):
         self.tf_buffer = Buffer()
         self.tf_listener = TransformListener(self.tf_buffer, self)
 
+        self.uav_gt_markers = MarkerArray()
+        self.uav_opt_markers = MarkerArray()
+        self.arco_gt_markers = MarkerArray()
+
         # Create measurement publisher tag1
         self.distances_publisher = self.create_publisher(DistancesList, 'eliko/Distances', 1)
 
         #Publish ground truth errors
         self.error_publisher = self.create_publisher(Float32MultiArray, 'optimization/metrics', 1)
 
+        # Publishers for RViz markers
+        self.opt_target_marker_pub = self.create_publisher(MarkerArray, 'visualization/opt_target_marker', 1)
+        self.gt_source_marker_pub = self.create_publisher(MarkerArray, 'visualization/gt_source_marker', 1)
+        self.gt_target_marker_pub = self.create_publisher(MarkerArray, 'visualization/gt_target_marker', 1)
+
         self.timer1 = self.create_timer(1./self.rate, self.on_timer_t1)
         self.timer2 = self.create_timer(1./self.rate, self.on_timer_t2)
+        
 
         # Calculate error using ground truth and optimized T
+        self.get_logger().warning("callback setup")
         self.optimized_tf_sub = self.create_subscription(
             TransformStamped,
             'eliko_optimization_node/optimized_T',
@@ -97,6 +109,34 @@ class MeasurementSimulatorEliko(Node):
         
         return transformation_matrix
 
+    def matrix_to_transform_stamped(self, matrix, frame_id="world", child_frame_id="uav_opt", stamp=None):
+        
+        # Create a TransformStamped message
+        transform_stamped = TransformStamped()
+        
+        # Set header information
+        transform_stamped.header.frame_id = frame_id
+        transform_stamped.child_frame_id = child_frame_id
+        if stamp is None:
+            transform_stamped.header.stamp = self.get_clock().now().to_msg()
+        else:
+            transform_stamped.header.stamp = stamp
+
+        # Extract translation from the transformation matrix
+        transform_stamped.transform.translation.x = matrix[0, 3]
+        transform_stamped.transform.translation.y = matrix[1, 3]
+        transform_stamped.transform.translation.z = matrix[2, 3]
+
+        # Convert rotation matrix to quaternion
+        quaternion = tf_transformations.quaternion_from_matrix(matrix)
+
+        # Assign quaternion to the TransformStamped message
+        transform_stamped.transform.rotation.x = quaternion[0]
+        transform_stamped.transform.rotation.y = quaternion[1]
+        transform_stamped.transform.rotation.z = quaternion[2]
+        transform_stamped.transform.rotation.w = quaternion[3]
+
+        return transform_stamped
 
     def compute_transformation_errors(self, gt_source, gt_target, That_ts):
     
@@ -109,44 +149,86 @@ class MeasurementSimulatorEliko(Node):
         detR = np.linalg.norm(Re.as_euler('zxy', degrees=True))
 
         return detR, dett
+    
+    def compute_transformation_errors_alt(self, gt_target, opt_target):
+    
+        # # Example converting a rotation matrix to Euler angles
+        Te = opt_target @ np.linalg.inv(gt_target)
+        Re = R.from_matrix(Te[:3,:3])
+        te = Te[:3,3]
+        dett = np.linalg.norm(te)
+        detR = np.linalg.norm(Re.as_euler('zxy', degrees=True))
+
+        return detR, dett
+    
+    def create_marker(self, transform, marker_list, frame_id, marker_ns, color):
+        
+        marker = Marker()
+        marker.header.frame_id = frame_id
+        marker.header.stamp = transform.header.stamp
+        marker.ns = marker_ns
+        marker.id = len(marker_list.markers)
+        marker.type = Marker.SPHERE
+        marker.action = Marker.ADD
+        
+        marker.pose.position.x = transform.transform.translation.x
+        marker.pose.position.y = transform.transform.translation.y
+        marker.pose.position.z = transform.transform.translation.z
+        marker.pose.orientation = transform.transform.rotation
+        marker.scale.x = 0.05
+        marker.scale.y = 0.05
+        marker.scale.z = 0.05
+        marker.color.r = color[0]
+        marker.color.g = color[1]
+        marker.color.b = color[2]
+        marker.color.a = 0.8
+
+        marker_list.markers.append(marker)
 
 
     def optimized_tf_cb(self, msg):
 
         try:
+                that_ts = msg
+
                 gt_target = self.tf_buffer.lookup_transform(
                     'world',
                     'uav_gt',
-                    rclpy.time.Time())
-                
+                    that_ts.header.stamp)
+                               
                 gt_source = self.tf_buffer.lookup_transform(
                     'world',
                     'ground_vehicle',
-                    rclpy.time.Time())
-                
-                # that_ts = self.tf_buffer.lookup_transform(
-                #     'uav_opt',
-                #     'ground_vehicle',
-                #     rclpy.time.Time())
-                
-                that_ts = msg
+                    that_ts.header.stamp)
 
-                        
-                detR, dett = self.compute_transformation_errors(self.transform_stamped_to_matrix(gt_source), 
-                                                                self.transform_stamped_to_matrix(gt_target), 
-                                                                self.transform_stamped_to_matrix(that_ts))
+                #visualization
+                T_w_s = self.transform_stamped_to_matrix(gt_source)
+                T_w_t = self.transform_stamped_to_matrix(gt_target)
+                That_t_s = self.transform_stamped_to_matrix(that_ts)
+                That_w_t = T_w_s  @ np.linalg.inv(That_t_s)
+                         
+                detR, dett = self.compute_transformation_errors(T_w_s, 
+                                                                T_w_t, 
+                                                                That_t_s)
+                
+                # detR, dett = self.compute_transformation_errors_alt(T_w_t, That_w_t)
 
+
+                opt_target = self.matrix_to_transform_stamped(That_w_t, "world", "uav_opt", that_ts.header.stamp)
+                
+                self.create_marker(opt_target, self.uav_opt_markers, "world", "uav_opt_marker", [0.0, 0.0, 1.0])
+                self.create_marker(gt_target, self.uav_gt_markers, "world", "uav_gt_marker", [0.0, 1.0, 0.0])
+                self.create_marker(gt_source, self.arco_gt_markers, "world", "arco_gt_marker", [1.0, 0.0, 0.0])
 
                 metrics = Float32MultiArray()
                 metrics.data = [detR, dett]  # Set both values at once
-
-
                 self.error_publisher.publish(metrics)
 
+                # Publish the MarkerArrays
+                self.gt_source_marker_pub.publish(self.arco_gt_markers)
+                self.gt_target_marker_pub.publish(self.uav_gt_markers)
+                self.opt_target_marker_pub.publish(self.uav_opt_markers)
 
-                # self.get_logger().info(
-                # f'rotation error (deg): {detR}, translation error (m): {dett}', throttle_duration_sec=1)
-                                                        
                                             
         except TransformException as ex:
                 self.get_logger().info(
