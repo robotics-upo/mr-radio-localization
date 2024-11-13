@@ -90,7 +90,7 @@ public:
 
     t_ = {0.0, 0.0, 0.0};       // Translation That_ts (x, y, z)
 
-    moving_average_window_size_ = 5; //moving average sample window (N)
+    moving_average_window_size_ = 10; //moving average sample window (N)
 
     RCLCPP_INFO(this->get_logger(), "Eliko Optimization Node initialized.");
   }
@@ -143,7 +143,7 @@ private:
                 auto [smoothed_translation, smoothed_yaw] = moving_average(sample);
                 //Update for initial estimation of following step
                 t_ = smoothed_translation;
-                yaw_ = smoothed_yaw;
+                yaw_ = normalize_angle(smoothed_yaw);
 
                 // Construct transformation matrix T with optimized yaw, roll, pitch, and translation
                 Eigen::Matrix4d That_ts = build_transformation_matrix(roll_, pitch_, yaw_, t_);
@@ -188,6 +188,13 @@ private:
             m.getRPY(roll_, pitch_, yaw);  // Get roll and pitch, but ignore yaw as we optimize it separately
         }
 
+        // Normalize an angle to the range [-pi, pi]
+    double normalize_angle(double angle) {
+        while (angle > M_PI) angle -= 2.0 * M_PI;
+        while (angle < -M_PI) angle += 2.0 * M_PI;
+        return angle;
+        }
+
 
     std::pair<std::array<double, 3>, double> moving_average(const Sample &sample) {
         
@@ -209,26 +216,41 @@ private:
             double sum_sin = 0.0;
             double sum_cos = 0.0;
 
-            // Accumulate translation and yaw values
-            for (const auto& sample : sample_history_) {
-                smoothed_translation[0] += sample.translation[0];
-                smoothed_translation[1] += sample.translation[1];
-                smoothed_translation[2] += sample.translation[2];
-                // Convert yaw to sine and cosine, then accumulate
-                sum_sin += std::sin(sample.yaw);
-                sum_cos += std::cos(sample.yaw);
+
+            // Initialize total weight
+            double total_weight = 0.0;
+            // Define a decay factor (e.g., between 0 and 1) for exponential weighting
+            double decay_factor = 0.9;  // Adjust as needed for desired weighting effect
+            double weight = 1.0;  // Start with a weight of 1.0 for the most recent sample
+
+            // Iterate over samples in reverse order (from newest to oldest)
+            for (auto it = sample_history_.rbegin(); it != sample_history_.rend(); ++it) {
+                // Apply the weight to each sample's translation and accumulate
+                smoothed_translation[0] += weight * it->translation[0];
+                smoothed_translation[1] += weight * it->translation[1];
+                smoothed_translation[2] += weight * it->translation[2];
+                
+                // Convert yaw to sine and cosine, apply the weight, then accumulate
+                sum_sin += weight * std::sin(it->yaw);
+                sum_cos += weight * std::cos(it->yaw);
+
+                // Accumulate total weight for averaging
+                total_weight += weight;
+
+                // Decay the weight for the next (older) sample
+                weight *= decay_factor;
             }
 
-            // Divide by the number of samples to get the average
-            size_t num_samples = sample_history_.size();
-            if (num_samples > 0) {
-                smoothed_translation[0] /= num_samples;
-                smoothed_translation[1] /= num_samples;
-                smoothed_translation[2] /= num_samples;
-                // Calculate average yaw from the averaged sine and cosine
-                smoothed_yaw = std::atan2(sum_sin / num_samples, sum_cos / num_samples);            
-                }
-            
+            // Normalize to get the weighted average
+            if (total_weight > 0.0) {
+                smoothed_translation[0] /= total_weight;
+                smoothed_translation[1] /= total_weight;
+                smoothed_translation[2] /= total_weight;
+
+                // Calculate weighted average yaw using the weighted sine and cosine
+                smoothed_yaw = std::atan2(sum_sin / total_weight, sum_cos / total_weight);
+            }
+
             return {smoothed_translation, smoothed_yaw};
     }
 
@@ -307,6 +329,8 @@ private:
             Eigen::AngleAxisd(pitch, Eigen::Vector3d::UnitY()) *
             Eigen::AngleAxisd(roll, Eigen::Vector3d::UnitX());
 
+        R = Eigen::Quaterniond(R).normalized().toRotationMatrix();
+        
         Eigen::Matrix4d T = Eigen::Matrix4d::Identity();
         T.block<3, 3>(0, 0) = R;
         T(0, 3) = t[0];
