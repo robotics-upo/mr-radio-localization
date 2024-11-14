@@ -206,7 +206,8 @@ class TrajectorySimulator(Node):
 
             self.get_logger().info(f'Point {self.current_point}/{self.num_points}', throttle_duration_sec=1)
             
-            # Create and send UAV transform
+            ### Create and send UAV transform
+
             uav_transform = TransformStamped()
             uav_transform.header.stamp = self.get_clock().now().to_msg()
             uav_transform.header.frame_id = 'world'
@@ -217,16 +218,17 @@ class TrajectorySimulator(Node):
             uav_transform.transform.translation.z = float(self.uav_trajectory[self.current_point][2])
 
             # Add small noise to roll and pitch, keep yaw at 0 for simplicity
-            roll_noise = np.deg2rad(np.random.normal(0.0, 1.0))  # ±0.5 degrees of noise
-            pitch_noise = np.deg2rad(np.random.normal(0.0, 1.0)) # ±0.5 degrees of noise
-            yaw = 0.0  # No noise on yaw for simplicity
+            roll = np.deg2rad(np.random.normal(0.0, 1.0))  # ±0.5 degrees of noise
+            pitch = np.deg2rad(np.random.normal(0.0, 1.0)) # ±0.5 degrees of noise
+            if self.current_point + 10 < len(self.uav_trajectory):
+                deltax = float(self.uav_trajectory[self.current_point + 10][0]) - uav_transform.transform.translation.x
+                deltay = float(self.uav_trajectory[self.current_point + 10][1]) - uav_transform.transform.translation.y
+            else:
+                # If not enough points, default yaw to zero or handle gracefully
+                deltax, deltay = 1.0, 0.0  # Some default direction
+            yaw = np.arctan2(deltay, deltax)  # Yaw
 
-            # Create a rotation with the noisy roll and pitch
-            noisy_rotation = R.from_euler('xyz', [roll_noise, pitch_noise, yaw])
-            # Assuming noisy_rotation is a 3x3 rotation matrix
-            T_rot = np.eye(4)  # Start with an identity 4x4 matrix
-            T_rot[:3, :3] = noisy_rotation.as_matrix()  # Insert the 3x3 rotation part
-            noisy_quat = tf_transformations.quaternion_from_matrix(T_rot)
+            noisy_quat = tf_transformations.quaternion_from_euler(roll, pitch, yaw)
 
             # Assign the quaternion to the transform's rotation
             uav_transform.transform.rotation.x = noisy_quat[0]
@@ -237,7 +239,7 @@ class TrajectorySimulator(Node):
             self.tf_broadcaster.sendTransform(uav_transform)
 
 
-            # Create and send Ground Vehicle transform
+            ####  Create and send Ground Vehicle transform
             ground_transform = TransformStamped()
             ground_transform.header.stamp = self.get_clock().now().to_msg()
             ground_transform.header.frame_id = 'world'
@@ -246,7 +248,26 @@ class TrajectorySimulator(Node):
             ground_transform.transform.translation.x = float(self.ground_trajectory[self.current_point][0])
             ground_transform.transform.translation.y = float(self.ground_trajectory[self.current_point][1])
             ground_transform.transform.translation.z = float(self.ground_trajectory[self.current_point][2])  # This should be 0 for ground vehicle
-            ground_transform.transform.rotation.w = 1.0  # No rotation for simplicity
+
+
+            # Add small noise to roll and pitch, keep yaw at 0 for simplicity
+            roll = 0.0  
+            pitch = 0.0
+            if self.current_point + 10 < len(self.uav_trajectory):
+                deltax = float(self.ground_trajectory[self.current_point + 10][0]) - ground_transform.transform.translation.x
+                deltay = float(self.ground_trajectory[self.current_point + 10][1]) - ground_transform.transform.translation.y
+            else:
+                # If not enough points, default yaw to zero or handle gracefully
+                deltax, deltay = 1.0, 0.0  # Some default direction
+            yaw = np.arctan2(deltay, deltax)  # Yaw
+
+            quat = tf_transformations.quaternion_from_euler(roll, pitch, yaw)
+
+            # Assign the quaternion to the transform's rotation
+            ground_transform.transform.rotation.x = quat[0]
+            ground_transform.transform.rotation.y = quat[1]
+            ground_transform.transform.rotation.z = quat[2]
+            ground_transform.transform.rotation.w = quat[3]
 
             self.tf_broadcaster.sendTransform(ground_transform)
 
