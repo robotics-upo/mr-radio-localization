@@ -310,16 +310,8 @@ private:
 
         // Extract rotation (Convert Eigen rotation matrix to quaternion)
         Eigen::Matrix3d rotation_matrix_that_ts = T.block<3, 3>(0, 0);
-        
-        tf2::Matrix3x3 tf2_rotation_matrix(
-        rotation_matrix_that_ts(0, 0), rotation_matrix_that_ts(0, 1), rotation_matrix_that_ts(0, 2),
-        rotation_matrix_that_ts(1, 0), rotation_matrix_that_ts(1, 1), rotation_matrix_that_ts(1, 2),
-        rotation_matrix_that_ts(2, 0), rotation_matrix_that_ts(2, 1), rotation_matrix_that_ts(2, 2)
-        );
 
-        // Create a quaternion from the tf2::Matrix3x3 rotation matrix
-        tf2::Quaternion q_that_ts;
-        tf2_rotation_matrix.getRotation(q_that_ts);
+        Eigen::Quaterniond q_that_ts(rotation_matrix_that_ts);
 
         that_ts_msg.transform.rotation.x = q_that_ts.x();
         that_ts_msg.transform.rotation.y = q_that_ts.y();
@@ -342,15 +334,8 @@ private:
 
         // Convert Eigen rotation matrix of inverse transform to tf2 Matrix3x3
         Eigen::Matrix3d rotation_matrix_that_st = That_st.block<3, 3>(0, 0);
-        tf2::Matrix3x3 tf2_rotation_matrix_that_st(
-            rotation_matrix_that_st(0, 0), rotation_matrix_that_st(0, 1), rotation_matrix_that_st(0, 2),
-            rotation_matrix_that_st(1, 0), rotation_matrix_that_st(1, 1), rotation_matrix_that_st(1, 2),
-            rotation_matrix_that_st(2, 0), rotation_matrix_that_st(2, 1), rotation_matrix_that_st(2, 2)
-        );
 
-        // Create a quaternion from the tf2::Matrix3x3 rotation matrix
-        tf2::Quaternion q_that_st;
-        tf2_rotation_matrix_that_st.getRotation(q_that_st);
+        Eigen::Quaterniond q_that_st(rotation_matrix_that_st);
 
         that_st_msg.transform.rotation.x = q_that_st.x();
         that_st_msg.transform.rotation.y = q_that_st.y();
