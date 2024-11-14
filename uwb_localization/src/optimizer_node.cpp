@@ -44,9 +44,9 @@ public:
     pitch_ = 0.0;  // Example pitch in radians
     yaw_ = 0.0;    // Initial guess for yaw
 
-    t_ = {0.0, 0.0, -2.0};       // Translation (x, y, z)
+    t_ = {0.0, 0.0, -2.0};       // Translation That_ts (x, y, z)
 
-    window_size_ = 5;
+    window_size_ = 5; //moving average sample window (N)
 
     RCLCPP_INFO(this->get_logger(), "UWB Optimization Node initialized.");
   }
@@ -267,7 +267,7 @@ private:
 
     std::deque<std::array<double, 3>> translation_history_;
     std::deque<double> yaw_history_;
-    int window_size_;
+    size_t window_size_;
 
 };
 int main(int argc, char** argv) {

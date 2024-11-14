@@ -7,7 +7,9 @@ import random
 import matplotlib.pyplot as plt
 from mpl_toolkits.mplot3d import Axes3D
 from scipy.interpolate import CubicSpline
+from scipy.spatial.transform import Rotation as R
 
+import tf_transformations
 import tf2_ros
 from tf2_ros.static_transform_broadcaster import StaticTransformBroadcaster
 from geometry_msgs.msg import TransformStamped
@@ -26,12 +28,12 @@ class TrajectorySimulator(Node):
                 ('trajectory_name', "trajectory1"),
                 ('total_steps', 100),
                 ('pub_rate', 10.0),
-                ('anchors_location.a1', [0.0, 0.0, 0.0]),
-                ('anchors_location.a2', [0.0, 0.0, 0.0]),
-                ('anchors_location.a3', [0.0, 0.0, 0.0]),
-                ('anchors_location.a4', [0.0, 0.0, 0.0]),
-                ('tags_location.t1', [0.0, 0.0, 0.0]),
-                ('tags_location.t2', [0.0, 0.0, 0.0])
+                ('anchors.a1.position', [0.0, 0.0, 0.0]),
+                ('anchors.a2.position', [0.0, 0.0, 0.0]),
+                ('anchors.a3.position', [0.0, 0.0, 0.0]),
+                ('anchors.a4.position', [0.0, 0.0, 0.0]),
+                ('tags.t1.location', [0.0, 0.0, 0.0]),
+                ('tags.t2.location', [0.0, 0.0, 0.0])
             ])
 
         # Parameters
@@ -39,21 +41,22 @@ class TrajectorySimulator(Node):
         self.uav_start = np.array([0, 0, 2])  # UAV starts at (0, 0, 2)
         self.ground_start = np.array([0, 0, 0])  # Ground vehicle starts at (0, 0, 0)
         self.steps = self.get_parameter('total_steps').value
+        self.meters_per_step = 0.1
         self.smoothness = 10  # Number of interpolation points between key points
 
         self.publish_rate = self.get_parameter('pub_rate').value
 
         # Retrieve anchor and tag locations and convert them to numpy arrays
         anchors_location = {
-            "a1": np.array(self.get_parameter('anchors_location.a1').value),
-            "a2": np.array(self.get_parameter('anchors_location.a2').value),
-            "a3": np.array(self.get_parameter('anchors_location.a3').value),
-            "a4": np.array(self.get_parameter('anchors_location.a4').value),
+            "a1": np.array(self.get_parameter('anchors.a1.position').value),
+            "a2": np.array(self.get_parameter('anchors.a2.position').value),
+            "a3": np.array(self.get_parameter('anchors.a3.position').value),
+            "a4": np.array(self.get_parameter('anchors.a4.position').value),
         }
 
         tags_location = {
-            "t1": np.array(self.get_parameter('tags_location.t1').value),
-            "t2": np.array(self.get_parameter('tags_location.t2').value),
+            "t1": np.array(self.get_parameter('tags.t1.location').value),
+            "t2": np.array(self.get_parameter('tags.t2.location').value),
         }
 
         self.load_trajectory = self.get_parameter('load_trajectory').value
@@ -133,7 +136,7 @@ class TrajectorySimulator(Node):
 
     def generate_trajectory(self, start, steps, is_uav=False, smooth = False):
         key_points = [start]
-        direction = np.array([1, 0, 0])  # Start heading along the x-axis
+        direction = np.array([self.meters_per_step, 0, 0])  # Start heading along the x-axis, 10 cm each step
         curvature, few_steps = self.random_curvature()
         j = 0
 
@@ -212,7 +215,24 @@ class TrajectorySimulator(Node):
             uav_transform.transform.translation.x = float(self.uav_trajectory[self.current_point][0])
             uav_transform.transform.translation.y = float(self.uav_trajectory[self.current_point][1])
             uav_transform.transform.translation.z = float(self.uav_trajectory[self.current_point][2])
-            uav_transform.transform.rotation.w = 1.0  # No rotation for simplicity
+
+            # Add small noise to roll and pitch, keep yaw at 0 for simplicity
+            roll_noise = np.deg2rad(np.random.normal(0.0, 1.0))  # ±0.5 degrees of noise
+            pitch_noise = np.deg2rad(np.random.normal(0.0, 1.0)) # ±0.5 degrees of noise
+            yaw = 0.0  # No noise on yaw for simplicity
+
+            # Create a rotation with the noisy roll and pitch
+            noisy_rotation = R.from_euler('xyz', [roll_noise, pitch_noise, yaw])
+            # Assuming noisy_rotation is a 3x3 rotation matrix
+            T_rot = np.eye(4)  # Start with an identity 4x4 matrix
+            T_rot[:3, :3] = noisy_rotation.as_matrix()  # Insert the 3x3 rotation part
+            noisy_quat = tf_transformations.quaternion_from_matrix(T_rot)
+
+            # Assign the quaternion to the transform's rotation
+            uav_transform.transform.rotation.x = noisy_quat[0]
+            uav_transform.transform.rotation.y = noisy_quat[1]
+            uav_transform.transform.rotation.z = noisy_quat[2]
+            uav_transform.transform.rotation.w = noisy_quat[3]
 
             self.tf_broadcaster.sendTransform(uav_transform)
 
