@@ -1,13 +1,15 @@
 measurement_simulator:
   ros__parameters:
-    measurement_noise_std: 0.01
+    measurement_noise_std: 0.1
     pub_rate: 10.0
+    use_sim_time: True
 trajectory_simulator:
   ros__parameters:
     load_trajectory: True
-    trajectory_name: "trajectory_short"
+    trajectory_name: "trajectory_short3"
     total_steps: 100
     pub_rate: 10.0
+    use_sim_time: True
     anchors:
       a1:
         id: "0x0009D6" 

@@ -149,7 +149,7 @@ class MeasurementSimulatorEliko(Node):
         Te = np.linalg.inv(That_t_s) @ T_ts
 
         Re = R.from_matrix(Te[:3,:3])
-        Re_rpy = Re.as_euler('zxy', degrees=True)
+        Re_rpy = Re.as_euler('zyx', degrees=True)
         te = Te[:3,3]
         dett = np.linalg.norm(te)
         detR = np.linalg.norm(Re_rpy)
@@ -161,7 +161,7 @@ class MeasurementSimulatorEliko(Node):
         Te = np.linalg.inv(T_w_t) @ T_w_s
 
         Re = R.from_matrix(Te[:3,:3])
-        Re_rpy = Re.as_euler('zxy', degrees=True)
+        Re_rpy = Re.as_euler('zyx', degrees=True)
         te = Te[:3,3]
         dett = np.linalg.norm(te)
         detR = np.linalg.norm(Re_rpy)
@@ -202,12 +202,12 @@ class MeasurementSimulatorEliko(Node):
                 gt_target = self.tf_buffer.lookup_transform(
                     'world',
                     'uav_gt',
-                    that_ts_msg.header.stamp)
+                    rclpy.time.Time())
                                
                 gt_source = self.tf_buffer.lookup_transform(
                     'world',
                     'ground_vehicle',
-                    that_ts_msg.header.stamp)
+                    rclpy.time.Time())
 
                 T_w_s = self.transform_stamped_to_matrix(gt_source)
                 T_w_t = self.transform_stamped_to_matrix(gt_target)

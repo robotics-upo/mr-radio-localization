@@ -142,7 +142,6 @@ private:
 
         //Ensure at least one measurement from each of the tags
         if(measurement_map.size() >= min_measurements_){
-            RCLCPP_INFO(this->get_logger(), "[Eliko batchopt node] Creating new step with %ld measurements", measurement_map.size());
             // Add the new measurement map to the vector
             batch_measurements_.push_back(measurement_map);
 
@@ -156,6 +155,8 @@ private:
 
             batch_states_.push_back(new_state);
 
+            //RCLCPP_INFO(this->get_logger(), "[Eliko batchopt node] New step at timestamp %.2f with %ld measurements", new_state.timestamp.seconds(), measurement_map.size());
+
         }
 
         distances_t1_.anchor_distances.clear();
@@ -166,7 +167,6 @@ private:
 
     void batchopt_cb_() {
 
-        rclcpp::Time current_time = this->get_clock()->now();
 
         if(!batch_measurements_.empty()){
 
@@ -178,18 +178,24 @@ private:
 
                 for (auto& state : batch_states_) {        
                     // Construct transformation matrix T for all batch with optimized yaw, roll, pitch, and translation
+                    
+                    /*Run moving average*/
+                    auto [smoothed_translation, smoothed_yaw] = moving_average(state);
+                    //Update for initial estimation of following step
+                    state.translation = smoothed_translation;
+                    state.yaw = normalize_angle(smoothed_yaw);
+
                     Eigen::Matrix4d That_ts = build_transformation_matrix(state.roll, state.pitch, state.yaw, state.translation);
                     batchopt_T_.push_back(That_ts);
+
                 }
 
-                publish_transform(batchopt_T_.back(), current_time);
-                
-                // /*Run moving average*/
-                // State sample {t_, yaw_, current_time};
-                // auto [smoothed_translation, smoothed_yaw] = moving_average(sample);
-                // //Update for initial estimation of following step
-                // t_ = smoothed_translation;
-                // yaw_ = normalize_angle(smoothed_yaw);
+                publish_transform(batchopt_T_.back(), batch_states_.back().timestamp);
+
+                //Update for next initial estimations
+                t_ = batch_states_.back().translation;
+                yaw_ = batch_states_.back().yaw;
+
 
             }
 
@@ -242,13 +248,13 @@ private:
     std::pair<Eigen::Vector3d, double> moving_average(const State &sample) {
         
             // Add the new sample with timestamp
-            batch_states_.push_back(sample);
+            moving_average_states_.push_back(sample);
 
             // Remove samples that are too old or if we exceed the window size
-            while (!batch_states_.empty() &&
-                (batch_states_.size() > moving_average_window_size_ || 
-                    sample.timestamp - batch_states_.front().timestamp > rclcpp::Duration::from_seconds(sliding_window_s_*moving_average_window_size_))) {
-                batch_states_.pop_front();
+            while (!moving_average_states_.empty() &&
+                (moving_average_states_.size() > moving_average_window_size_ || 
+                    sample.timestamp - moving_average_states_.front().timestamp > rclcpp::Duration::from_seconds(sliding_window_s_*moving_average_window_size_))) {
+                moving_average_states_.pop_front();
             }
 
             // Initialize smoothed values
@@ -267,7 +273,7 @@ private:
             double weight = 1.0;  // Start with a weight of 1.0 for the most recent sample
 
             // Iterate over samples in reverse order (from newest to oldest)
-            for (auto it = batch_states_.rbegin(); it != batch_states_.rend(); ++it) {
+            for (auto it = moving_average_states_.rbegin(); it != moving_average_states_.rend(); ++it) {
                 // Apply the weight to each sample's translation and accumulate
                 smoothed_translation[0] += weight * it->translation[0];
                 smoothed_translation[1] += weight * it->translation[1];
@@ -375,19 +381,7 @@ private:
 
             // Temporary variables to hold optimized results
 
-            // Eigen::Vector3d t = t_;
-            // double yaw = yaw_;
             std::deque<State> batch_states = batch_states_;
-
-
-            // Ensure state window matches current measurement window size
-            // if (state_window_.size() != batch_measurements_.size()) {
-            //     state_window_.resize(batch_measurements_.size());
-                // for (auto& state : state_window_) {
-                //     state.translation = t_;  // Initial guess for position
-                //     state.yaw = yaw;  // Initial guess for yaw
-                //     }
-            //}
 
 
             for(size_t i=0; i < batch_measurements_.size(); ++i){
@@ -438,9 +432,6 @@ private:
             if (summary.termination_type == ceres::CONVERGENCE){
                 
                 batch_states_ = batch_states;
-                State last_optimized_state = batch_states_.back();
-                t_ = last_optimized_state.translation;
-                yaw_ = last_optimized_state.yaw;
                 
                 return true;
             } 
@@ -539,6 +530,7 @@ private:
     Eigen::Vector3d t_;  // Translation vector (x, y, z)
 
     std::deque<State> batch_states_;
+    std::deque<State> moving_average_states_;
 
     size_t moving_average_window_size_;
     size_t min_measurements_;

@@ -28,8 +28,26 @@ def generate_launch_description():
         name='trajectory_simulator',
         parameters=[config]
         )
+    
+    node3 = Node(
+        package='uwb_simulator',
+        executable='clock_publisher',
+        name='clock_publisher',
+        parameters=[config]
+        )
+    
+    node4 = Node(
+            package='rviz2',
+            executable='rviz2',
+            name='rviz2',
+            output='screen',
+            parameters=[{'use_sim_time': True}],
+        )
 
     ld.add_action(node1)
     ld.add_action(node2)
+    ld.add_action(node3)
+    ld.add_action(node4)
+
     
     return ld

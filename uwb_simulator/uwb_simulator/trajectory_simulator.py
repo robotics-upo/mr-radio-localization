@@ -228,13 +228,15 @@ class TrajectorySimulator(Node):
                 deltax, deltay = 1.0, 0.0  # Some default direction
             yaw = np.arctan2(deltay, deltax)  # Yaw
 
-            noisy_quat = tf_transformations.quaternion_from_euler(roll, pitch, yaw)
+            # Assuming `matrix` is a 3x3 rotation matrix
+            rotation = R.from_euler('zyx', [yaw, pitch, roll])
+            quat = rotation.as_quat()  # Returns [qx, qy, qz, qw]
 
             # Assign the quaternion to the transform's rotation
-            uav_transform.transform.rotation.x = noisy_quat[0]
-            uav_transform.transform.rotation.y = noisy_quat[1]
-            uav_transform.transform.rotation.z = noisy_quat[2]
-            uav_transform.transform.rotation.w = noisy_quat[3]
+            uav_transform.transform.rotation.x = quat[0]
+            uav_transform.transform.rotation.y = quat[1]
+            uav_transform.transform.rotation.z = quat[2]
+            uav_transform.transform.rotation.w = quat[3]
 
             self.tf_broadcaster.sendTransform(uav_transform)
 
@@ -261,7 +263,9 @@ class TrajectorySimulator(Node):
                 deltax, deltay = 1.0, 0.0  # Some default direction
             yaw = np.arctan2(deltay, deltax)  # Yaw
 
-            quat = tf_transformations.quaternion_from_euler(roll, pitch, yaw)
+            # Assuming `matrix` is a 3x3 rotation matrix
+            rotation = R.from_euler('zyx', [yaw, pitch, roll])
+            quat = rotation.as_quat()  # Returns [qx, qy, qz, qw]
 
             # Assign the quaternion to the transform's rotation
             ground_transform.transform.rotation.x = quat[0]
