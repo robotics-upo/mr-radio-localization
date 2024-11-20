@@ -40,36 +40,42 @@ struct PairHash {
 struct State {
     Eigen::Vector3d translation;
     double yaw;
+    double roll;
+    double pitch;
     rclcpp::Time timestamp;  // e.g., seconds since epoch
 };
 
 
-class ElikoOptimizationNode : public rclcpp::Node {
+class ElikoBatchOptNode : public rclcpp::Node {
 
 public:
 
-    ElikoOptimizationNode() : Node("eliko_optimization_node"), roll_(0.0), pitch_(0.0), yaw_(0.0) {
+    ElikoBatchOptNode() : Node("eliko_batchopt_node"), roll_(0.0), pitch_(0.0), yaw_(0.0) {
     
 
     //Subscribe to distances publisher
     eliko_distances_sub_ = this->create_subscription<eliko_messages::msg::DistancesList>(
-                "/eliko/Distances", 10, std::bind(&ElikoOptimizationNode::distances_coords_cb_, this, std::placeholders::_1));
+                "/eliko/Distances", 10, std::bind(&ElikoBatchOptNode::distances_coords_cb_, this, std::placeholders::_1));
     
     // eliko_anchors_coords_sub_ = this->create_subscription<eliko_messages::msg::AnchorCoordsList>(
-    //             "/eliko/AnchorCoords", 10, std::bind(&ElikoOptimizationNode::anchors_coords_cb_, this, std::placeholders::_1));
+    //             "/eliko/AnchorCoords", 10, std::bind(&ElikoBatchOptNode::anchors_coords_cb_, this, std::placeholders::_1));
     
     dji_attitude_sub_ = this->create_subscription<geometry_msgs::msg::QuaternionStamped>(
-                "/dji_sdk/attitude", 10, std::bind(&ElikoOptimizationNode::attitude_cb_, this, std::placeholders::_1));
+                "/dji_sdk/attitude", 10, std::bind(&ElikoBatchOptNode::attitude_cb_, this, std::placeholders::_1));
 
     // Create publisher/broadcaster for optimized transformation
     tf_publisher_ = this->create_publisher<geometry_msgs::msg::TransformStamped>("eliko_optimization_node/optimized_T", 10);
     tf_broadcaster_ = std::make_shared<tf2_ros::TransformBroadcaster>(this);
 
-    optimizer_time_window_s_ = 0.1; //use only messages in this window for optimization
+    sliding_window_s_ = 0.1; //use only messages in this window for optimization
+    batch_opt_window_s_ = 1.0;
     min_measurements_ = 1; //min number of measurements for running optimizer
 
-    optimization_timer_ = this->create_wall_timer(
-            std::chrono::milliseconds(int(optimizer_time_window_s_*1000)), std::bind(&ElikoOptimizationNode::optimizer_cb_, this));
+    sliding_window_timer_ = this->create_wall_timer(
+            std::chrono::milliseconds(int(sliding_window_s_*1000)), std::bind(&ElikoBatchOptNode::sliding_window_cb_, this));
+
+    batch_optimization_timer_ = this->create_wall_timer(
+            std::chrono::milliseconds(int(batch_opt_window_s_*1000)), std::bind(&ElikoBatchOptNode::batchopt_cb_, this));
 
     anchor_positions_ = {
         {"0x0009D6", {-0.32, 0.3, 0.875}}, {"0x0009E5", {0.32, -0.3, 0.875}},
@@ -91,7 +97,7 @@ public:
     t_ = Eigen::Vector3d(0.0, 0.0, 0.0);       // Translation That_ts (x, y, z)
 
     moving_average_window_size_ = 10; //moving average sample window (N)
-
+    
     RCLCPP_INFO(this->get_logger(), "Eliko Optimization Node initialized.");
   }
 
@@ -104,66 +110,109 @@ private:
             else if(msg->anchor_distances[0].tag_sn == "0x001397") distances_t2_ = *msg;
 
             for (const auto& distance_msg : msg->anchor_distances) {
-                RCLCPP_INFO(this->get_logger(), "[Eliko optimizer node] Distance received from Anchor %s to tag %s: %.2f cm", distance_msg.anchor_sn.c_str(), distance_msg.tag_sn.c_str(), distance_msg.distance);
+                RCLCPP_INFO(this->get_logger(), "[Eliko batchopt node] Distance received from Anchor %s to tag %s: %.2f cm", distance_msg.anchor_sn.c_str(), distance_msg.tag_sn.c_str(), distance_msg.distance);
             }
 
     }
 
-    void optimizer_cb_() {
+    void sliding_window_cb_() {
 
         rclcpp::Time current_time = this->get_clock()->now();
+
+        std::unordered_map<MeasurementKey, float, PairHash> measurement_map;
 
         if(!distances_t1_.anchor_distances.empty()){
             for (const auto& distance_msg : distances_t1_.anchor_distances) {
                     // Store distance measurements using (anchor_sn, tag_sn) as key
                     MeasurementKey key(distance_msg.anchor_sn, distance_msg.tag_sn);
-                    current_measurements_[key] = distance_msg.distance / 100.0; // Convert to meters
+                    measurement_map[key] = distance_msg.distance / 100.0; // Convert to meters
                 }
-            RCLCPP_DEBUG(this->get_logger(), "[Eliko optimizer node] Using %ld measurements from t1", distances_t1_.anchor_distances.size());
+            RCLCPP_DEBUG(this->get_logger(), "[Eliko batchopt node] Using %ld measurements from t1", distances_t1_.anchor_distances.size());
         }
 
         if(!distances_t2_.anchor_distances.empty()){
             for (const auto& distance_msg : distances_t2_.anchor_distances) {
                     // Store distance measurements using (anchor_sn, tag_sn) as key
                     MeasurementKey key(distance_msg.anchor_sn, distance_msg.tag_sn);
-                    current_measurements_[key] = distance_msg.distance / 100.0; // Convert to meters
+                    measurement_map[key] = distance_msg.distance / 100.0; // Convert to meters
                 }
-            RCLCPP_DEBUG(this->get_logger(), "[Eliko optimizer node] Using %ld measurements from t2", distances_t2_.anchor_distances.size());
+            RCLCPP_DEBUG(this->get_logger(), "[Eliko batchopt node] Using %ld measurements from t2", distances_t2_.anchor_distances.size());
         }
- 
+
+
         //Ensure at least one measurement from each of the tags
-        if(current_measurements_.size() >= min_measurements_){
-            RCLCPP_INFO(this->get_logger(), "[Eliko optimizer node] Running optimizer with %ld measurements", current_measurements_.size());
-            
+        if(measurement_map.size() >= min_measurements_){
+            // Add the new measurement map to the vector
+            batch_measurements_.push_back(measurement_map);
+
+            //Add state to optimization with initial guesses
+            State new_state;
+            new_state.translation = t_;
+            new_state.yaw = yaw_;
+            new_state.roll = roll_;
+            new_state.pitch = pitch_;
+            new_state.timestamp = current_time;
+
+            batch_states_.push_back(new_state);
+
+            //RCLCPP_INFO(this->get_logger(), "[Eliko batchopt node] New step at timestamp %.2f with %ld measurements", new_state.timestamp.seconds(), measurement_map.size());
+
+        }
+
+        distances_t1_.anchor_distances.clear();
+        distances_t2_.anchor_distances.clear();
+
+    }
+
+
+    void batchopt_cb_() {
+
+
+        if(!batch_measurements_.empty()){
+
+            RCLCPP_INFO(this->get_logger(), "[Eliko batchopt node] Optimizing batch of %ld steps", batch_measurements_.size());
+
             //Update transforms after convergence
             if(run_optimization()){
-                
-                /*Run moving average*/
-                State sample {t_, yaw_, current_time};
-                auto [smoothed_translation, smoothed_yaw] = moving_average(sample);
-                //Update for initial estimation of following step
-                t_ = smoothed_translation;
-                yaw_ = normalize_angle(smoothed_yaw);
 
-                // Construct transformation matrix T with optimized yaw, roll, pitch, and translation
-                Eigen::Matrix4d That_ts = build_transformation_matrix(roll_, pitch_, yaw_, t_);
-                publish_transform(That_ts, current_time);
+
+                for (auto& state : batch_states_) {        
+                    // Construct transformation matrix T for all batch with optimized yaw, roll, pitch, and translation
+                    
+                    /*Run moving average*/
+                    auto [smoothed_translation, smoothed_yaw] = moving_average(state);
+                    //Update for initial estimation of following step
+                    state.translation = smoothed_translation;
+                    state.yaw = normalize_angle(smoothed_yaw);
+
+                    Eigen::Matrix4d That_ts = build_transformation_matrix(state.roll, state.pitch, state.yaw, state.translation);
+                    batchopt_T_.push_back(That_ts);
+
+                }
+
+                publish_transform(batchopt_T_.back(), batch_states_.back().timestamp);
+
+                //Update for next initial estimations
+                t_ = batch_states_.back().translation;
+                yaw_ = batch_states_.back().yaw;
+
+
             }
 
             else{
-                RCLCPP_INFO(this->get_logger(), "[Eliko optimizer node] Optimizer did not converge");
+                RCLCPP_INFO(this->get_logger(), "[Eliko batchopt node] Optimizer did not converge");
             }
 
 
         }
+
         else{
-            RCLCPP_WARN(this->get_logger(), "[Eliko optimizer node] Not enough data to run optimization");
+            RCLCPP_WARN(this->get_logger(), "[Eliko batchopt node] Not enough data to run optimization");
         }
 
-        /*Clear measurements in this window*/
-        current_measurements_.clear();
-        distances_t1_.anchor_distances.clear();
-        distances_t2_.anchor_distances.clear();
+        batch_measurements_.clear();
+        batch_states_.clear();
+        batchopt_T_.clear();
 
     }
 
@@ -174,7 +223,7 @@ private:
 //             Eigen::Vector3d position(anchor_coord.x_coord, anchor_coord.y_coord, anchor_coord.z_coord);
 //             anchor_positions_[anchor_coord.anchor_sn] = position;
 
-//             RCLCPP_DEBUG(this->get_logger(), "[Eliko optimizer node] Anchor %s coordinates: [%.2f, %.2f, %.2f]", anchor_coord.anchor_sn.c_str(), position[0], position[1], position[2]);
+//             RCLCPP_DEBUG(this->get_logger(), "[Eliko batchopt node] Anchor %s coordinates: [%.2f, %.2f, %.2f]", anchor_coord.anchor_sn.c_str(), position[0], position[1], position[2]);
 //         }
 //   }
 
@@ -199,13 +248,13 @@ private:
     std::pair<Eigen::Vector3d, double> moving_average(const State &sample) {
         
             // Add the new sample with timestamp
-            sample_history_.push_back(sample);
+            moving_average_states_.push_back(sample);
 
             // Remove samples that are too old or if we exceed the window size
-            while (!sample_history_.empty() &&
-                (sample_history_.size() > moving_average_window_size_ || 
-                    sample.timestamp - sample_history_.front().timestamp > rclcpp::Duration::from_seconds(optimizer_time_window_s_*moving_average_window_size_))) {
-                sample_history_.pop_front();
+            while (!moving_average_states_.empty() &&
+                (moving_average_states_.size() > moving_average_window_size_ || 
+                    sample.timestamp - moving_average_states_.front().timestamp > rclcpp::Duration::from_seconds(sliding_window_s_*moving_average_window_size_))) {
+                moving_average_states_.pop_front();
             }
 
             // Initialize smoothed values
@@ -224,7 +273,7 @@ private:
             double weight = 1.0;  // Start with a weight of 1.0 for the most recent sample
 
             // Iterate over samples in reverse order (from newest to oldest)
-            for (auto it = sample_history_.rbegin(); it != sample_history_.rend(); ++it) {
+            for (auto it = moving_average_states_.rbegin(); it != moving_average_states_.rend(); ++it) {
                 // Apply the weight to each sample's translation and accumulate
                 smoothed_translation[0] += weight * it->translation[0];
                 smoothed_translation[1] += weight * it->translation[1];
@@ -291,7 +340,7 @@ private:
 
         // Convert Eigen rotation matrix of inverse transform to tf2 Matrix3x3
         Eigen::Matrix3d rotation_matrix_that_st = That_st.block<3, 3>(0, 0);
-    
+
         Eigen::Quaterniond q_that_st(rotation_matrix_that_st);
 
         that_st_msg.transform.rotation.x = q_that_st.x();
@@ -331,20 +380,37 @@ private:
             ceres::Problem problem;
 
             // Temporary variables to hold optimized results
-            Eigen::Vector3d t = t_;
-            double yaw = yaw_;
 
-            // Dynamically add residuals for available measurements
-            for (const auto& [key, distance] : current_measurements_) {
-                const auto& [anchor_sn, tag_sn] = key;
-                if (anchor_positions_.count(anchor_sn) > 0 && tag_positions_.count(tag_sn) > 0) {
-                    Eigen::Vector3d anchor_pos = anchor_positions_[anchor_sn];
-                    Eigen::Vector3d tag_pos = tag_positions_[tag_sn];
-                    
-                    // Create cost function with the received distance
-                    ceres::CostFunction* cost_function = UWBResidual::Create(anchor_pos, tag_pos, distance, roll_, pitch_);
-                    problem.AddResidualBlock(cost_function, nullptr, &yaw, t.data());
+            std::deque<State> batch_states = batch_states_;
+
+
+            for(size_t i=0; i < batch_measurements_.size(); ++i){
+
+                const auto& measurement_map = batch_measurements_[i];
+                auto& state = batch_states[i];
+
+                // Dynamically add residuals for available measurements
+                for (const auto& [key, distance] : measurement_map) {
+                    const auto& [anchor_sn, tag_sn] = key;
+                    if (anchor_positions_.count(anchor_sn) > 0 && tag_positions_.count(tag_sn) > 0) {
+                        Eigen::Vector3d anchor_pos = anchor_positions_[anchor_sn];
+                        Eigen::Vector3d tag_pos = tag_positions_[tag_sn];
+                        
+                        // Create cost function with the received distance
+                        ceres::CostFunction* cost_function = UWBResidual::Create(anchor_pos, tag_pos, distance, roll_, pitch_);
+                        problem.AddResidualBlock(cost_function, nullptr, &state.yaw, state.translation.data());
+                    }
                 }
+            }
+
+            // Smoothness Constraints between consecutive states
+            for (size_t i = 1; i < batch_states.size(); ++i) {
+                State& prev_state = batch_states[i - 1];
+                State& curr_state = batch_states[i];
+
+                ceres::CostFunction* smoothness_cost = SmoothnessResidual::Create();
+                problem.AddResidualBlock(smoothness_cost, nullptr, prev_state.translation.data(), &prev_state.yaw,
+                                        curr_state.translation.data(), &curr_state.yaw);
             }
 
             // Configure solver options
@@ -364,14 +430,41 @@ private:
 
             // Notify and update values if optimization converged
             if (summary.termination_type == ceres::CONVERGENCE){
-                t_ = t;
-                yaw_ = yaw;
+                
+                batch_states_ = batch_states;
+                
                 return true;
             } 
             
             return false;
 
     }
+
+
+  struct SmoothnessResidual {
+        SmoothnessResidual(double weight = 1.0) : weight_(weight) {}
+
+        template <typename T>
+        bool operator()(const T* const prev_position, const T* const prev_yaw,
+                        const T* const curr_position, const T* const curr_yaw, T* residual) const {
+            // Smoothness penalty on position
+            residual[0] = T(weight_) * (curr_position[0] - prev_position[0]);
+            residual[1] = T(weight_) * (curr_position[1] - prev_position[1]);
+            residual[2] = T(weight_) * (curr_position[2] - prev_position[2]);
+
+            // Smoothness penalty on yaw (angle wrap-around handled separately if needed)
+            residual[3] = T(weight_) * (curr_yaw[0] - prev_yaw[0]);
+            
+            return true;
+        }
+
+        static ceres::CostFunction* Create(double weight = 1.0) {
+            return (new ceres::AutoDiffCostFunction<SmoothnessResidual, 4, 3, 1, 3, 1>(
+                new SmoothnessResidual(weight)));
+        }
+
+        double weight_;
+    };
 
   // Residual struct for Ceres
   struct UWBResidual {
@@ -416,10 +509,12 @@ private:
     rclcpp::Subscription<eliko_messages::msg::DistancesList>::SharedPtr eliko_distances_sub_;
     // rclcpp::Subscription<eliko_messages::msg::AnchorCoordsList>::SharedPtr eliko_anchors_coords_sub_;
     rclcpp::Subscription<geometry_msgs::msg::QuaternionStamped>::SharedPtr dji_attitude_sub_;
-    rclcpp::TimerBase::SharedPtr optimization_timer_;
+    rclcpp::TimerBase::SharedPtr sliding_window_timer_, batch_optimization_timer_;
 
     eliko_messages::msg::DistancesList distances_t1_, distances_t2_;
-    std::unordered_map<MeasurementKey, float, PairHash> current_measurements_;
+    std::vector<std::unordered_map<MeasurementKey, float, PairHash>> batch_measurements_;
+    
+    std::vector<Eigen::Matrix4d> batchopt_T_;
 
     rclcpp::Publisher<geometry_msgs::msg::TransformStamped>::SharedPtr tf_publisher_;
     std::shared_ptr<tf2_ros::TransformBroadcaster> tf_broadcaster_;
@@ -434,16 +529,18 @@ private:
     double yaw_;
     Eigen::Vector3d t_;  // Translation vector (x, y, z)
 
-    std::deque<State> sample_history_;
+    std::deque<State> batch_states_;
+    std::deque<State> moving_average_states_;
 
     size_t moving_average_window_size_;
     size_t min_measurements_;
-    double optimizer_time_window_s_;
+    double sliding_window_s_;
+    double batch_opt_window_s_;
 
 };
 int main(int argc, char** argv) {
     rclcpp::init(argc, argv);
-    auto node = std::make_shared<ElikoOptimizationNode>();
+    auto node = std::make_shared<ElikoBatchOptNode>();
     node->set_parameter(rclcpp::Parameter("use_sim_time", true));
     rclcpp::spin(node);
     rclcpp::shutdown();

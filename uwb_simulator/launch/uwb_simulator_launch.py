@@ -28,8 +28,17 @@ def generate_launch_description():
         name='trajectory_simulator',
         parameters=[config]
         )
+    
+    node3 = Node(
+        package='uwb_simulator',
+        executable='clock_publisher',
+        name='clock_publisher',
+        parameters=[config]
+        )
 
     ld.add_action(node1)
     ld.add_action(node2)
+    ld.add_action(node3)
+
     
     return ld

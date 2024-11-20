@@ -27,7 +27,8 @@ setup(
         'console_scripts': [
             'trajectory_simulator = uwb_simulator.trajectory_simulator:main',
             'measurement_simulator = uwb_simulator.measurement_simulator:main',
-            'measurement_simulator_eliko = uwb_simulator.measurement_simulator_eliko:main'
+            'measurement_simulator_eliko = uwb_simulator.measurement_simulator_eliko:main',
+            'clock_publisher = uwb_simulator.clock_publisher:main'
 
         ],
     },

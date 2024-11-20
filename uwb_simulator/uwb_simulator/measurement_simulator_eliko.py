@@ -100,11 +100,12 @@ class MeasurementSimulatorEliko(Node):
         qz = transform_stamped.transform.rotation.z
         qw = transform_stamped.transform.rotation.w
         
+        transformation_matrix = np.eye(4)
         # Convert quaternion to a rotation matrix
-        rotation_matrix = tf_transformations.quaternion_matrix([qx, qy, qz, qw])
+        rotation_matrix = R.from_quat([qx, qy, qz, qw]).as_matrix()
         
         # Add translation to the rotation matrix
-        transformation_matrix = rotation_matrix
+        transformation_matrix[:3,:3] = rotation_matrix
         transformation_matrix[0, 3] = tx
         transformation_matrix[1, 3] = ty
         transformation_matrix[2, 3] = tz
@@ -129,8 +130,9 @@ class MeasurementSimulatorEliko(Node):
         transform_stamped.transform.translation.y = matrix[1, 3]
         transform_stamped.transform.translation.z = matrix[2, 3]
 
-        # Convert rotation matrix to quaternion
-        quaternion = tf_transformations.quaternion_from_matrix(matrix)
+        # Assuming `matrix` is a 3x3 rotation matrix
+        rotation = R.from_matrix(matrix[:3,:3])
+        quaternion = rotation.as_quat()  # Returns [qx, qy, qz, qw]
 
         # Assign quaternion to the TransformStamped message
         transform_stamped.transform.rotation.x = quaternion[0]
@@ -140,16 +142,29 @@ class MeasurementSimulatorEliko(Node):
 
         return transform_stamped
 
-    def compute_transformation_errors(self, gt_source, gt_target, That_ts):
+    def compute_transformation_errors(self, T_w_s, T_w_t, That_t_s):
     
-        T_ts = np.linalg.inv(gt_target) @ gt_source
+        T_ts = np.linalg.inv(T_w_t) @ T_w_s
         # # Example converting a rotation matrix to Euler angles
-        Te = np.linalg.inv(That_ts) @ T_ts
+        Te = np.linalg.inv(That_t_s) @ T_ts
 
         Re = R.from_matrix(Te[:3,:3])
+        Re_rpy = Re.as_euler('zyx', degrees=True)
         te = Te[:3,3]
         dett = np.linalg.norm(te)
-        detR = np.linalg.norm(Re.as_euler('zxy', degrees=True))
+        detR = np.linalg.norm(Re_rpy)
+
+        return detR, dett
+    
+    def compute_transformation_errors_alt(self, T_w_s, T_w_t):
+    
+        Te = np.linalg.inv(T_w_t) @ T_w_s
+
+        Re = R.from_matrix(Te[:3,:3])
+        Re_rpy = Re.as_euler('zyx', degrees=True)
+        te = Te[:3,3]
+        dett = np.linalg.norm(te)
+        detR = np.linalg.norm(Re_rpy)
 
         return detR, dett
     
@@ -187,25 +202,33 @@ class MeasurementSimulatorEliko(Node):
                 gt_target = self.tf_buffer.lookup_transform(
                     'world',
                     'uav_gt',
-                    that_ts_msg.header.stamp)
+                    rclpy.time.Time())
                                
                 gt_source = self.tf_buffer.lookup_transform(
                     'world',
                     'ground_vehicle',
-                    that_ts_msg.header.stamp)
+                    rclpy.time.Time())
 
-                #visualization
                 T_w_s = self.transform_stamped_to_matrix(gt_source)
                 T_w_t = self.transform_stamped_to_matrix(gt_target)
                 That_t_s = self.transform_stamped_to_matrix(that_ts_msg)
                 That_w_t = T_w_s  @ np.linalg.inv(That_t_s)
                          
-                detR, dett = self.compute_transformation_errors(T_w_s, 
+                detR1, dett1 = self.compute_transformation_errors(T_w_s, 
                                                                 T_w_t, 
                                                                 That_t_s)
                 
+                detR2, dett2 = self.compute_transformation_errors_alt(T_w_t, That_w_t)
 
+                #Select minimum error from the two methods
+                dett = min(dett1, dett2)
+                detR = min(detR1,detR2)
+
+                self.get_logger().info(
+                f'Alt rotation error (deg): {detR}, translation error (m): {dett}', throttle_duration_sec=1)
+                
                 opt_target = self.matrix_to_transform_stamped(That_w_t, "world", "uav_opt", that_ts_msg.header.stamp)
+
                 
                 self.create_marker(opt_target, self.uav_opt_markers, "world", "uav_opt_marker", [0.0, 0.0, 1.0])
                 self.create_marker(gt_target, self.uav_gt_markers, "world", "uav_gt_marker", [0.0, 1.0, 0.0])
