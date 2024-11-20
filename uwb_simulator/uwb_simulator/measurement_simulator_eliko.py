@@ -223,9 +223,6 @@ class MeasurementSimulatorEliko(Node):
                 #Select minimum error from the two methods
                 dett = min(dett1, dett2)
                 detR = min(detR1,detR2)
-
-                self.get_logger().info(
-                f'Alt rotation error (deg): {detR}, translation error (m): {dett}', throttle_duration_sec=1)
                 
                 opt_target = self.matrix_to_transform_stamped(That_w_t, "world", "uav_opt", that_ts_msg.header.stamp)
 

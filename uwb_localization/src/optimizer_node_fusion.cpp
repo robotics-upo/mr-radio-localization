@@ -1,12 +1,23 @@
 #include <rclcpp/rclcpp.hpp>
 #include <std_msgs/msg/float32.hpp>
+
 #include <geometry_msgs/msg/transform_stamped.hpp>
+#include <sensor_msgs/msg/point_cloud2.hpp>
+
 #include <tf2_ros/transform_broadcaster.h>
 
 #include <tf2/LinearMath/Quaternion.h>
 #include <tf2/LinearMath/Matrix3x3.h>
 #include <tf2_geometry_msgs/tf2_geometry_msgs.hpp>
 #include "geometry_msgs/msg/quaternion_stamped.hpp"
+
+
+#include <pcl_conversions/pcl_conversions.h>
+#include <pcl/point_cloud.h>
+#include <pcl/point_types.h>
+#include <pcl/filters/voxel_grid.h>
+#include <pcl/registration/icp.h>
+#include <pcl/common/transforms.h>
 
 #include "eliko_messages/msg/distances_list.hpp"
 #include "eliko_messages/msg/anchor_coords_list.hpp"
@@ -44,32 +55,37 @@ struct State {
 };
 
 
-class ElikoOptimizationNode : public rclcpp::Node {
+class FusionOptimizationNode : public rclcpp::Node {
 
 public:
 
-    ElikoOptimizationNode() : Node("eliko_optimization_node"), roll_(0.0), pitch_(0.0), yaw_(0.0) {
+    FusionOptimizationNode() : Node("fusion_optimization_node"), roll_(0.0), pitch_(0.0), yaw_(0.0) {
     
 
     //Subscribe to distances publisher
     eliko_distances_sub_ = this->create_subscription<eliko_messages::msg::DistancesList>(
-                "/eliko/Distances", 10, std::bind(&ElikoOptimizationNode::distances_coords_cb_, this, std::placeholders::_1));
-    
-    // eliko_anchors_coords_sub_ = this->create_subscription<eliko_messages::msg::AnchorCoordsList>(
-    //             "/eliko/AnchorCoords", 10, std::bind(&ElikoOptimizationNode::anchors_coords_cb_, this, std::placeholders::_1));
+                "/eliko/Distances", 10, std::bind(&FusionOptimizationNode::distances_coords_cb_, this, std::placeholders::_1));
     
     dji_attitude_sub_ = this->create_subscription<geometry_msgs::msg::QuaternionStamped>(
-                "/dji_sdk/attitude", 10, std::bind(&ElikoOptimizationNode::attitude_cb_, this, std::placeholders::_1));
+                "/dji_sdk/attitude", 10, std::bind(&FusionOptimizationNode::attitude_cb_, this, std::placeholders::_1));
+
+    rclcpp::SensorDataQoS qos; // Use a QoS profile compatible with sensor data
+
+    pcl_source_sub_ = this->create_subscription<sensor_msgs::msg::PointCloud2>(
+                "/arco/ouster/points", qos, std::bind(&FusionOptimizationNode::pcl_source_cb_, this, std::placeholders::_1));
+
+    pcl_target_sub_ = this->create_subscription<sensor_msgs::msg::PointCloud2>(
+                "/os1_cloud_node/points_non_dense", qos, std::bind(&FusionOptimizationNode::pcl_target_cb_, this, std::placeholders::_1));
 
     // Create publisher/broadcaster for optimized transformation
-    tf_publisher_ = this->create_publisher<geometry_msgs::msg::TransformStamped>("eliko_optimization_node/optimized_T", 10);
+    tf_publisher_ = this->create_publisher<geometry_msgs::msg::TransformStamped>("fusion_optimization_node/optimized_T", 10);
     tf_broadcaster_ = std::make_shared<tf2_ros::TransformBroadcaster>(this);
 
     optimizer_time_window_s_ = 0.2; //use only messages in this window for optimization
-    min_measurements_ = 4; //min number of measurements for running optimizer
+    min_measurements_ = 1; //min number of measurements for running optimizer
 
     optimization_timer_ = this->create_wall_timer(
-            std::chrono::milliseconds(int(optimizer_time_window_s_*1000)), std::bind(&ElikoOptimizationNode::optimizer_cb_, this));
+            std::chrono::milliseconds(int(optimizer_time_window_s_*1000)), std::bind(&FusionOptimizationNode::optimizer_cb_, this));
 
     anchor_positions_ = {
         {"0x0009D6", {-0.32, 0.3, 0.875}}, {"0x0009E5", {0.32, -0.3, 0.875}},
@@ -89,6 +105,8 @@ public:
     yaw_ = 0.0;    // Initial guess for yaw
 
     t_ = Eigen::Vector3d(0.0, 0.0, 0.0);       // Translation That_ts (x, y, z)
+
+    icp_tf_ = Eigen::Matrix4f::Identity();
 
     moving_average_window_size_ = 10; //moving average sample window (N)
 
@@ -130,53 +148,71 @@ private:
                 }
             RCLCPP_DEBUG(this->get_logger(), "[Eliko optimizer node] Using %ld measurements from t2", distances_t2_.anchor_distances.size());
         }
- 
-        //Ensure at least one measurement from each of the tags
-        if(current_measurements_.size() >= min_measurements_){
-            RCLCPP_INFO(this->get_logger(), "[Eliko optimizer node] Running optimizer with %ld measurements", current_measurements_.size());
-            
-            //Update transforms after convergence
-            if(run_optimization()){
-                
-                /*Run moving average*/
-                State sample {t_, yaw_, current_time};
-                auto [smoothed_translation, smoothed_yaw] = moving_average(sample);
-                //Update for initial estimation of following step
-                t_ = smoothed_translation;
-                yaw_ = normalize_angle(smoothed_yaw);
 
-                // Construct transformation matrix T with optimized yaw, roll, pitch, and translation
-                Eigen::Matrix4d That_ts = build_transformation_matrix(roll_, pitch_, yaw_, t_);
-                publish_transform(That_ts, current_time);
-            }
-
-            else{
-                RCLCPP_INFO(this->get_logger(), "[Eliko optimizer node] Optimizer did not converge");
-            }
-
-
+        //RUN ICP
+        if(!source_cloud_->points.empty() || !target_cloud_->points.empty()){
+            icp_tf_ = run_icp(source_cloud_, target_cloud_);
+        } else {
+            RCLCPP_WARN(this->get_logger(), "Source or target point cloud is empty. Skipping ICP.");
+            icp_tf_ = Eigen::Matrix4f::Zero()
         }
+            
+        //Update transforms after convergence
+        if(run_optimization()){
+            
+            /*Run moving average*/
+            State sample {t_, yaw_, current_time};
+            auto [smoothed_translation, smoothed_yaw] = moving_average(sample);
+            //Update for initial estimation of following step
+            t_ = smoothed_translation;
+            yaw_ = normalize_angle(smoothed_yaw);
+
+            // Construct transformation matrix T with optimized yaw, roll, pitch, and translation
+            Eigen::Matrix4d That_ts = build_transformation_matrix(roll_, pitch_, yaw_, t_);
+            publish_transform(That_ts, current_time);
+        }
+
         else{
-            RCLCPP_WARN(this->get_logger(), "[Eliko optimizer node] Not enough data to run optimization");
+            RCLCPP_INFO(this->get_logger(), "[Eliko optimizer node] Optimizer did not converge");
         }
 
         /*Clear measurements in this window*/
         current_measurements_.clear();
         distances_t1_.anchor_distances.clear();
         distances_t2_.anchor_distances.clear();
+        source_cloud_->points.clear();
+        target_cloud_->points.clear();
 
     }
 
 
-//    void anchors_coords_cb_(const eliko_messages::msg::AnchorCoordsList::SharedPtr msg) {
-//      // Update anchor coordinates based on received data
-//         for (const auto& anchor_coord : msg->anchor_coords) {
-//             Eigen::Vector3d position(anchor_coord.x_coord, anchor_coord.y_coord, anchor_coord.z_coord);
-//             anchor_positions_[anchor_coord.anchor_sn] = position;
+    void pcl_source_cb_(const sensor_msgs::msg::PointCloud2::SharedPtr msg){
 
-//             RCLCPP_DEBUG(this->get_logger(), "[Eliko optimizer node] Anchor %s coordinates: [%.2f, %.2f, %.2f]", anchor_coord.anchor_sn.c_str(), position[0], position[1], position[2]);
-//         }
-//   }
+        
+        if (!msg->data.empty()) {  // Ensure the incoming message has data
+            pcl::fromROSMsg(*msg, *source_cloud_);
+            RCLCPP_DEBUG(this->get_logger(), "Source cloud received with %zu points", source_cloud_->points.size());
+        } 
+
+        else {
+                RCLCPP_WARN(this->get_logger(), "Empty source point cloud received!");
+        }
+            return;
+        }
+
+    void pcl_target_cb_(const sensor_msgs::msg::PointCloud2::SharedPtr msg){
+
+        if (!msg->data.empty()) {  // Ensure the incoming message has data
+            pcl::fromROSMsg(*msg, *target_cloud_);
+            RCLCPP_DEBUG(this->get_logger(), "Target cloud received with %zu points", target_cloud_->points.size());
+        } 
+        
+        else {            
+            RCLCPP_WARN(this->get_logger(), "Empty target point cloud received!");
+        }
+        
+        return;
+    }
 
     void attitude_cb_(const geometry_msgs::msg::QuaternionStamped::SharedPtr msg) {
 
@@ -325,6 +361,53 @@ private:
         return T;
     }
 
+
+    Eigen::Matrix4f run_icp(const pcl::PointCloud<pcl::PointXYZ>::ConstPtr &source_cloud,
+             const pcl::PointCloud<pcl::PointXYZ>::ConstPtr &target_cloud) const {
+        
+          
+        //Downsample source point cloud      
+        pcl::VoxelGrid<pcl::PointXYZ> voxel_filter_src;
+        voxel_filter_src.setInputCloud(source_cloud);
+        voxel_filter_src.setLeafSize(0.05f, 0.05f, 0.05f);  // Adjust leaf size as needed
+        pcl::PointCloud<pcl::PointXYZ>::Ptr source_cloud_filtered(new pcl::PointCloud<pcl::PointXYZ>);
+        voxel_filter_src.filter(*source_cloud_filtered); 
+
+        RCLCPP_DEBUG(this->get_logger(), "Source cloud downsampled to %zu points", source_cloud_filtered->points.size());
+
+        //Downsample target point cloud
+        pcl::VoxelGrid<pcl::PointXYZ> voxel_filter_target;
+        voxel_filter_target.setInputCloud(target_cloud);
+        voxel_filter_target.setLeafSize(0.05f, 0.05f, 0.05f);  // Adjust leaf size as needed
+        pcl::PointCloud<pcl::PointXYZ>::Ptr target_cloud_filtered(new pcl::PointCloud<pcl::PointXYZ>);
+        voxel_filter_target.filter(*target_cloud_filtered);
+
+        RCLCPP_DEBUG(this->get_logger(), "Target cloud downsampled to %zu points", target_cloud_filtered->points.size());
+               
+        
+        // Perform ICP
+        pcl::IterativeClosestPoint<pcl::PointXYZ, pcl::PointXYZ> icp;
+        icp.setInputSource(source_cloud_filtered);
+        icp.setInputTarget(target_cloud_filtered);
+
+        pcl::PointCloud<pcl::PointXYZ>::Ptr aligned_cloud(new pcl::PointCloud<pcl::PointXYZ>);
+        icp.align(*aligned_cloud);
+
+        Eigen::Matrix4f transformation = Eigen::Matrix4f::Zero();
+
+        if (icp.hasConverged()) {
+            RCLCPP_INFO(this->get_logger(), "ICP converged with score: %f", icp.getFitnessScore());
+
+            // Get the transformation matrix
+            transformation = icp.getFinalTransformation();
+
+        } else {
+            RCLCPP_WARN(this->get_logger(), "ICP did not converge.");
+        }
+
+        return transformation;
+    }
+
     // Run the optimization once all measurements are received
     bool run_optimization() {
 
@@ -334,17 +417,44 @@ private:
             Eigen::Vector3d t = t_;
             double yaw = yaw_;
 
-            // Dynamically add residuals for available measurements
-            for (const auto& [key, distance] : current_measurements_) {
-                const auto& [anchor_sn, tag_sn] = key;
-                if (anchor_positions_.count(anchor_sn) > 0 && tag_positions_.count(tag_sn) > 0) {
-                    Eigen::Vector3d anchor_pos = anchor_positions_[anchor_sn];
-                    Eigen::Vector3d tag_pos = tag_positions_[tag_sn];
-                    
-                    // Create cost function with the received distance
-                    ceres::CostFunction* cost_function = UWBResidual::Create(anchor_pos, tag_pos, distance, roll_, pitch_);
-                    problem.AddResidualBlock(cost_function, nullptr, &yaw, t.data());
+            
+            // Dynamically set weights based on UWB measurements and ICP score
+            double weight_uwb = 0.0;
+
+            if(!current_measurements_.empty()){
+
+                // Dynamically set weights based on UWB measurements and ICP score
+                weight_uwb = static_cast<double>(current_measurements_.size()) / 8.0;
+
+                // Dynamically add residuals for available measurements
+                for (const auto& [key, distance] : current_measurements_) {
+                    const auto& [anchor_sn, tag_sn] = key;
+                    if (anchor_positions_.count(anchor_sn) > 0 && tag_positions_.count(tag_sn) > 0) {
+                        Eigen::Vector3d anchor_pos = anchor_positions_[anchor_sn];
+                        Eigen::Vector3d tag_pos = tag_positions_[tag_sn];
+                        
+                        // Create cost function with the received distance
+                        ceres::CostFunction* uwb_cost_function = UWBResidual::Create(anchor_pos, tag_pos, distance, roll_, pitch_);
+                        problem.AddResidualBlock(uwb_cost_function, nullptr, &yaw, t.data());
+                        problem.AddResidualBlock(uwb_cost_function, new ceres::ScaledLoss(nullptr, weight_uwb, ceres::TAKE_OWNERSHIP), &yaw, t.data());
+                    }
                 }
+            }
+
+            double weight_icp = 1.0 - weight_uwb;
+
+            // Add ICP residual to the optimization problem
+            if (!icp_tf_.isZero(0)) {  // Ensure ICP transform is valid
+                Eigen::Matrix3d icp_rotation = icp_tf_.block<3, 3>(0, 0).cast<double>();
+                Eigen::Vector3d icp_translation = icp_tf_.block<3, 1>(0, 3).cast<double>();
+
+                // Create a cost function for ICP residual
+                ceres::CostFunction* icp_cost_function = ICPResidual::Create(icp_rotation, icp_translation);
+                problem.AddResidualBlock(icp_cost_function, nullptr, &yaw, t.data());
+                problem.AddResidualBlock(icp_cost_function, new ceres::ScaledLoss(nullptr, weight_icp, ceres::TAKE_OWNERSHIP), &yaw, t.data());
+
+            } else {
+                RCLCPP_WARN(this->get_logger(), "[FusionOptimizationNode] ICP transform is invalid, skipping ICP residual.");
             }
 
             // Configure solver options
@@ -412,17 +522,61 @@ private:
         const double pitch_;
   };
 
+
+  struct ICPResidual {
+    ICPResidual(const Eigen::Matrix3d& icp_rotation, const Eigen::Vector3d& icp_translation)
+        : icp_rotation_(icp_rotation), icp_translation_(icp_translation) {}
+
+    template <typename T>
+    bool operator()(const T* const yaw, const T* const t, T* residual) const {
+        // Build rotation matrix using roll, pitch, and optimized yaw
+        Eigen::Matrix<T, 3, 3> R;
+        R = Eigen::AngleAxis<T>(yaw[0], Eigen::Matrix<T, 3, 1>::UnitZ()) *
+            Eigen::AngleAxis<T>(T(0.0), Eigen::Matrix<T, 3, 1>::UnitY()) *  // Assume pitch is fixed
+            Eigen::AngleAxis<T>(T(0.0), Eigen::Matrix<T, 3, 1>::UnitX());  // Assume roll is fixed
+
+        // Extract translation
+        Eigen::Matrix<T, 3, 1> translation(t[0], t[1], t[2]);
+
+        // Compute residual for rotation
+        Eigen::Matrix<T, 3, 3> rotation_residual = R.transpose() * icp_rotation_.cast<T>() - Eigen::Matrix<T, 3, 3>::Identity();
+        residual[0] = rotation_residual.norm();  // Frobenius norm of rotation residual
+
+        // Compute residual for translation
+        Eigen::Matrix<T, 3, 1> translation_residual = translation - icp_translation_.cast<T>();
+        residual[1] = translation_residual.norm();  // L2 norm of translation residual
+
+        return true;
+    }
+
+    static ceres::CostFunction* Create(const Eigen::Matrix3d& icp_rotation, const Eigen::Vector3d& icp_translation) {
+        return (new ceres::AutoDiffCostFunction<ICPResidual, 2, 1, 3>(
+            new ICPResidual(icp_rotation, icp_translation)));
+    }
+
+    private:
+
+        const Eigen::Matrix3d icp_rotation_;
+        const Eigen::Vector3d icp_translation_;
+
+    };
+
     
     rclcpp::Subscription<eliko_messages::msg::DistancesList>::SharedPtr eliko_distances_sub_;
-    // rclcpp::Subscription<eliko_messages::msg::AnchorCoordsList>::SharedPtr eliko_anchors_coords_sub_;
     rclcpp::Subscription<geometry_msgs::msg::QuaternionStamped>::SharedPtr dji_attitude_sub_;
+    rclcpp::Subscription<sensor_msgs::msg::PointCloud2>::SharedPtr pcl_source_sub_, pcl_target_sub_;
+    rclcpp::Publisher<geometry_msgs::msg::TransformStamped>::SharedPtr tf_publisher_;
+    std::shared_ptr<tf2_ros::TransformBroadcaster> tf_broadcaster_;
+
     rclcpp::TimerBase::SharedPtr optimization_timer_;
 
     eliko_messages::msg::DistancesList distances_t1_, distances_t2_;
     std::unordered_map<MeasurementKey, float, PairHash> current_measurements_;
 
-    rclcpp::Publisher<geometry_msgs::msg::TransformStamped>::SharedPtr tf_publisher_;
-    std::shared_ptr<tf2_ros::TransformBroadcaster> tf_broadcaster_;
+
+    pcl::PointCloud<pcl::PointXYZ>::Ptr source_cloud_{new pcl::PointCloud<pcl::PointXYZ>};
+    pcl::PointCloud<pcl::PointXYZ>::Ptr target_cloud_{new pcl::PointCloud<pcl::PointXYZ>};
+    Eigen::Matrix4f icp_tf_;
 
     std::unordered_map<std::string, Eigen::Vector3d> anchor_positions_;
     std::unordered_map<std::string, Eigen::Vector3d> tag_positions_;
@@ -441,9 +595,10 @@ private:
     double optimizer_time_window_s_;
 
 };
+
 int main(int argc, char** argv) {
     rclcpp::init(argc, argv);
-    auto node = std::make_shared<ElikoOptimizationNode>();
+    auto node = std::make_shared<FusionOptimizationNode>();
     node->set_parameter(rclcpp::Parameter("use_sim_time", true));
     rclcpp::spin(node);
     rclcpp::shutdown();
