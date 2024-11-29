@@ -309,6 +309,9 @@ def plot_experiment_data(path_experiment_data, path_figs, sim = "True"):
     
     if sim == "True":
 
+        # Define the maximum allowable timestamp
+        max_timestamp = 95.0
+
         source_frame_id = 'ground_vehicle'
         target_frame_id = 'uav_opt'
 
@@ -360,8 +363,13 @@ def plot_experiment_data(path_experiment_data, path_figs, sim = "True"):
     columns_s_That_t_data = [time_data_setpoint, opt_T_source_target_x_data, opt_T_source_target_y_data, opt_T_source_target_z_data, opt_T_source_target_q0_data, opt_T_source_target_q1_data, opt_T_source_target_q2_data, opt_T_source_target_q3_data, opt_T_source_target_yaw_data]
     columns_t_That_s_data = [time_data_setpoint, opt_T_target_source_x_data, opt_T_target_source_y_data, opt_T_target_source_z_data, opt_T_target_source_q0_data, opt_T_target_source_q1_data, opt_T_target_source_q2_data, opt_T_target_source_q3_data, opt_T_target_source_yaw_data]
 
-    s_That_t_data_df = read_pandas_df(path_experiment_data, columns_s_That_t_data)
-    t_That_s_data_df = read_pandas_df(path_experiment_data, columns_t_That_s_data)
+    # Load and filter data
+    s_That_t_data_df = read_pandas_df(path_experiment_data, columns_s_That_t_data, 
+                                      timestamp_col=time_data_setpoint, max_timestamp=max_timestamp)
+
+    t_That_s_data_df = read_pandas_df(path_experiment_data, columns_t_That_s_data, 
+                                      timestamp_col=time_data_setpoint, max_timestamp=max_timestamp)
+
     
     if sim == "True":
         # Plot 3D representation
@@ -372,13 +380,16 @@ def plot_experiment_data(path_experiment_data, path_figs, sim = "True"):
         columns_metrics = [time_data_setpoint, metrics_detR_data, metrics_dett_data]
 
         
-        source_gt_data_df = read_pandas_df(path_experiment_data, columns_source_gt_data)
-        target_gt_data_df = read_pandas_df(path_experiment_data, columns_target_gt_data)
+        source_gt_data_df = read_pandas_df(path_experiment_data, columns_source_gt_data, 
+                                           timestamp_col=time_data_setpoint, max_timestamp=max_timestamp)
+        target_gt_data_df = read_pandas_df(path_experiment_data, columns_target_gt_data, 
+                                           timestamp_col=time_data_setpoint, max_timestamp=max_timestamp)
 
 
         w_That_t_data_df, metrics_df_data = compute_That_w_t(time_data_setpoint, source_gt_data_df, target_gt_data_df, t_That_s_data_df, columns_source_gt_data, columns_target_gt_data, columns_t_That_s_data, columns_metrics)
 
-        metrics_df_data = read_pandas_df(path_experiment_data, columns_metrics)
+        metrics_df_data = read_pandas_df(path_experiment_data, columns_metrics,
+                                         timestamp_col=time_data_setpoint, max_timestamp=max_timestamp)
 
         
         columns_w_That_t_data = [time_data_setpoint, "x", "y", "z", "qx", "qy", "qz", "qw"]
@@ -412,12 +423,31 @@ def plot_experiment_data(path_experiment_data, path_figs, sim = "True"):
     plot_transform(path_figs, t_That_s_data_df, columns_t_That_s_data, 't_That_s')
 
 
-def read_pandas_df(path, columns):
+def read_pandas_df(path, columns, timestamp_col=None, max_timestamp=None):
+
+
+    """
+    Reads a CSV file and filters rows based on timestamp, if provided.
+
+    Parameters:
+        path (str): Path to the CSV file.
+        columns (list): List of columns to read from the file.
+        timestamp_col (str, optional): Name of the timestamp column.
+        max_timestamp (float, optional): Maximum allowable timestamp.
+
+    Returns:
+        pd.DataFrame: Filtered DataFrame.
+    """
 
     try:
             # Read CSV file into a Pandas DataFrame
             df = pd.read_csv(path, usecols = columns)
             df = df.dropna()
+
+            
+             # Filter rows based on timestamp, if applicable
+            if timestamp_col and max_timestamp is not None:
+                df = df[df[timestamp_col] < df[timestamp_col].iloc[0] + max_timestamp]
 
             # Check if the specified columns exist in the DataFrame
             for column in columns:
