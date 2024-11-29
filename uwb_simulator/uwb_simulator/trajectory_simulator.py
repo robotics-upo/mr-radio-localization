@@ -25,9 +25,12 @@ class TrajectorySimulator(Node):
             namespace='',
             parameters=[
                 ('load_trajectory', False),
+                ('same_trajectory', False),
                 ('trajectory_name', "trajectory1"),
                 ('total_steps', 100),
                 ('pub_rate', 10.0),
+                ('uav_origin', [0.0, 0.0, 0.0]),
+                ('ground_vehicle_origin', [0.0, 0.0, 0.0]),
                 ('anchors.a1.position', [0.0, 0.0, 0.0]),
                 ('anchors.a2.position', [0.0, 0.0, 0.0]),
                 ('anchors.a3.position', [0.0, 0.0, 0.0]),
@@ -38,13 +41,15 @@ class TrajectorySimulator(Node):
 
         # Parameters
 
-        self.uav_start = np.array([0, 0, 2])  # UAV starts at (0, 0, 2)
-        self.ground_start = np.array([0, 0, 0])  # Ground vehicle starts at (0, 0, 0)
+    
         self.steps = self.get_parameter('total_steps').value
         self.meters_per_step = 0.1
         self.smoothness = 10  # Number of interpolation points between key points
 
         self.publish_rate = self.get_parameter('pub_rate').value
+
+        self.uav_origin = np.array(self.get_parameter('uav_origin').value)
+        self.ground_vehicle_origin = np.array(self.get_parameter('ground_vehicle_origin').value)
 
         # Retrieve anchor and tag locations and convert them to numpy arrays
         anchors_location = {
@@ -60,6 +65,7 @@ class TrajectorySimulator(Node):
         }
 
         self.load_trajectory = self.get_parameter('load_trajectory').value
+        self.same_trajectory = self.get_parameter('same_trajectory').value
         self.trajectory_name = self.get_parameter('trajectory_name').value
 
 
@@ -70,12 +76,21 @@ class TrajectorySimulator(Node):
 
             self.get_logger().info("Generating trajectory" +  self.trajectory_name)
 
-            # Generate random (smoothed) trajectories
-            self.uav_trajectory = self.generate_trajectory(self.uav_start, self.steps, is_uav=True, smooth = True)
-            self.get_logger().info('Generated UAV trajectory with %d points' % (len(self.uav_trajectory)))
+            #Generate similar trajectories
+            if self.same_trajectory == True:
+                self.ground_trajectory, self.uav_trajectory = self.generate_similar_trajectories(self.ground_vehicle_origin, self.uav_origin, self.steps)
 
-            self.ground_trajectory = self.generate_trajectory(self.ground_start, self.steps, smooth = True)
+            #Generate different trajectories
+            else:
+                self.ground_trajectory = self.generate_trajectory(self.ground_vehicle_origin, self.steps)
+                self.uav_trajectory = self.generate_trajectory(self.uav_origin, self.steps)
+
+            #Apply cubic spline to trajectories
+            self.ground_trajectory = self.smooth_trajectory(self.ground_trajectory, self.smoothness)
             self.get_logger().info('Generated ground vehicle trajectory with %d points' % (len(self.ground_trajectory)))
+
+            self.uav_trajectory = self.smooth_trajectory(self.uav_trajectory, self.smoothness)
+            self.get_logger().info('Generated UAV trajectory with %d points' % (len(self.uav_trajectory)))
 
             #Store and save trajectory
             self.trajectory = np.zeros((len(self.uav_trajectory), 3, 2))
@@ -92,6 +107,7 @@ class TrajectorySimulator(Node):
                 self.trajectory = np.load(self.trajectory_name + '.npy')
                 self.uav_trajectory = self.trajectory[:,:,0]
                 self.ground_trajectory = self.trajectory[:,:,1]
+               
                 self.get_logger().info('Read ground vehicle trajectory with size ' + str(np.shape(self.ground_trajectory)))
                 self.get_logger().info('Read UAV trajectory trajectory with size' + str(np.shape(self.uav_trajectory)))
 
@@ -129,13 +145,15 @@ class TrajectorySimulator(Node):
 
     def random_curvature(self):
 
+        
         curvature = random.uniform(-0.25, 0.25)
         steps = random.randint(5,15)
         
         return curvature, steps
 
-    def generate_trajectory(self, start, steps, is_uav=False, smooth = False):
+    def generate_trajectory(self, start, steps):
         key_points = [start]
+           
         direction = np.array([self.meters_per_step, 0, 0])  # Start heading along the x-axis, 10 cm each step
         curvature, few_steps = self.random_curvature()
         j = 0
@@ -153,24 +171,67 @@ class TrajectorySimulator(Node):
 
             next_point = key_points[-1] + direction
 
-            # if is_uav:
-            #     # Add small random change in z for the UAV's altitude
-            #     next_point[2] += random.uniform(-0.2, 0.2)
 
             key_points.append(next_point)
             j += 1
 
         key_points = np.array(key_points)
-
-        if smooth: 
-            key_points = self.smooth_trajectory(key_points)
         
         return key_points
     
-    def smooth_trajectory(self, key_points):
+    def generate_similar_trajectories(self, start_ground, start_uav, steps):
+        
+        key_points = [start_ground]
+        key_points_uav = [start_uav]
+           
+        direction = np.array([self.meters_per_step, 0, 0])  # Start heading along the x-axis, 10 cm each step
+        direction_uav = direction
+        curvature_ground, few_steps_ground = self.random_curvature()
+        curvature_uav = curvature_ground + np.random.uniform(-0.1, 0.1)
+        few_steps_uav = max(1, few_steps_ground + random.randint(-5,5))
+
+        j_ground = 0
+        j_uav = 0
+        
+        for i in range(steps):
+
+            #Change curvature every random number of steps
+            if j_ground > few_steps_ground:
+                curvature_ground, few_steps_ground = self.random_curvature()
+                j_ground = 0
+
+            #Change curvature every random number of steps
+            if j_uav > few_steps_uav:
+                curvature_uav = curvature_ground + np.random.uniform(-0.1, 0.1)
+                few_steps_uav = max(1, few_steps_ground + random.randint(-5,5))
+                j_uav = 0
+
+            # Apply curvature to direction (2D rotation in the x-y plane)
+            direction = np.dot(np.array([[np.cos(curvature_ground), -np.sin(curvature_ground), 0],
+                                         [np.sin(curvature_ground), np.cos(curvature_ground), 0],
+                                         [0, 0, 1]]), direction)
+            
+            direction_uav = np.dot(np.array([[np.cos(curvature_uav), -np.sin(curvature_uav), 0],
+                                         [np.sin(curvature_uav), np.cos(curvature_uav), 0],
+                                         [0, 0, 1]]), direction)
+
+            next_point = key_points[-1] + direction
+            next_point_uav = key_points_uav[-1] + direction_uav
+
+            key_points.append(next_point)
+            key_points_uav.append(next_point_uav)
+            j_ground += 1
+            j_uav +=1
+
+        key_points = np.array(key_points)
+        key_points_uav = np.array(key_points_uav)
+        
+        return key_points, key_points_uav
+    
+    def smooth_trajectory(self, key_points, smoothness):
 
         time = np.linspace(0, 1, len(key_points))
-        interp_time = np.linspace(0, 1, len(key_points) * self.smoothness)
+        interp_time = np.linspace(0, 1, len(key_points) * smoothness)
 
         x_spline = CubicSpline(time, key_points[:, 0])
         y_spline = CubicSpline(time, key_points[:, 1])
