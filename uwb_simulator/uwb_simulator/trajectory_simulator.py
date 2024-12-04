@@ -145,7 +145,6 @@ class TrajectorySimulator(Node):
 
     def random_curvature(self):
 
-        
         curvature = random.uniform(-0.25, 0.25)
         steps = random.randint(5,15)
         
