@@ -12,6 +12,8 @@
 #include "eliko_messages/msg/anchor_coords_list.hpp"
 #include "eliko_messages/msg/tag_coords_list.hpp"
 
+#include "eliko_messages/msg/covariance_matrix_with_header.hpp"
+
 #include <ceres/ceres.h>
 #include <ceres/rotation.h>
 #include <Eigen/Core>
@@ -59,9 +61,11 @@ public:
     tf_publisher_ = this->create_publisher<geometry_msgs::msg::TransformStamped>("eliko_optimization_node/optimized_T", 10);
     tf_broadcaster_ = std::make_shared<tf2_ros::TransformBroadcaster>(this);
 
+    covariance_publisher_ = this->create_publisher<eliko_messages::msg::CovarianceMatrixWithHeader>("eliko_optimization_node/covariance", 10);
+
     global_opt_window_s_ = 10.0; //size of the sliding window in seconds
-    global_opt_rate_s_ = 0.2; //rate of the optimization
-    min_measurements_ = 100; //min number of measurements for running optimizer
+    global_opt_rate_s_ = 0.5; //rate of the optimization
+    min_measurements_ = 200; //min number of measurements for running optimizer
     measurement_stdev_ = 0.1; //10 cm measurement noise
     measurement_covariance_ = measurement_stdev_ * measurement_stdev_;
 
@@ -85,7 +89,7 @@ public:
 
    
     //Initial values for state
-    init_state_.state = Eigen::Vector4d(0.0, 0.0, -2.0, 0.0);
+    init_state_.state = Eigen::Vector4d(-0.5, 0.5, -2.0, 0.0);
     init_state_.covariance = accumulated_covariance_; // Add epsilon to diagonal
     init_state_.roll = 0.0;
     init_state_.pitch = 0.0;
@@ -93,8 +97,8 @@ public:
 
     opt_state_ = init_state_;
 
-    moving_average_window_s_ = 1.0;
-    moving_average_window_size_ = 10; //moving average sample window (N)
+    moving_average_ = true;
+    moving_average_window_s_ = 2.0;
     
     RCLCPP_INFO(this->get_logger(), "Eliko Optimization Node initialized.");
   }
@@ -153,15 +157,17 @@ private:
         //Update transforms after convergence
         if(run_optimization(current_time)){
         
-            /*Run moving average*/
-            auto smoothed_state = moving_average(opt_state_);
-            //Update for initial estimation of following step
-            opt_state_.state = smoothed_state;
-            opt_state_.state[3] = normalize_angle(smoothed_state[3]);
+            if(moving_average_){
+                // /*Run moving average*/
+                auto smoothed_state = moving_average(opt_state_);
+                //Update for initial estimation of following step
+                opt_state_.state = smoothed_state;
+            }
 
             Eigen::Matrix4d That_ts = build_transformation_matrix(opt_state_.roll, opt_state_.pitch, opt_state_.state);
 
             publish_transform(That_ts, opt_state_.timestamp);
+            publish_covariance_with_timestamp(accumulated_covariance_, opt_state_.timestamp);
 
         }
 
@@ -198,8 +204,7 @@ private:
 
             // Remove samples that are too old or if we exceed the window size
             while (!moving_average_states_.empty() &&
-                (moving_average_states_.size() > moving_average_window_size_ || 
-                    sample.timestamp - moving_average_states_.front().timestamp > rclcpp::Duration::from_seconds(global_opt_window_s_*moving_average_window_size_))) {
+                (sample.timestamp - moving_average_states_.front().timestamp > rclcpp::Duration::from_seconds(global_opt_window_s_))) {
                 moving_average_states_.pop_front();
             }
 
@@ -243,10 +248,36 @@ private:
 
                 // Calculate weighted average yaw using the weighted sine and cosine
                 smoothed_state[3] = std::atan2(sum_sin / total_weight, sum_cos / total_weight);
+                smoothed_state[3] = normalize_angle(smoothed_state[3]);
             }
 
             return smoothed_state;
     }
+
+
+    void publish_covariance_with_timestamp(const Eigen::Matrix4d& covariance, const rclcpp::Time& timestamp) {
+
+        auto msg = eliko_messages::msg::CovarianceMatrixWithHeader();
+        msg.header.stamp = timestamp;
+        msg.header.frame_id = "accumulated_covariance";  // Adjust as necessary
+        msg.matrix.layout.dim.resize(2);
+        msg.matrix.layout.dim[0].label = "rows";
+        msg.matrix.layout.dim[0].size = 4;
+        msg.matrix.layout.dim[0].stride = 4 * 4;
+        msg.matrix.layout.dim[1].label = "cols";
+        msg.matrix.layout.dim[1].size = 4;
+        msg.matrix.layout.dim[1].stride = 4;
+        msg.matrix.data.resize(4 * 4);
+
+        // Flatten the matrix
+        for (size_t i = 0; i < 4; ++i) {
+            for (size_t j = 0; j < 4; ++j) {
+                msg.matrix.data[i * 4 + j] = covariance(i, j);
+            }
+        }
+
+        covariance_publisher_->publish(msg);
+}
 
     void publish_transform(const Eigen::Matrix4d& T, const rclcpp::Time &current_time) {
 
@@ -524,10 +555,12 @@ private:
     rclcpp::Subscription<geometry_msgs::msg::QuaternionStamped>::SharedPtr dji_attitude_sub_;
     rclcpp::TimerBase::SharedPtr global_optimization_timer_, global_optimization_oneoff_timer_;
 
+
     std::deque<Measurement> global_measurements_;
     
     rclcpp::Publisher<geometry_msgs::msg::TransformStamped>::SharedPtr tf_publisher_;
     std::shared_ptr<tf2_ros::TransformBroadcaster> tf_broadcaster_;
+    rclcpp::Publisher<eliko_messages::msg::CovarianceMatrixWithHeader>::SharedPtr covariance_publisher_;
 
     std::unordered_map<std::string, Eigen::Vector3d> anchor_positions_;
     std::unordered_map<std::string, Eigen::Vector3d> tag_positions_;
@@ -540,7 +573,7 @@ private:
     State init_state_;
     std::deque<State> moving_average_states_;
 
-    size_t moving_average_window_size_;
+    bool moving_average_;
     size_t min_measurements_;
     double global_opt_window_s_, global_opt_rate_s_;
     double measurement_stdev_, measurement_covariance_;

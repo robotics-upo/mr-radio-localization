@@ -62,6 +62,9 @@ class MeasurementSimulatorEliko(Node):
         self.arco_gt_markers = MarkerArray()
         self.uav_opt_markers = MarkerArray()
 
+        self.translation_errors = []
+        self.rotation_errors = []
+
         #Create publisher to simulate orientation changes
         self.attitude_pub = self.create_publisher(QuaternionStamped, 'dji_sdk/attitude', 1)
 
@@ -72,7 +75,11 @@ class MeasurementSimulatorEliko(Node):
         self.error_publisher = self.create_publisher(Float32MultiArray, 'optimization/metrics', 1)
 
         # Publishers for RViz markers
+        #apply transform to most recent point
         self.opt_target_marker_pub = self.create_publisher(MarkerArray, 'visualization/opt_target_marker', 1)
+        #to apply transform globally to all points in source window
+        self.global_opt_target_marker_pub = self.create_publisher(MarkerArray, 'visualization/global_opt_target_marker', 1)
+
         self.gt_source_marker_pub = self.create_publisher(MarkerArray, 'visualization/gt_source_marker', 1)
         self.gt_target_marker_pub = self.create_publisher(MarkerArray, 'visualization/gt_target_marker', 1)
 
@@ -80,9 +87,9 @@ class MeasurementSimulatorEliko(Node):
         self.timer2 = self.create_timer(1./self.rate, self.on_timer_t2)
         self.timer_att = self.create_timer(1./self.rate, self.on_timer_att)
         
-        # self.timer_gt = self.create_timer(1./self.rate, self.on_timer_gt)
-        # self.agv_transforms = []  # List to store AGV transforms (w_T_s)
-        # self.sliding_window_duration = 10.0  # Sliding window duration in seconds
+        self.timer_gt = self.create_timer(1./self.rate, self.on_timer_gt)
+        self.agv_transforms = []  # List to store AGV transforms (w_T_s)
+        self.sliding_window_duration = 10.0  # Sliding window duration in seconds
    
 
         self.optimized_tf_sub = self.create_subscription(
@@ -160,19 +167,16 @@ class MeasurementSimulatorEliko(Node):
         dett = np.linalg.norm(te)
         detR = np.linalg.norm(Re_rpy)
 
-        return detR, dett
-    
-    def compute_transformation_errors_alt(self, T_w_s, T_w_t):
-    
-        Te = np.linalg.inv(T_w_t) @ T_w_s
+        self.translation_errors.append(dett)
+        self.rotation_errors.append(detR)
 
-        Re = R.from_matrix(Te[:3,:3])
-        Re_rpy = Re.as_euler('zyx', degrees=True)
-        te = Te[:3,3]
-        dett = np.linalg.norm(te)
-        detR = np.linalg.norm(Re_rpy)
+        # Compute RMSE for translation
+        rmse_translation = np.sqrt(np.mean(np.square(np.array(self.translation_errors))))
 
-        return detR, dett
+        # Compute RMSE for rotation
+        rmse_rotation = np.sqrt(np.mean(np.square(np.array(self.rotation_errors))))
+
+        return detR, dett, rmse_rotation, rmse_translation
     
     
     def create_marker(self, transform, marker_list, frame_id, marker_ns, color):
@@ -221,11 +225,10 @@ class MeasurementSimulatorEliko(Node):
                 T_w_t = self.transform_stamped_to_matrix(gt_target)
                 That_w_t = T_w_s  @ np.linalg.inv(That_t_s)
                          
-                detR, dett = self.compute_transformation_errors(T_w_s, 
+                detR, dett, rmse_R, rmse_t = self.compute_transformation_errors(T_w_s, 
                                                                 T_w_t, 
                                                                 That_t_s)
                 
-
                 opt_target = self.matrix_to_transform_stamped(That_w_t, "world", "uav_opt", that_ts_msg.header.stamp)   
                 self.create_marker(opt_target, self.uav_opt_markers, "world", "uav_opt_marker", [0.0, 0.0, 1.0])
                 
@@ -233,7 +236,7 @@ class MeasurementSimulatorEliko(Node):
                 self.create_marker(gt_source, self.arco_gt_markers, "world", "arco_gt_marker", [1.0, 0.0, 0.0])
 
                 metrics = Float32MultiArray()
-                metrics.data = [detR, dett]  # Set both values at once
+                metrics.data = [detR, dett, rmse_R, rmse_t]  # Set both values at once
 
                 # Publish the MarkerArrays
                 self.gt_source_marker_pub.publish(self.arco_gt_markers)
@@ -251,7 +254,7 @@ class MeasurementSimulatorEliko(Node):
 
         ##Apply transform to all points in sliding window
 
-        #self.global_transform_trajectory(That_t_s)
+        self.global_transform_trajectory(That_t_s)
     
 
     def global_transform_trajectory(self, That_t_s):
@@ -288,14 +291,14 @@ class MeasurementSimulatorEliko(Node):
             marker.scale.y = 0.05
             marker.scale.z = 0.05
 
-            marker.color.r = 0.0
-            marker.color.g = 0.0
+            marker.color.r = 0.25
+            marker.color.g = 0.5
             marker.color.b = 1.0
             marker.color.a = 0.8
 
             uav_opt_markers.markers.append(marker)
         
-        self.opt_target_marker_pub.publish(self.uav_opt_markers)
+        self.global_opt_target_marker_pub.publish(uav_opt_markers)
                                             
         
     def on_timer_att(self):
