@@ -78,7 +78,7 @@ class TrajectorySimulator(Node):
 
             #Generate similar trajectories
             if self.same_trajectory == True:
-                self.ground_trajectory, self.uav_trajectory = self.generate_similar_trajectories(self.ground_vehicle_origin, self.uav_origin, self.steps)
+                self.ground_trajectory, self.uav_trajectory = self.generate_similar_trajectories(self.ground_vehicle_origin, self.uav_origin, self.steps, True) #True: identical trajectory, False: add some variation
 
             #Generate different trajectories
             else:
@@ -178,7 +178,7 @@ class TrajectorySimulator(Node):
         
         return key_points
     
-    def generate_similar_trajectories(self, start_ground, start_uav, steps):
+    def generate_similar_trajectories(self, start_ground, start_uav, steps, identical = False):
         
         key_points = [start_ground]
         key_points_uav = [start_uav]
@@ -186,11 +186,13 @@ class TrajectorySimulator(Node):
         direction = np.array([self.meters_per_step, 0, 0])  # Start heading along the x-axis, 10 cm each step
         direction_uav = direction
         curvature_ground, few_steps_ground = self.random_curvature()
-        curvature_uav = curvature_ground + np.random.uniform(-0.1, 0.1)
-        few_steps_uav = max(1, few_steps_ground + random.randint(-5,5))
+        
+        if identical is False:
+            curvature_uav = curvature_ground + np.random.uniform(-0.1, 0.1)
+            few_steps_uav = max(1, few_steps_ground + random.randint(-5,5))
+            j_uav = 0
 
         j_ground = 0
-        j_uav = 0
         
         for i in range(steps):
 
@@ -199,28 +201,35 @@ class TrajectorySimulator(Node):
                 curvature_ground, few_steps_ground = self.random_curvature()
                 j_ground = 0
 
-            #Change curvature every random number of steps
-            if j_uav > few_steps_uav:
-                curvature_uav = curvature_ground + np.random.uniform(-0.1, 0.1)
-                few_steps_uav = max(1, few_steps_ground + random.randint(-5,5))
-                j_uav = 0
-
             # Apply curvature to direction (2D rotation in the x-y plane)
             direction = np.dot(np.array([[np.cos(curvature_ground), -np.sin(curvature_ground), 0],
                                          [np.sin(curvature_ground), np.cos(curvature_ground), 0],
                                          [0, 0, 1]]), direction)
-            
-            direction_uav = np.dot(np.array([[np.cos(curvature_uav), -np.sin(curvature_uav), 0],
-                                         [np.sin(curvature_uav), np.cos(curvature_uav), 0],
-                                         [0, 0, 1]]), direction)
+
+            if identical is False:   
+                #Slightly change the other trajectory
+                if j_uav > few_steps_uav:
+                    curvature_uav = curvature_ground + np.random.uniform(-0.1, 0.1)
+                    few_steps_uav = max(1, few_steps_ground + random.randint(-5,5))
+                    j_uav = 0
+
+                direction_uav = np.dot(np.array([[np.cos(curvature_uav), -np.sin(curvature_uav), 0],
+                                            [np.sin(curvature_uav), np.cos(curvature_uav), 0],
+                                            [0, 0, 1]]), direction)
+                
+                j_uav +=1
+        
+            else:
+                #Just duplicate the trajectory
+                direction_uav = direction
+
+            j_ground += 1
 
             next_point = key_points[-1] + direction
             next_point_uav = key_points_uav[-1] + direction_uav
 
             key_points.append(next_point)
             key_points_uav.append(next_point_uav)
-            j_ground += 1
-            j_uav +=1
 
         key_points = np.array(key_points)
         key_points_uav = np.array(key_points_uav)

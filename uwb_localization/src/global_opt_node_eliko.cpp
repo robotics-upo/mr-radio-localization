@@ -65,14 +65,17 @@ public:
 
     global_opt_window_s_ = 10.0; //size of the sliding window in seconds
     global_opt_rate_s_ = 0.5; //rate of the optimization
-    min_measurements_ = 200; //min number of measurements for running optimizer
+    min_measurements_ = 400; //min number of measurements for running optimizer
     measurement_stdev_ = 0.1; //10 cm measurement noise
     measurement_covariance_ = measurement_stdev_ * measurement_stdev_;
 
-    accumulated_covariance_ = Eigen::Matrix4d::Identity() * 1e-6;
+    accumulated_covariance_ = Eigen::Matrix4d::Identity() * measurement_covariance_;
 
     global_optimization_timer_ = this->create_wall_timer(
             std::chrono::milliseconds(int(global_opt_rate_s_*1000)), std::bind(&ElikoGlobalOptNode::global_opt_cb_, this));
+
+    window_opt_timer_ = this->create_wall_timer(
+            std::chrono::milliseconds(int(global_opt_window_s_*1000)), std::bind(&ElikoGlobalOptNode::window_opt_cb_, this));
 
 
     anchor_positions_ = {
@@ -89,8 +92,8 @@ public:
 
    
     //Initial values for state
-    init_state_.state = Eigen::Vector4d(-0.5, 0.5, -2.0, 0.0);
-    init_state_.covariance = accumulated_covariance_; // Add epsilon to diagonal
+    init_state_.state = Eigen::Vector4d(-0.25, 0.25, -2.0, 0.0);
+    init_state_.covariance = Eigen::Matrix4d::Identity() * 1e-6; // We assume prior is good enough
     init_state_.roll = 0.0;
     init_state_.pitch = 0.0;
     init_state_.timestamp = this->get_clock()->now();
@@ -167,7 +170,7 @@ private:
             Eigen::Matrix4d That_ts = build_transformation_matrix(opt_state_.roll, opt_state_.pitch, opt_state_.state);
 
             publish_transform(That_ts, opt_state_.timestamp);
-            publish_covariance_with_timestamp(accumulated_covariance_, opt_state_.timestamp);
+            publish_covariance_with_timestamp(opt_state_.covariance, opt_state_.timestamp);
 
         }
 
@@ -177,6 +180,14 @@ private:
         
 
     }
+
+    void window_opt_cb_() {
+
+        RCLCPP_WARN(this->get_logger(), "[Eliko global_opt node] Changing initial solution...");
+        init_state_ = opt_state_; 
+
+    }
+
 
 
     void attitude_cb_(const geometry_msgs::msg::QuaternionStamped::SharedPtr msg) {
@@ -367,7 +378,7 @@ private:
             ceres::LossFunction* robust_loss = new ceres::HuberLoss(huber_threshold);
 
             // Add the prior residual with the full covariance
-            ceres::CostFunction* prior_cost = PriorResidual::Create(init_state_.state, accumulated_covariance_);
+            ceres::CostFunction* prior_cost = PriorResidual::Create(init_state_.state, opt_state_.covariance);
             problem.AddResidualBlock(prior_cost, nullptr, opt_state.state.data());
 
 
@@ -416,7 +427,7 @@ private:
                     // Extract the full covariance matrix
                     covariance.GetCovarianceBlock(opt_state.state.data(), opt_state.state.data(), full_covariance.data());
 
-                    // RCLCPP_INFO(this->get_logger(), "Full covariance matrix:\n"
+                    // RCLCPP_INFO(this->get_logger(), "State covariance matrix:\n"
                     //     "[%f, %f, %f, %f]\n[%f, %f, %f, %f]\n[%f, %f, %f, %f]\n[%f, %f, %f, %f]",
                     //     full_covariance(0, 0), full_covariance(0, 1), full_covariance(0, 2), full_covariance(0, 3),
                     //     full_covariance(1, 0), full_covariance(1, 1), full_covariance(1, 2), full_covariance(1, 3),
@@ -426,7 +437,7 @@ private:
                     //Accumulate covariances
                     accumulated_covariance_ += full_covariance;
 
-                    RCLCPP_INFO(this->get_logger(), "Full covariance matrix:\n"
+                    RCLCPP_INFO(this->get_logger(), "Accumulated covariance matrix:\n"
                         "[%f, %f, %f, %f]\n[%f, %f, %f, %f]\n[%f, %f, %f, %f]\n[%f, %f, %f, %f]",
                         accumulated_covariance_(0, 0), accumulated_covariance_(0, 1), accumulated_covariance_(0, 2), accumulated_covariance_(0, 3),
                         accumulated_covariance_(1, 0), accumulated_covariance_(1, 1), accumulated_covariance_(1, 2), accumulated_covariance_(1, 3),
@@ -486,7 +497,7 @@ private:
                 residual[0] = T(measured_distance_) - predicted_distance;
                 residual[0] *= T(measurement_stdev_inv_);  // Scale residual
 
-                // std::cout << "Measurement residual: " << residual[0] << std::endl;
+                //std::cout << "Measurement residual: " << residual[0] << std::endl;
 
                 return true;
         }
@@ -519,15 +530,21 @@ private:
 
         // Scale by the square root of the inverse covariance matrix
         Eigen::LLT<Eigen::Matrix4d> chol(full_covariance_);
-        Eigen::Matrix4d sqrt_inv_covariance = Eigen::Matrix4d(chol.matrixL().transpose()).inverse();
+        //Eigen::Matrix4d sqrt_inv_covariance = Eigen::Matrix4d(chol.matrixL().transpose()).inverse();
+        Eigen::Matrix4d sqrt_covariance = Eigen::Matrix4d(chol.matrixL());
 
-        Eigen::Matrix<T, 4, 1> weighted_residual = sqrt_inv_covariance.cast<T>() * delta_state;
+        Eigen::Matrix<T, 4, 1> weighted_residual = sqrt_covariance.cast<T>() * delta_state;
 
         // Assign to residual
         residual[0] = weighted_residual[0];
         residual[1] = weighted_residual[1];
         residual[2] = weighted_residual[2];
         residual[3] = weighted_residual[3];
+
+        // std::cout << "Prior residual: ["
+        //   << residual[0] << ", " << residual[1] << ", " 
+        //   << residual[2] << ", " << residual[3] << "]" 
+        //   << std::endl;
 
         return true;
     }
@@ -553,7 +570,7 @@ private:
     
     rclcpp::Subscription<eliko_messages::msg::DistancesList>::SharedPtr eliko_distances_sub_;
     rclcpp::Subscription<geometry_msgs::msg::QuaternionStamped>::SharedPtr dji_attitude_sub_;
-    rclcpp::TimerBase::SharedPtr global_optimization_timer_, global_optimization_oneoff_timer_;
+    rclcpp::TimerBase::SharedPtr global_optimization_timer_, window_opt_timer_;
 
 
     std::deque<Measurement> global_measurements_;
