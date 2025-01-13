@@ -5,9 +5,9 @@ measurement_simulator:
     use_sim_time: True
 trajectory_simulator:
   ros__parameters:
-    load_trajectory: False
+    load_trajectory: True
     same_trajectory: True
-    trajectory_name: "trajectory_pursue"
+    trajectory_name: "trajectory_identical_drift2"
     total_steps: 100
     pub_rate: 10.0
     use_sim_time: True

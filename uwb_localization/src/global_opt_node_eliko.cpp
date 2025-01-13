@@ -92,7 +92,7 @@ public:
 
    
     //Initial values for state
-    init_state_.state = Eigen::Vector4d(-0.25, 0.25, -2.0, 0.0);
+    init_state_.state = Eigen::Vector4d(0.0, 0.0, -2.0, 0.0);
     init_state_.covariance = Eigen::Matrix4d::Identity() * 1e-6; // We assume prior is good enough
     init_state_.roll = 0.0;
     init_state_.pitch = 0.0;
@@ -171,6 +171,7 @@ private:
 
             publish_transform(That_ts, opt_state_.timestamp);
             publish_covariance_with_timestamp(opt_state_.covariance, opt_state_.timestamp);
+            //publish_covariance_with_timestamp(accumulated_covariance_, opt_state_.timestamp);
 
         }
 
@@ -378,7 +379,7 @@ private:
             ceres::LossFunction* robust_loss = new ceres::HuberLoss(huber_threshold);
 
             // Add the prior residual with the full covariance
-            ceres::CostFunction* prior_cost = PriorResidual::Create(init_state_.state, opt_state_.covariance);
+            ceres::CostFunction* prior_cost = PriorResidual::Create(init_state_.state, init_state_.covariance);
             problem.AddResidualBlock(prior_cost, nullptr, opt_state.state.data());
 
 
@@ -446,6 +447,7 @@ private:
 
                     // Optionally, store covariance for further use
                     opt_state.covariance = accumulated_covariance_;  // Add this to your State struct if needed
+                    //opt_state.covariance = full_covariance;
 
                     //Update global state variable
                     opt_state_ = opt_state;
@@ -530,10 +532,10 @@ private:
 
         // Scale by the square root of the inverse covariance matrix
         Eigen::LLT<Eigen::Matrix4d> chol(full_covariance_);
-        //Eigen::Matrix4d sqrt_inv_covariance = Eigen::Matrix4d(chol.matrixL().transpose()).inverse();
-        Eigen::Matrix4d sqrt_covariance = Eigen::Matrix4d(chol.matrixL());
+        Eigen::Matrix4d sqrt_inv_covariance = Eigen::Matrix4d(chol.matrixL().transpose()).inverse();
+        //Eigen::Matrix4d sqrt_covariance = Eigen::Matrix4d(chol.matrixL());
 
-        Eigen::Matrix<T, 4, 1> weighted_residual = sqrt_covariance.cast<T>() * delta_state;
+        Eigen::Matrix<T, 4, 1> weighted_residual = sqrt_inv_covariance.cast<T>() * delta_state;
 
         // Assign to residual
         residual[0] = weighted_residual[0];

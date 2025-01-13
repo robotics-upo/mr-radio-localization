@@ -193,6 +193,9 @@ class TrajectorySimulator(Node):
             j_uav = 0
 
         j_ground = 0
+
+        # Initialize drift values
+        cumulative_drift = 0.0  # Starts with no drift
         
         for i in range(steps):
 
@@ -220,8 +223,17 @@ class TrajectorySimulator(Node):
                 j_uav +=1
         
             else:
-                #Just duplicate the trajectory
-                direction_uav = direction
+         
+                # Apply incremental drift
+                cumulative_drift += 0.002  # Incrementally increase the drift
+                yaw_rotation = np.array([
+                    [np.cos(cumulative_drift), -np.sin(cumulative_drift), 0],
+                    [np.sin(cumulative_drift),  np.cos(cumulative_drift), 0],
+                    [0, 0, 1]
+                ])
+
+                # Start identical and apply drift gradually
+                direction_uav = np.dot(yaw_rotation, direction)
 
             j_ground += 1
 
