@@ -161,7 +161,15 @@ class MeasurementSimulator(Node):
                     rclpy.time.Time())
                 
                 distance = Float32()
-                distance.data = np.sqrt(t.transform.translation.x**2 + t.transform.translation.y**2 + t.transform.translation.z**2) + np.random.normal(0, self.measurement_noise_std)
+
+                # Add outlier with 5% probability
+                if random.random() < 0.05:
+                    gaussian_noise = np.random.normal(0, self.measurement_noise_std*5.0)
+                else:
+                    gaussian_noise = np.random.normal(0, self.measurement_noise_std)
+
+                distance.data = np.sqrt(t.transform.translation.x**2 + t.transform.translation.y**2 + t.transform.translation.z**2) + gaussian_noise
+                
                 publisher.publish(distance)
 
             except TransformException as ex:
@@ -189,7 +197,15 @@ class MeasurementSimulator(Node):
                     rclpy.time.Time())
                 
                 distance = Float32()
-                distance.data = np.sqrt(t.transform.translation.x**2 + t.transform.translation.y**2 + t.transform.translation.z**2) + np.random.normal(0, self.measurement_noise_std)
+
+                # Add outlier with 5% probability
+                if random.random() < 0.05:
+                    gaussian_noise = np.random.normal(0, self.measurement_noise_std*5.0)
+                else:
+                    gaussian_noise = np.random.normal(0, self.measurement_noise_std)
+
+                distance.data = np.sqrt(t.transform.translation.x**2 + t.transform.translation.y**2 + t.transform.translation.z**2) + gaussian_noise
+                
                 publisher.publish(distance)
       
             except TransformException as ex:

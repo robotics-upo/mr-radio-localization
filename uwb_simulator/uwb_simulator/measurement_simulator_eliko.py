@@ -18,6 +18,7 @@ from visualization_msgs.msg import Marker, MarkerArray  # Import Marker messages
 from eliko_messages.msg import Distances, DistancesList
 import time
 
+
 class MeasurementSimulatorEliko(Node):
 
     def __init__(self):
@@ -42,7 +43,6 @@ class MeasurementSimulatorEliko(Node):
         self.measurement_noise_std = self.get_parameter("measurement_noise_std").value
         self.rate = self.get_parameter("pub_rate").value
 
-
         self.anchors_ids =	{
             'a1': self.get_parameter("anchors.a1.id").value,
             'a2': self.get_parameter("anchors.a2.id").value,
@@ -59,8 +59,11 @@ class MeasurementSimulatorEliko(Node):
         self.tf_listener = TransformListener(self.tf_buffer, self)
 
         self.uav_gt_markers = MarkerArray()
-        self.uav_opt_markers = MarkerArray()
         self.arco_gt_markers = MarkerArray()
+        self.uav_opt_markers = MarkerArray()
+
+        self.translation_errors = []
+        self.rotation_errors = []
 
         #Create publisher to simulate orientation changes
         self.attitude_pub = self.create_publisher(QuaternionStamped, 'dji_sdk/attitude', 1)
@@ -72,7 +75,11 @@ class MeasurementSimulatorEliko(Node):
         self.error_publisher = self.create_publisher(Float32MultiArray, 'optimization/metrics', 1)
 
         # Publishers for RViz markers
+        #apply transform to most recent point
         self.opt_target_marker_pub = self.create_publisher(MarkerArray, 'visualization/opt_target_marker', 1)
+        #to apply transform globally to all points in source window
+        self.global_opt_target_marker_pub = self.create_publisher(MarkerArray, 'visualization/global_opt_target_marker', 1)
+
         self.gt_source_marker_pub = self.create_publisher(MarkerArray, 'visualization/gt_source_marker', 1)
         self.gt_target_marker_pub = self.create_publisher(MarkerArray, 'visualization/gt_target_marker', 1)
 
@@ -80,6 +87,10 @@ class MeasurementSimulatorEliko(Node):
         self.timer2 = self.create_timer(1./self.rate, self.on_timer_t2)
         self.timer_att = self.create_timer(1./self.rate, self.on_timer_att)
         
+        self.timer_gt = self.create_timer(1./self.rate, self.on_timer_gt)
+        self.agv_transforms = []  # List to store AGV transforms (w_T_s)
+        self.sliding_window_duration = 10.0  # Sliding window duration in seconds
+   
 
         self.optimized_tf_sub = self.create_subscription(
             TransformStamped,
@@ -87,6 +98,8 @@ class MeasurementSimulatorEliko(Node):
             self.optimized_tf_cb,
             10)
         self.optimized_tf_sub  # prevent unused variable warning
+
+
 
     def transform_stamped_to_matrix(self, transform_stamped):
         # Extract translation
@@ -154,19 +167,16 @@ class MeasurementSimulatorEliko(Node):
         dett = np.linalg.norm(te)
         detR = np.linalg.norm(Re_rpy)
 
-        return detR, dett
-    
-    def compute_transformation_errors_alt(self, T_w_s, T_w_t):
-    
-        Te = np.linalg.inv(T_w_t) @ T_w_s
+        self.translation_errors.append(dett)
+        self.rotation_errors.append(detR)
 
-        Re = R.from_matrix(Te[:3,:3])
-        Re_rpy = Re.as_euler('zyx', degrees=True)
-        te = Te[:3,3]
-        dett = np.linalg.norm(te)
-        detR = np.linalg.norm(Re_rpy)
+        # Compute RMSE for translation
+        rmse_translation = np.sqrt(np.mean(np.square(np.array(self.translation_errors))))
 
-        return detR, dett
+        # Compute RMSE for rotation
+        rmse_rotation = np.sqrt(np.mean(np.square(np.array(self.rotation_errors))))
+
+        return detR, dett, rmse_rotation, rmse_translation
     
     
     def create_marker(self, transform, marker_list, frame_id, marker_ns, color):
@@ -196,9 +206,11 @@ class MeasurementSimulatorEliko(Node):
 
     def optimized_tf_cb(self, msg):
 
-        try:
-                that_ts_msg = msg
+        that_ts_msg = msg
+        That_t_s = self.transform_stamped_to_matrix(that_ts_msg)
 
+        try:
+                                         
                 gt_target = self.tf_buffer.lookup_transform(
                     'world',
                     'uav_gt',
@@ -208,43 +220,86 @@ class MeasurementSimulatorEliko(Node):
                     'world',
                     'ground_vehicle',
                     rclpy.time.Time())
-
+                
                 T_w_s = self.transform_stamped_to_matrix(gt_source)
                 T_w_t = self.transform_stamped_to_matrix(gt_target)
-                That_t_s = self.transform_stamped_to_matrix(that_ts_msg)
                 That_w_t = T_w_s  @ np.linalg.inv(That_t_s)
                          
-                detR1, dett1 = self.compute_transformation_errors(T_w_s, 
+                detR, dett, rmse_R, rmse_t = self.compute_transformation_errors(T_w_s, 
                                                                 T_w_t, 
                                                                 That_t_s)
                 
-                detR2, dett2 = self.compute_transformation_errors_alt(T_w_t, That_w_t)
-
-                #Select minimum error from the two methods
-                dett = min(dett1, dett2)
-                detR = min(detR1,detR2)
-                
-                opt_target = self.matrix_to_transform_stamped(That_w_t, "world", "uav_opt", that_ts_msg.header.stamp)
-
-                
+                opt_target = self.matrix_to_transform_stamped(That_w_t, "world", "uav_opt", that_ts_msg.header.stamp)   
                 self.create_marker(opt_target, self.uav_opt_markers, "world", "uav_opt_marker", [0.0, 0.0, 1.0])
+                
                 self.create_marker(gt_target, self.uav_gt_markers, "world", "uav_gt_marker", [0.0, 1.0, 0.0])
                 self.create_marker(gt_source, self.arco_gt_markers, "world", "arco_gt_marker", [1.0, 0.0, 0.0])
 
                 metrics = Float32MultiArray()
-                metrics.data = [detR, dett]  # Set both values at once
-                self.error_publisher.publish(metrics)
+                metrics.data = [detR, dett, rmse_R, rmse_t]  # Set both values at once
 
                 # Publish the MarkerArrays
                 self.gt_source_marker_pub.publish(self.arco_gt_markers)
                 self.gt_target_marker_pub.publish(self.uav_gt_markers)
                 self.opt_target_marker_pub.publish(self.uav_opt_markers)
 
-                                            
+                #Publish metrics
+                self.error_publisher.publish(metrics)
+
+        
         except TransformException as ex:
                 self.get_logger().info(
                     f'Could not transform: {ex}')
                 return
+
+        ##Apply transform to all points in sliding window
+
+        self.global_transform_trajectory(That_t_s)
+    
+
+    def global_transform_trajectory(self, That_t_s):
+
+        # Compute w_That_t for each w_T_s in the sliding window
+        transformed_points = []
+        for agv_transform in self.agv_transforms:
+            w_T_s = self.transform_stamped_to_matrix(agv_transform)
+
+            # Compute w_That_t = w_T_s * np.linalg.inv(t_That_s)
+            w_That_t = w_T_s @ np.linalg.inv(That_t_s)
+
+            # Store the result for visualization
+            transformed_points.append({
+                'timestamp': agv_transform.header.stamp,
+                'transform': w_That_t
+            })
+
+        uav_opt_markers = MarkerArray()
+        # Publish transformed points as markers
+        for point in transformed_points:
+            marker = Marker()
+            marker.header.frame_id = "world"
+            marker.header.stamp = point['timestamp']
+            marker.ns = "transformed_points"
+            marker.id = len(uav_opt_markers.markers)
+            marker.type = Marker.SPHERE
+            marker.action = Marker.ADD
+
+            marker.pose.position.x = point['transform'][0][3]
+            marker.pose.position.y = point['transform'][1][3]
+            marker.pose.position.z = point['transform'][2][3]
+            marker.scale.x = 0.05
+            marker.scale.y = 0.05
+            marker.scale.z = 0.05
+
+            marker.color.r = 0.25
+            marker.color.g = 0.5
+            marker.color.b = 1.0
+            marker.color.a = 0.8
+
+            uav_opt_markers.markers.append(marker)
+        
+        self.global_opt_target_marker_pub.publish(uav_opt_markers)
+                                            
         
     def on_timer_att(self):
 
@@ -270,6 +325,26 @@ class MeasurementSimulatorEliko(Node):
                 f'Could not transform world to uav_gt: {ex}')
             return
 
+
+    def on_timer_gt(self):
+        try:
+            # Get the AGV transform (w_T_s)
+            agv_transform = self.tf_buffer.lookup_transform(
+                'world', 'ground_vehicle', rclpy.time.Time()
+            )
+
+            # Store the transform with a timestamp
+            self.agv_transforms.append(agv_transform)
+
+            # Remove old transforms that are outside the sliding window duration
+            self.agv_transforms = [
+                t for t in self.agv_transforms
+                if (rclpy.time.Time.from_msg(agv_transform.header.stamp).nanoseconds - rclpy.time.Time.from_msg(t.header.stamp).nanoseconds) / 1e9 <= self.sliding_window_duration
+            ]
+
+        except TransformException as ex:
+            self.get_logger().info(f"Could not transform world to ground_vehicle: {ex}")
+
     #Publish simulated measures from tag1 to anchors using simulated ground truth
 
     def on_timer_t1(self):
@@ -286,9 +361,17 @@ class MeasurementSimulatorEliko(Node):
                 distance = Distances()
                 distance.anchor_sn = id
                 distance.tag_sn = self.tags_ids['t1']
-                distance.distance = np.sqrt(t.transform.translation.x**2 + t.transform.translation.y**2 + t.transform.translation.z**2) + np.random.normal(0, self.measurement_noise_std)
+
+                 # Add outlier with 5% probability
+                if random.random() < 0.05:
+                    gaussian_noise = np.random.normal(0, self.measurement_noise_std*5.0)
+                else:
+                    gaussian_noise = np.random.normal(0, self.measurement_noise_std)
+
+                distance.distance = np.sqrt(t.transform.translation.x**2 + t.transform.translation.y**2 + t.transform.translation.z**2) + gaussian_noise
                 distance.distance = distance.distance * 100.0 #cm
                 distances_list.anchor_distances.append(distance)
+
 
             except TransformException as ex:
                 self.get_logger().info(
@@ -316,10 +399,17 @@ class MeasurementSimulatorEliko(Node):
                 distance = Distances()
                 distance.anchor_sn = id
                 distance.tag_sn = self.tags_ids['t2']
-                distance.distance = np.sqrt(t.transform.translation.x**2 + t.transform.translation.y**2 + t.transform.translation.z**2) + np.random.normal(0, self.measurement_noise_std)
+                 # Add outlier with 5% probability
+                if random.random() < 0.05:
+                    gaussian_noise = np.random.normal(0, self.measurement_noise_std*5.0)
+                else:
+                    gaussian_noise = np.random.normal(0, self.measurement_noise_std)
+
+                distance.distance = np.sqrt(t.transform.translation.x**2 + t.transform.translation.y**2 + t.transform.translation.z**2) + gaussian_noise
                 distance.distance = distance.distance * 100.0 #cm
 
                 distances_list.anchor_distances.append(distance)
+
 
             except TransformException as ex:
                 self.get_logger().info(

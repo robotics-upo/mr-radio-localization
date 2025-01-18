@@ -6,10 +6,13 @@ measurement_simulator:
 trajectory_simulator:
   ros__parameters:
     load_trajectory: True
-    trajectory_name: "trajectory_short3"
+    same_trajectory: True
+    trajectory_name: "trajectory_identical_drift2"
     total_steps: 100
     pub_rate: 10.0
     use_sim_time: True
+    uav_origin: [0.0, 0.0, 2.0]
+    ground_vehicle_origin: [0.0, 0.0, 0.0]
     anchors:
       a1:
         id: "0x0009D6" 

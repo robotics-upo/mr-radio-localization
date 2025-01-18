@@ -154,7 +154,7 @@ private:
             icp_tf_ = run_icp(source_cloud_, target_cloud_);
         } else {
             RCLCPP_WARN(this->get_logger(), "Source or target point cloud is empty. Skipping ICP.");
-            icp_tf_ = Eigen::Matrix4f::Zero()
+            icp_tf_ = Eigen::Matrix4f::Zero();
         }
             
         //Update transforms after convergence
