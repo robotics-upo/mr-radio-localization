@@ -89,7 +89,7 @@ class MeasurementSimulatorEliko(Node):
         
         self.timer_gt = self.create_timer(1./self.rate, self.on_timer_gt)
         self.agv_transforms = []  # List to store AGV transforms (w_T_s)
-        self.sliding_window_duration = 10.0  # Sliding window duration in seconds
+        self.sliding_window_duration = 5.0  # Sliding window duration in seconds
    
 
         self.optimized_tf_sub = self.create_subscription(
@@ -218,7 +218,7 @@ class MeasurementSimulatorEliko(Node):
                                
                 gt_source = self.tf_buffer.lookup_transform(
                     'world',
-                    'ground_vehicle',
+                    'agv_gt',
                     rclpy.time.Time())
                 
                 T_w_s = self.transform_stamped_to_matrix(gt_source)
@@ -330,8 +330,9 @@ class MeasurementSimulatorEliko(Node):
         try:
             # Get the AGV transform (w_T_s)
             agv_transform = self.tf_buffer.lookup_transform(
-                'world', 'ground_vehicle', rclpy.time.Time()
-            )
+                'world', 
+                'agv_gt', 
+                rclpy.time.Time())
 
             # Store the transform with a timestamp
             self.agv_transforms.append(agv_transform)

@@ -63,9 +63,9 @@ public:
 
     covariance_publisher_ = this->create_publisher<eliko_messages::msg::CovarianceMatrixWithHeader>("eliko_optimization_node/covariance", 10);
 
-    global_opt_window_s_ = 10.0; //size of the sliding window in seconds
+    global_opt_window_s_ = 5.0; //size of the sliding window in seconds
     global_opt_rate_s_ = 0.5; //rate of the optimization
-    min_measurements_ = 400; //min number of measurements for running optimizer
+    min_measurements_ = 200; //min number of measurements for running optimizer
     measurement_stdev_ = 0.1; //10 cm measurement noise
     measurement_covariance_ = measurement_stdev_ * measurement_stdev_;
 
@@ -87,7 +87,7 @@ public:
         {"0x001155", {-0.24, -0.24, -0.06}}, {"0x001397", {0.24, 0.24, -0.06}}
     };
 
-    eliko_frame_id_ = "ground_vehicle"; //frame of the eliko system-> arco/eliko, for simulation use "ground_vehicle"
+    eliko_frame_id_ = "agv_odom"; //frame of the eliko system-> arco/eliko, for simulation use "agv_gt" for ground truth, "agv_odom" for odometry w/ errors
     uav_frame_id_ = "uav_opt"; //frame of the uav -> "base_link", for simulation use "uav_opt"
 
    
