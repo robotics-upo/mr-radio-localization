@@ -221,15 +221,22 @@ class MeasurementSimulatorEliko(Node):
                     'agv_gt',
                     rclpy.time.Time())
                 
+                odom_source = self.tf_buffer.lookup_transform(
+                    'world',
+                    'agv_odom',
+                    rclpy.time.Time())
+                
                 T_w_s = self.transform_stamped_to_matrix(gt_source)
                 T_w_t = self.transform_stamped_to_matrix(gt_target)
-                That_w_t = T_w_s  @ np.linalg.inv(That_t_s)
+                T_w_s_odom = self.transform_stamped_to_matrix(odom_source)
+
+                That_w_t_odom = T_w_s_odom  @ np.linalg.inv(That_t_s) #I am applying the transform to the odometry source, not gt -for visualization
                          
-                detR, dett, rmse_R, rmse_t = self.compute_transformation_errors(T_w_s, 
+                detR, dett, rmse_R, rmse_t = self.compute_transformation_errors(T_w_s, #errors are computed wrt gt
                                                                 T_w_t, 
                                                                 That_t_s)
                 
-                opt_target = self.matrix_to_transform_stamped(That_w_t, "world", "uav_opt", that_ts_msg.header.stamp)   
+                opt_target = self.matrix_to_transform_stamped(That_w_t_odom, "world", "uav_opt", that_ts_msg.header.stamp)   
                 self.create_marker(opt_target, self.uav_opt_markers, "world", "uav_opt_marker", [0.0, 0.0, 1.0])
                 
                 self.create_marker(gt_target, self.uav_gt_markers, "world", "uav_gt_marker", [0.0, 1.0, 0.0])
@@ -262,10 +269,10 @@ class MeasurementSimulatorEliko(Node):
         # Compute w_That_t for each w_T_s in the sliding window
         transformed_points = []
         for agv_transform in self.agv_transforms:
-            w_T_s = self.transform_stamped_to_matrix(agv_transform)
+            w_T_s_odom = self.transform_stamped_to_matrix(agv_transform)
 
             # Compute w_That_t = w_T_s * np.linalg.inv(t_That_s)
-            w_That_t = w_T_s @ np.linalg.inv(That_t_s)
+            w_That_t = w_T_s_odom @ np.linalg.inv(That_t_s)
 
             # Store the result for visualization
             transformed_points.append({
@@ -328,10 +335,10 @@ class MeasurementSimulatorEliko(Node):
 
     def on_timer_gt(self):
         try:
-            # Get the AGV transform (w_T_s)
+            # Get the AGV transform (w_T_s) --odometry, not gt
             agv_transform = self.tf_buffer.lookup_transform(
                 'world', 
-                'agv_gt', 
+                'agv_odom', 
                 rclpy.time.Time())
 
             # Store the transform with a timestamp

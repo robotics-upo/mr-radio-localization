@@ -83,10 +83,10 @@ class OdometrySimulator(Node):
 
         self.get_logger().info("Load trajectory is: " +  str(self.load_trajectory))
 
-        if self.load_trajectory and os.path.exists(self.trajectory_name):
+        if self.load_trajectory:
             self.get_logger().info(f"Loading trajectories from {self.trajectory_name}")
             try:
-                data = np.load(self.trajectory_name, allow_pickle=True).item()
+                data = np.load(self.trajectory_name + '.npy', allow_pickle=True).item()
                 self.uav_velocity_commands = data['uav']
                 self.agv_velocity_commands = data['agv']
             except Exception as e:
@@ -141,8 +141,9 @@ class OdometrySimulator(Node):
         temp_traveled_distance_uav = temp_traveled_distance_agv = 0.0
 
         while distance_covered < self.total_distance:
-    
-            agv_v = np.clip(agv_last_v + np.random.uniform(-0.1, 0.1), *self.linear_velocity_range)
+
+
+            agv_v = np.clip(agv_last_v + np.random.uniform(-0.05, 0.05), *self.linear_velocity_range)
             agv_w = np.clip(agv_last_w + np.random.uniform(-0.01, 0.01), *self.angular_velocity_range)
 
             #Uncomment this to make them follow similar trajectories
@@ -150,7 +151,7 @@ class OdometrySimulator(Node):
             uav_last_w = agv_last_w
 
             # Smooth velocity changes
-            uav_v = np.clip(uav_last_v + np.random.uniform(-0.1, 0.1), *self.linear_velocity_range)
+            uav_v = np.clip(uav_last_v + np.random.uniform(-0.05, 0.05), *self.linear_velocity_range)
             uav_w = np.clip(uav_last_w + np.random.uniform(-0.01, 0.01), *self.angular_velocity_range)
 
             dt = 1.0 / self.publish_rate
@@ -166,7 +167,8 @@ class OdometrySimulator(Node):
                     agv_v = uav_v  # Align AGV velocity with UAV
                     agv_w = uav_w
 
-            # self.get_logger().warning(f'[Vel commands]Distance traveled AGV: {temp_traveled_distance_agv}')
+            
+            #self.get_logger().warning(f'[Vel commands]Distance traveled AGV: {temp_traveled_distance_agv}')
             
             uav_commands.append((uav_v, uav_w))
             agv_commands.append((agv_v, agv_w))
@@ -174,8 +176,10 @@ class OdometrySimulator(Node):
             uav_last_v, uav_last_w = uav_v, uav_w
             agv_last_v, agv_last_w = agv_v, agv_w
 
-            distance_covered += (uav_v + agv_v) / 2 / self.publish_rate
+            distance_increment = (uav_v + agv_v) / 2 / self.publish_rate
 
+            distance_covered += distance_increment
+            
         return uav_commands, agv_commands
 
     
@@ -197,6 +201,8 @@ class OdometrySimulator(Node):
         v_agv, w_agv = self.agv_velocity_commands.pop(0)
         self.traveled_distance_agv += v_agv * dt
         self.agv_pose, self.agv_odom_pose = self.integrate_odometry(self.agv_pose, self.agv_odom_pose, v_agv, w_agv, dt, self.traveled_distance_agv)
+
+        self.get_logger().info(f'Traveled distance AGV: {self.traveled_distance_agv:.2f}')
 
         # Publish transforms
         self.transform_publisher(self.uav_pose, 'world', 'uav_gt')

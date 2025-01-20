@@ -9,7 +9,7 @@ import numpy as np
 from scipy.spatial.transform import Rotation as R
 
 
-def compute_That_w_t(timestamp, source_gt_data_df, target_gt_data_df, t_That_s_data_df, columns_source_gt_data, columns_target_gt_data, columns_t_That_s_data):
+def compute_That_w_t(timestamp, source_gt_data_df, source_odom_data_df, target_gt_data_df, t_That_s_data_df, columns_source_gt_data, columns_source_odom_data, columns_target_gt_data, columns_t_That_s_data):
     """
     Computes That_w_t for each row in t_That_s_data_df using the latest available source_gt_data_df.
 
@@ -25,6 +25,8 @@ def compute_That_w_t(timestamp, source_gt_data_df, target_gt_data_df, t_That_s_d
 
     # Ensure data is sorted by timestamp
     source_gt_data_df = source_gt_data_df.sort_values(timestamp).reset_index(drop=True)
+    source_odom_data_df = source_odom_data_df.sort_values(timestamp).reset_index(drop=True)
+
     t_That_s_data_df = t_That_s_data_df.sort_values(timestamp).reset_index(drop=True)
 
     for _, row in t_That_s_data_df.iterrows():
@@ -34,9 +36,12 @@ def compute_That_w_t(timestamp, source_gt_data_df, target_gt_data_df, t_That_s_d
         if latest_source_idx is not None:  # Ensure there's a valid matching source data
             # Get the corresponding source and t_That_s data
             source_row = source_gt_data_df.iloc[latest_source_idx]
+            source_odom_row = source_odom_data_df.iloc[latest_source_idx]
+
             target_row = target_gt_data_df.iloc[latest_source_idx]
             T_w_t = np.eye(4)
             T_w_s = np.eye(4)
+            T_w_s_odom = np.eye(4)
             T_t_s = np.eye(4)
             That_t_s = np.eye(4)
 
@@ -45,6 +50,10 @@ def compute_That_w_t(timestamp, source_gt_data_df, target_gt_data_df, t_That_s_d
             q_w_s = source_row[[columns_source_gt_data[4], columns_source_gt_data[5], columns_source_gt_data[6], columns_source_gt_data[7]]].values
             T_w_s[:3, :3] = R.from_quat(q_w_s).as_matrix()
 
+            # Populate T_w_s_odom
+            T_w_s_odom[:3, 3] = source_odom_row[[columns_source_odom_data[1], columns_source_odom_data[2], columns_source_odom_data[3]]].values
+            q_w_s_odom = source_odom_row[[columns_source_odom_data[4], columns_source_odom_data[5], columns_source_odom_data[6], columns_source_odom_data[7]]].values
+            T_w_s[:3, :3] = R.from_quat(q_w_s_odom).as_matrix()
 
             # Populate T_w_t
             T_w_t[:3, 3] = target_row[[columns_target_gt_data[1], columns_target_gt_data[2], columns_target_gt_data[3]]].values
@@ -56,12 +65,11 @@ def compute_That_w_t(timestamp, source_gt_data_df, target_gt_data_df, t_That_s_d
             q_hat = row[[columns_t_That_s_data[4], columns_t_That_s_data[5], columns_t_That_s_data[6], columns_t_That_s_data[7]]].values
             That_t_s[:3, :3] = R.from_quat(q_hat).as_matrix()
 
-            #Compute T_t_s
+            #Compute T_t_s -> ground truth information
             T_t_s = np.linalg.inv(T_w_t) @ T_w_s
-            # Compute That_w_t
-            That_w_t = T_w_s @ np.linalg.inv(That_t_s)
-             # Compute That_w_t
-            That_w_t = T_w_s @ np.linalg.inv(That_t_s)
+            
+             # Compute That_w_t -> computed from odometry
+            That_w_t = T_w_s_odom @ np.linalg.inv(That_t_s)
             translation = That_w_t[:3, 3]  # Extract the translation part
             rotation = R.from_matrix(That_w_t[:3, :3]).as_quat()  # Extract rotation as quaternion
 
@@ -130,6 +138,11 @@ def plot_3d_scatter(path, data_frame_ref, data_frame_target, data_frame_opt, col
     ax.legend()
 
     plt.savefig(path + '/pose_3D.png', bbox_inches='tight')
+
+    # Create a top-down view
+    ax.view_init(elev=90, azim=-90)  # Elevation of 90° for top-down view, azimuth adjusted for alignment
+    plt.savefig(f"{path}/pose_top_down.png", bbox_inches='tight')
+
     plt.show()
 
 def plot_pose_temporal_evolution(path, df_ref, df_experiment, df_covariance, cols_ref, cols_experiment, t0):
@@ -271,13 +284,13 @@ def plot_attitude_temporal_evolution(path, df_ref_rpy, df_opt_rpy, df_covariance
     plt.suptitle("Temporal Evolution of attitude")
 
     #df_opt_rpy[cols_experiment[0]] -= df_opt_rpy[cols_experiment[0]].iloc[0]
-    df_opt_rpy[cols_experiment[0]] -= t0
+    #df_opt_rpy[cols_experiment[0]] -= t0
 
     #df_covariance[cols_experiment[0]] -= df_covariance[cols_experiment[0]].iloc[0]
-    df_covariance[cols_experiment[0]] -= t0
+    #df_covariance[cols_experiment[0]] -= t0
 
     # Subtract the first element of the timestamp column to start from 0
-    df_ref_rpy[cols_experiment[0]] -= t0
+    #df_ref_rpy[cols_experiment[0]] -= t0
 
 
     std_yaw = np.sqrt(np.array(df_covariance.iloc[:, 4]))  # Covariance_z
@@ -353,19 +366,26 @@ def plot_experiment_data(path_experiment_data, path_figs, sim = "True"):
     if sim == "True":
 
         # Define the maximum allowable timestamp
-        max_timestamp = 95.0
+        max_timestamp = 300.0
 
-        source_frame_id = 'ground_vehicle'
+        source_frame_id = 'agv_gt'
         target_frame_id = 'uav_opt'
 
-        source_gt_x_data = '/tf/world/ground_vehicle/translation/x'
-        source_gt_y_data = '/tf/world/ground_vehicle/translation/y'
-        source_gt_z_data = '/tf/world/ground_vehicle/translation/z'
-        source_gt_q0_data = '/tf/world/ground_vehicle/rotation/x'
-        source_gt_q1_data = '/tf/world/ground_vehicle/rotation/y'
-        source_gt_q2_data = '/tf/world/ground_vehicle/rotation/z'
-        source_gt_q3_data = '/tf/world/ground_vehicle/rotation/w'
+        source_gt_x_data = '/tf/world/agv_gt/translation/x'
+        source_gt_y_data = '/tf/world/agv_gt/translation/y'
+        source_gt_z_data = '/tf/world/agv_gt/translation/z'
+        source_gt_q0_data = '/tf/world/agv_gt/rotation/x'
+        source_gt_q1_data = '/tf/world/agv_gt/rotation/y'
+        source_gt_q2_data = '/tf/world/agv_gt/rotation/z'
+        source_gt_q3_data = '/tf/world/agv_gt/rotation/w'
 
+        source_odom_x_data = '/tf/world/agv_odom/translation/x'
+        source_odom_y_data = '/tf/world/agv_odom/translation/y'
+        source_odom_z_data = '/tf/world/agv_odom/translation/z'
+        source_odom_q0_data = '/tf/world/agv_odom/rotation/x'
+        source_odom_q1_data = '/tf/world/agv_odom/rotation/y'
+        source_odom_q2_data = '/tf/world/agv_odom/rotation/z'
+        source_odom_q3_data = '/tf/world/agv_odom/rotation/w'
 
         target_gt_x_data = '/tf/world/uav_gt/translation/x'
         target_gt_y_data = '/tf/world/uav_gt/translation/y'
@@ -421,6 +441,8 @@ def plot_experiment_data(path_experiment_data, path_figs, sim = "True"):
         # Plot 3D representation
 
         columns_source_gt_data = [time_data_setpoint, source_gt_x_data, source_gt_y_data, source_gt_z_data, source_gt_q0_data, source_gt_q1_data,source_gt_q2_data, source_gt_q3_data   ]
+        columns_source_odom_data = [time_data_setpoint, source_odom_x_data, source_odom_y_data, source_odom_z_data, source_odom_q0_data, source_odom_q1_data,source_odom_q2_data, source_odom_q3_data   ]
+        
         columns_target_gt_data = [time_data_setpoint, target_gt_x_data, target_gt_y_data, target_gt_z_data, target_gt_q0_data , target_gt_q1_data ,target_gt_q2_data ,target_gt_q3_data ]
 
         columns_metrics = [time_data_setpoint, metrics_detR_data, metrics_dett_data, metrics_rmse_R_data, metrics_rmse_t_data]
@@ -428,11 +450,15 @@ def plot_experiment_data(path_experiment_data, path_figs, sim = "True"):
         
         source_gt_data_df = read_pandas_df(path_experiment_data, columns_source_gt_data, 
                                            timestamp_col=time_data_setpoint, max_timestamp=max_timestamp)
+        
+        source_odom_data_df = read_pandas_df(path_experiment_data, columns_source_odom_data, 
+                                           timestamp_col=time_data_setpoint, max_timestamp=max_timestamp)
+        
         target_gt_data_df = read_pandas_df(path_experiment_data, columns_target_gt_data, 
                                            timestamp_col=time_data_setpoint, max_timestamp=max_timestamp)
 
 
-        w_That_t_data_df, t_T_s_data_df = compute_That_w_t(time_data_setpoint, source_gt_data_df, target_gt_data_df, t_That_s_data_df, columns_source_gt_data, columns_target_gt_data, columns_t_That_s_data)
+        w_That_t_data_df, t_T_s_data_df = compute_That_w_t(time_data_setpoint, source_gt_data_df, source_odom_data_df, target_gt_data_df, t_That_s_data_df, columns_source_gt_data, columns_source_odom_data, columns_target_gt_data, columns_t_That_s_data)
 
         metrics_df_data = read_pandas_df(path_experiment_data, columns_metrics,
                                          timestamp_col=time_data_setpoint, max_timestamp=max_timestamp)
