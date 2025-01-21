@@ -143,16 +143,16 @@ class OdometrySimulator(Node):
         while distance_covered < self.total_distance:
 
 
-            agv_v = np.clip(agv_last_v + np.random.uniform(-0.05, 0.05), *self.linear_velocity_range)
-            agv_w = np.clip(agv_last_w + np.random.uniform(-0.01, 0.01), *self.angular_velocity_range)
+            agv_v = np.clip(agv_last_v + np.random.uniform(-0.1, 0.1), *self.linear_velocity_range)
+            agv_w = np.clip(agv_last_w + np.random.uniform(-0.05, 0.05), *self.angular_velocity_range)
 
             #Uncomment this to make them follow similar trajectories
             uav_last_v = agv_last_v
             uav_last_w = agv_last_w
 
             # Smooth velocity changes
-            uav_v = np.clip(uav_last_v + np.random.uniform(-0.05, 0.05), *self.linear_velocity_range)
-            uav_w = np.clip(uav_last_w + np.random.uniform(-0.01, 0.01), *self.angular_velocity_range)
+            uav_v = np.clip(uav_last_v + np.random.uniform(-0.1, 0.1), *self.linear_velocity_range)
+            uav_w = np.clip(uav_last_w + np.random.uniform(-0.05, 0.05), *self.angular_velocity_range)
 
             dt = 1.0 / self.publish_rate
             
@@ -204,10 +204,11 @@ class OdometrySimulator(Node):
 
         self.get_logger().info(f'Traveled distance AGV: {self.traveled_distance_agv:.2f}')
 
-        # Publish transforms
+        # Publish transforms (ground truth)
         self.transform_publisher(self.uav_pose, 'world', 'uav_gt')
         self.transform_publisher(self.agv_pose, 'world', 'agv_gt')
 
+        # Publish odometry
         self.transform_publisher(self.uav_odom_pose, 'world', 'uav_odom')
         self.transform_publisher(self.agv_odom_pose, 'world', 'agv_odom')
 

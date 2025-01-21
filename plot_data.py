@@ -53,7 +53,7 @@ def compute_That_w_t(timestamp, source_gt_data_df, source_odom_data_df, target_g
             # Populate T_w_s_odom
             T_w_s_odom[:3, 3] = source_odom_row[[columns_source_odom_data[1], columns_source_odom_data[2], columns_source_odom_data[3]]].values
             q_w_s_odom = source_odom_row[[columns_source_odom_data[4], columns_source_odom_data[5], columns_source_odom_data[6], columns_source_odom_data[7]]].values
-            T_w_s[:3, :3] = R.from_quat(q_w_s_odom).as_matrix()
+            T_w_s_odom[:3, :3] = R.from_quat(q_w_s_odom).as_matrix()
 
             # Populate T_w_t
             T_w_t[:3, 3] = target_row[[columns_target_gt_data[1], columns_target_gt_data[2], columns_target_gt_data[3]]].values
@@ -70,10 +70,12 @@ def compute_That_w_t(timestamp, source_gt_data_df, source_odom_data_df, target_g
             
              # Compute That_w_t -> computed from odometry
             That_w_t = T_w_s_odom @ np.linalg.inv(That_t_s)
+
             translation = That_w_t[:3, 3]  # Extract the translation part
             rotation = R.from_matrix(That_w_t[:3, :3]).as_quat()  # Extract rotation as quaternion
+            yaw = R.from_matrix(That_w_t[:3, :3]).as_euler('zyx', degrees=False)[0]  # Extract yaw (rotation around Z-axis)
 
-            That_w_t_list.append([row[timestamp], *translation, *rotation])  # Include timestamp, translation, and rotation
+            That_w_t_list.append([row[timestamp], *translation, *rotation, yaw])  # Include timestamp, translation, and rotation
 
             # Extract translation, rotation, and yaw for T_t_s
             translation = T_t_s[:3, 3]
@@ -82,7 +84,7 @@ def compute_That_w_t(timestamp, source_gt_data_df, source_odom_data_df, target_g
             T_t_s_list.append([row[timestamp], *translation, *rotation, yaw])
 
     # Create a DataFrame for That_w_t and metrics
-    That_w_t_df = pd.DataFrame(That_w_t_list, columns=[timestamp, "x", "y", "z", "qx", "qy", "qz", "qw"])
+    That_w_t_df = pd.DataFrame(That_w_t_list, columns=[timestamp, "x", "y", "z", "qx", "qy", "qz", "qw", "yaw"])
     T_t_s_df = pd.DataFrame(T_t_s_list, columns=[timestamp, "x", "y", "z", "qx", "qy", "qz", "qw", "yaw"])
     
     return That_w_t_df, T_t_s_df
@@ -145,7 +147,7 @@ def plot_3d_scatter(path, data_frame_ref, data_frame_target, data_frame_opt, col
 
     plt.show()
 
-def plot_pose_temporal_evolution(path, df_ref, df_experiment, df_covariance, cols_ref, cols_experiment, t0):
+def plot_pose_temporal_evolution(path, df_ref, df_experiment, df_covariance, cols_ref, cols_experiment, cols_covariance, t0):
     
 
     fig, axes = plt.subplots(3, 1, figsize=(15, 15))
@@ -165,9 +167,9 @@ def plot_pose_temporal_evolution(path, df_ref, df_experiment, df_covariance, col
 
 
     # Compute standard deviations (square root of diagonal covariance elements)
-    std_x = np.sqrt(np.array(df_covariance.iloc[:, 1]))  # Covariance_x
-    std_y = np.sqrt(np.array(df_covariance.iloc[:, 2]))  # Covariance_y
-    std_z = np.sqrt(np.array(df_covariance.iloc[:, 3]))  # Covariance_z
+    std_x = np.sqrt(np.array(df_covariance[cols_covariance[1]]))  # Covariance_x
+    std_y = np.sqrt(np.array(df_covariance[cols_covariance[2]]))  # Covariance_y
+    std_z = np.sqrt(np.array(df_covariance[cols_covariance[3]]))  # Covariance_z
 
     axes[0].scatter(np.array(df_experiment[cols_experiment[0]]), np.array(df_experiment[cols_experiment[1]]), c='b', label = 'pose_opt', alpha=0.4, s=10)
     axes[0].plot(np.array(df_ref[cols_ref[0]]), np.array(df_ref[cols_ref[1]]), c='r', label = 'reference')
@@ -204,7 +206,7 @@ def plot_pose_temporal_evolution(path, df_ref, df_experiment, df_covariance, col
 
     plt.show()
 
-def plot_transform(path, df_experiment, df_gt, df_covariance, cols_experiment, cols_gt, t0):
+def plot_transform(path, df_experiment, df_gt, df_covariance, cols_experiment, cols_gt, cols_covariance, t0):
 
     fig, axes = plt.subplots(4, 1, figsize=(15, 15))
     plt.suptitle("Temporal Evolution of T_t_s")
@@ -218,10 +220,10 @@ def plot_transform(path, df_experiment, df_gt, df_covariance, cols_experiment, c
 
  
     # Compute standard deviations (square root of diagonal covariance elements)
-    std_x = np.sqrt(np.array(df_covariance.iloc[:, 1]))  # Covariance_x
-    std_y = np.sqrt(np.array(df_covariance.iloc[:, 2]))  # Covariance_y
-    std_z = np.sqrt(np.array(df_covariance.iloc[:, 3]))  # Covariance_z
-    std_yaw = np.sqrt(np.array(df_covariance.iloc[:, 4]))  # Covariance_z
+    std_x = np.sqrt(np.array(df_covariance[cols_covariance[1]]))  # Covariance_x
+    std_y = np.sqrt(np.array(df_covariance[cols_covariance[2]]))  # Covariance_y
+    std_z = np.sqrt(np.array(df_covariance[cols_covariance[3]]))  # Covariance_z
+    std_yaw = np.sqrt(np.array(df_covariance[cols_covariance[4]]))  # Covariance_z
 
 
     # # Subtract the first element of the timestamp column to start from 0
@@ -277,7 +279,7 @@ def plot_transform(path, df_experiment, df_gt, df_covariance, cols_experiment, c
 
 
 
-def plot_attitude_temporal_evolution(path, df_ref_rpy, df_opt_rpy, df_covariance, cols_experiment, t0):
+def plot_attitude_temporal_evolution(path, df_ref_rpy, df_opt_rpy, df_covariance, cols_experiment, cols_covariance, t0):
     
 
     fig, axes = plt.subplots(3, 1, figsize=(15, 15))
@@ -293,7 +295,7 @@ def plot_attitude_temporal_evolution(path, df_ref_rpy, df_opt_rpy, df_covariance
     #df_ref_rpy[cols_experiment[0]] -= t0
 
 
-    std_yaw = np.sqrt(np.array(df_covariance.iloc[:, 4]))  # Covariance_z
+    std_yaw = np.sqrt(np.array(df_covariance[cols_covariance[4]]))  # Covariance_z
 
 
     # # Subtract the first element of the timestamp column to start from 0
@@ -464,15 +466,13 @@ def plot_experiment_data(path_experiment_data, path_figs, sim = "True"):
                                          timestamp_col=time_data_setpoint, max_timestamp=max_timestamp)
 
         
-        columns_w_That_t_data = [time_data_setpoint, "x", "y", "z", "qx", "qy", "qz", "qw"]
+        columns_w_That_t_data = [time_data_setpoint, "x", "y", "z", "qx", "qy", "qz", "qw", "yaw"]
         plot_3d_scatter(path_figs, source_gt_data_df, target_gt_data_df, w_That_t_data_df, columns_source_gt_data, columns_target_gt_data, columns_w_That_t_data )
         
         t0 = target_gt_data_df[columns_target_gt_data[0]].iloc[0]
-        print(t0)
-        print(w_That_t_data_df[columns_target_gt_data[0]].iloc[0])
         
         # #Plot position vs time
-        plot_pose_temporal_evolution(path_figs, target_gt_data_df, w_That_t_data_df, covariance_data_df, columns_target_gt_data, columns_w_That_t_data, t0)
+        plot_pose_temporal_evolution(path_figs, target_gt_data_df, w_That_t_data_df, covariance_data_df, columns_target_gt_data, columns_w_That_t_data, columns_covariance, t0)
 
         # #Plot attitude vs time
 
@@ -483,13 +483,18 @@ def plot_experiment_data(path_experiment_data, path_figs, sim = "True"):
         rpy_attitude_opt_data_df[time_data_setpoint] = w_That_t_data_df[time_data_setpoint]
         rpy_attitude_gt_data_df[time_data_setpoint] = target_gt_data_df[time_data_setpoint]
 
+        #Add the previously computed yaw column to optimized data
+        rpy_attitude_opt_data_df["yaw"] = w_That_t_data_df["yaw"]
+
+        print(rpy_attitude_opt_data_df)
+
         # Reorder the columns to make timestamp the first column
         rpy_attitude_cols = [time_data_setpoint, "roll", "pitch", "yaw"]
         
         rpy_attitude_opt_data_df = rpy_attitude_opt_data_df[rpy_attitude_cols]
         rpy_attitude_gt_data_df = rpy_attitude_gt_data_df[rpy_attitude_cols]
 
-        plot_attitude_temporal_evolution(path_figs, rpy_attitude_gt_data_df, rpy_attitude_opt_data_df, covariance_data_df, rpy_attitude_cols, t0)
+        plot_attitude_temporal_evolution(path_figs, rpy_attitude_gt_data_df, rpy_attitude_opt_data_df, covariance_data_df, rpy_attitude_cols, columns_covariance, t0)
 
         #plot metrics
         plot_metrics(path_figs, metrics_df_data, columns_metrics, t0)
@@ -497,7 +502,7 @@ def plot_experiment_data(path_experiment_data, path_figs, sim = "True"):
     # Plot transforms
     columns_t_T_s_data = [time_data_setpoint, "x", "y", "z", "qx", "qy", "qz", "qw", "yaw"]
 
-    plot_transform(path_figs, t_That_s_data_df, t_T_s_data_df, covariance_data_df, columns_t_That_s_data, columns_t_T_s_data, t0)
+    plot_transform(path_figs, t_That_s_data_df, t_T_s_data_df, covariance_data_df, columns_t_That_s_data, columns_t_T_s_data, columns_covariance, t0)
 
 
 def read_pandas_df(path, columns, timestamp_col=None, max_timestamp=None):

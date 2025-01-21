@@ -480,19 +480,18 @@ private:
                 T z = state[2];
                 T yaw = state[3];
 
-                // Build rotation matrix using roll, pitch, and variable yaw
-                Eigen::Matrix<T, 3, 3> R;
-                R = Eigen::AngleAxis<T>(yaw, Eigen::Matrix<T, 3, 1>::UnitZ()) *
-                    Eigen::AngleAxis<T>(T(pitch_), Eigen::Matrix<T, 3, 1>::UnitY()) *
-                    Eigen::AngleAxis<T>(T(roll_), Eigen::Matrix<T, 3, 1>::UnitX());
+                // Build the 4x4 transformation matrix
+                Eigen::Matrix<T, 4, 4> T_transform = build_transformation_matrix(roll_, pitch_, yaw, x, y, z);
 
-                // Transform the anchor point
-                Eigen::Matrix<T, 3, 1> anchor_transformed = R * anchor_.cast<T>() + Eigen::Matrix<T, 3, 1>(x, y, z);
+                 // Transform the anchor point (as a homogeneous vector)
+                Eigen::Matrix<T, 4, 1> anchor_h;
+                anchor_h << T(anchor_(0)), T(anchor_(1)), T(anchor_(2)), T(1.0);
+                Eigen::Matrix<T, 4, 1> anchor_transformed_h = T_transform * anchor_h;
 
                 // Calculate the predicted distance
-                T dx = T(tag_(0)) - anchor_transformed[0];
-                T dy = T(tag_(1)) - anchor_transformed[1];
-                T dz = T(tag_(2)) - anchor_transformed[2];
+                T dx = T(tag_(0)) - anchor_transformed_h(0);
+                T dy = T(tag_(1)) - anchor_transformed_h(1);
+                T dz = T(tag_(2)) - anchor_transformed_h(2);
                 T predicted_distance = ceres::sqrt(dx * dx + dy * dy + dz * dz);
 
                 // Residual as (measured - predicted)
@@ -507,6 +506,27 @@ private:
       static ceres::CostFunction* Create(const Eigen::Vector3d& anchor, const Eigen::Vector3d& tag, double measured_distance, double roll, double pitch, double measurement_stdev) {
             return (new ceres::AutoDiffCostFunction<UWBResidual, 1, 4>(
                 new UWBResidual(anchor, tag, measured_distance, roll, pitch, measurement_stdev)));
+        }
+
+        // Build a 4x4 transformation matrix
+        template <typename T>
+        static Eigen::Matrix<T, 4, 4> build_transformation_matrix(double roll, double pitch, T yaw, T x, T y, T z) {
+            Eigen::Matrix<T, 3, 3> R;
+            R = Eigen::AngleAxis<T>(yaw, Eigen::Matrix<T, 3, 1>::UnitZ()) *
+                Eigen::AngleAxis<T>(T(pitch), Eigen::Matrix<T, 3, 1>::UnitY()) *
+                Eigen::AngleAxis<T>(T(roll), Eigen::Matrix<T, 3, 1>::UnitX());
+
+            // Normalize rotation
+            R = Eigen::Quaternion<T>(R).normalized().toRotationMatrix();
+
+            Eigen::Matrix<T, 4, 4> T_transform = Eigen::Matrix<T, 4, 4>::Identity();
+            // Assign rotation matrix to top-left block
+            T_transform.template block<3, 3>(0, 0) = R;            
+            T_transform(0, 3) = x;
+            T_transform(1, 3) = y;
+            T_transform(2, 3) = z;
+
+            return T_transform;
         }
 
         const Eigen::Vector3d anchor_;
@@ -530,6 +550,7 @@ private:
                        state[2] - T(prior_state_(2)),
                        normalize_angle(state[3] - T(prior_state_(3)));
 
+        
         // Scale by the square root of the inverse covariance matrix
         Eigen::LLT<Eigen::Matrix4d> chol(full_covariance_);
         Eigen::Matrix4d sqrt_inv_covariance = Eigen::Matrix4d(chol.matrixL().transpose()).inverse();
@@ -543,10 +564,10 @@ private:
         residual[2] = weighted_residual[2];
         residual[3] = weighted_residual[3];
 
-        // std::cout << "Prior residual: ["
-        //   << residual[0] << ", " << residual[1] << ", " 
-        //   << residual[2] << ", " << residual[3] << "]" 
-        //   << std::endl;
+        std::cout << "Prior residual: ["
+          << residual[0] << ", " << residual[1] << ", " 
+          << residual[2] << ", " << residual[3] << "]" 
+          << std::endl;
 
         return true;
     }

@@ -225,7 +225,7 @@ class MeasurementSimulatorEliko(Node):
                     'world',
                     'agv_odom',
                     rclpy.time.Time())
-                
+                                
                 T_w_s = self.transform_stamped_to_matrix(gt_source)
                 T_w_t = self.transform_stamped_to_matrix(gt_target)
                 T_w_s_odom = self.transform_stamped_to_matrix(odom_source)

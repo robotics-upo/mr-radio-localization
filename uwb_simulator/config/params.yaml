@@ -36,16 +36,16 @@ trajectory_simulator:
 
 odometry_simulator:
   ros__parameters:
-    load_trajectory: False
+    load_trajectory: True
     same_trajectory: True
-    trajectory_name: "trajectory0"
+    trajectory_name: "trajectory3"
     total_distance: 100
     pub_rate: 10.0
     use_sim_time: True
     uav_origin: [0.0, 0.0, 2.0, 0.0] #xyz yaw
     ground_vehicle_origin: [0.0, 0.0, 0.0, 0.0] #xyz yaw
-    linear_velocity_range: [0.1, 0.5]
-    angular_velocity_range: [-0.1, 0.1]
+    linear_velocity_range: [0.2, 1.0]
+    angular_velocity_range: [-0.5, 0.5]
     odom_error: 2.0 # %, 2 meters for every 100 meters traveled
     anchors:
       a1:
