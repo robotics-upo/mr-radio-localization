@@ -1,0 +1,559 @@
+#!/usr/bin/env python3
+
+import rclpy
+from rclpy.node import Node
+import numpy as np
+import random
+import matplotlib.pyplot as plt
+from mpl_toolkits.mplot3d import Axes3D
+from scipy.interpolate import CubicSpline
+from scipy.spatial.transform import Rotation as R
+
+import tf_transformations
+import tf2_ros
+from tf2_ros.static_transform_broadcaster import StaticTransformBroadcaster
+from geometry_msgs.msg import TransformStamped
+from nav_msgs.msg import Odometry
+import time
+import os
+
+class OdometrySimulator(Node):
+
+    def __init__(self):
+        super().__init__('odometry_simulator')
+        self.get_logger().info("Odometry Simulator Node Started")
+
+        self.declare_parameters(
+            namespace='',
+            parameters=[
+                ('simple_trajectory', False),
+                ('holonomic_xy', False),
+                ('trajectory_name', "trajectory1"),
+                ('total_distance', 100),
+                ('pub_rate', 10.0),
+                ('uav_origin', [0.0, 0.0, 0.0, 0.0]),
+                ('ground_vehicle_origin', [0.0, 0.0, 0.0, 0.0]),
+                ('linear_velocity_range', [0.0, 0.0]),
+                ('max_linear_acceleration', 0.0),
+                ('angular_velocity_range', [0.0, 0.0]),
+                ('max_angular_acceleration', 0.0),
+                ('odom_error_position', 0.0),
+                ('odom_error_angle', 0.0),
+                ('anchors.a1.position', [0.0, 0.0, 0.0]),
+                ('anchors.a2.position', [0.0, 0.0, 0.0]),
+                ('anchors.a3.position', [0.0, 0.0, 0.0]),
+                ('anchors.a4.position', [0.0, 0.0, 0.0]),
+                ('tags.t1.location', [0.0, 0.0, 0.0]),
+                ('tags.t2.location', [0.0, 0.0, 0.0])
+            ])
+
+        # Parameters
+    
+        self.total_distance = self.get_parameter('total_distance').value
+
+        self.traveled_distance_uav = self.traveled_distance_agv = 0.0
+        self.traveled_angle_uav = self.traveled_angle_agv = 0.0
+
+        self.publish_rate = self.get_parameter('pub_rate').value
+
+        # Initialize odometry to starting poses
+        self.uav_pose = np.array(self.get_parameter('uav_origin').value)
+        self.agv_pose = np.array(self.get_parameter('ground_vehicle_origin').value)
+
+        self.odom_error_position = self.get_parameter('odom_error_position').value
+        self.odom_error_angle = self.get_parameter('odom_error_angle').value
+
+        self.uav_odom_pose = self.uav_pose
+        self.agv_odom_pose = self.agv_pose
+
+        self.linear_velocity_range = self.get_parameter('linear_velocity_range').value
+        self.max_linear_acceleration = self.get_parameter('max_linear_acceleration').value
+        self.angular_velocity_range = self.get_parameter('angular_velocity_range').value
+        self.max_angular_acceleration = self.get_parameter('max_angular_acceleration').value
+
+        self.holonomic_xy = self.get_parameter('holonomic_xy').value
+
+        # Retrieve anchor and tag locations and convert them to numpy arrays
+        anchors_location = {
+            "a1": np.array(self.get_parameter('anchors.a1.position').value),
+            "a2": np.array(self.get_parameter('anchors.a2.position').value),
+            "a3": np.array(self.get_parameter('anchors.a3.position').value),
+            "a4": np.array(self.get_parameter('anchors.a4.position').value),
+        }
+
+        tags_location = {
+            "t1": np.array(self.get_parameter('tags.t1.location').value),
+            "t2": np.array(self.get_parameter('tags.t2.location').value),
+        }
+
+        self.trajectory_name = self.get_parameter('trajectory_name').value
+        self.simple = self.get_parameter('simple_trajectory').value
+
+        self.get_logger().info(f"Loading trajectory: {self.trajectory_name}")
+
+        try:
+            data = np.load(self.trajectory_name + '.npy', allow_pickle=True).item()
+            self.uav_velocity_commands = data['uav']
+            self.agv_velocity_commands = data['agv']
+        except Exception as e:
+            self.get_logger().error(f"Trajectory not found: {e}")
+            self.get_logger().info("Generating new trajectories")
+            if self.simple: self.uav_velocity_commands, self.agv_velocity_commands = self.generate_simple_velocity_commands()
+            else: self.uav_velocity_commands, self.agv_velocity_commands = self.generate_velocity_commands()
+            
+            self.save_trajectories()
+        
+        # Plot the trajectories
+        self.plot_trajectories()
+
+        self.num_points = min(len(self.uav_velocity_commands), len(self.agv_velocity_commands))
+        self.get_logger().info('Trajectory length: ' + str(self.num_points))
+
+        # Create a TransformBroadcaster
+        self.tf_broadcaster = tf2_ros.TransformBroadcaster(self)
+
+        # Create a StaticTransformBroadcaster
+        self.tf_static_broadcaster = StaticTransformBroadcaster(self)
+
+        # Initialize publishers for UAV and AGV odometry
+        self.uav_odom_publisher = self.create_publisher(Odometry, '/uav/odom', 10)
+        self.agv_odom_publisher = self.create_publisher(Odometry, '/agv/odom', 10)
+
+        self.uav_cumulative_covariance = [0.0] * 36  # 6x6 matrix in row-major order
+        self.agv_cumulative_covariance = [0.0] * 36  # 6x6 matrix in row-major order
+
+        # Create tags in UAV frame
+        self.create_tag(tags_location['t1'], 't1')
+        self.create_tag(tags_location['t2'], 't2')
+
+        # Create anchors in ground vehicle frame
+        self.create_anchor(anchors_location['a1'], 'a1')
+        self.create_anchor(anchors_location['a2'], 'a2')
+        self.create_anchor(anchors_location['a3'], 'a3')
+        self.create_anchor(anchors_location['a4'], 'a4')
+
+        self.create_timer(1./self.publish_rate, self.update_odometry)
+
+    
+    def generate_simple_velocity_commands(self):
+        """Generate velocity commands for simple predefined trajectories.
+        Both UAV and AGV follow the same type of trajectory (either straight lines or circles),
+        with a fixed yaw rotation offset between them.
+        """
+        uav_commands = []
+        agv_commands = []
+
+        # Define trajectory parameters
+        use_circular_trajectory = True  # Toggle between circular or straight-line trajectories
+
+        if use_circular_trajectory:
+            # Circular trajectory parameters
+            radius = 2.0  # Radius of the circular trajectory
+            angular_velocity = 0.5  # Angular velocity for the circular motion
+            duration = self.total_distance / (radius * angular_velocity)  # Time to complete the trajectory
+            dt = 1.0 / self.publish_rate
+            total_steps = int(duration * self.publish_rate)
+            half_steps = total_steps // 2
+
+            for step in range(total_steps):
+                
+                #direction_multiplier = 1 if step < half_steps else -1
+
+                # UAV circular trajectory
+                agv_v = [radius * angular_velocity, 0.0]
+                agv_w = angular_velocity
+                agv_commands.append((*agv_v, agv_w))
+
+                # AGV circular trajectory with yaw offset
+                uav_v = agv_v
+                uav_w = agv_w 
+                uav_commands.append((*uav_v, uav_w))
+
+        else:
+            # Straight-line trajectory parameters
+            linear_speed = 1.0  # Speed of the vehicles on the straight line
+            duration = self.total_distance / linear_speed  # Time to complete the straight line
+            dt = 1.0 / self.publish_rate
+            total_steps = int(duration * self.publish_rate)
+
+            # Fixed yaw rotation between UAV and AGV
+            yaw_offset = np.pi / 4  # 45-degree offset
+
+            for step in range(total_steps):
+                # UAV straight-line trajectory
+                uav_v = [linear_speed, 0.0]
+                uav_w = 0.0
+                uav_commands.append((uav_v, uav_w))
+
+                # AGV straight-line trajectory with yaw offset
+                agv_v = uav_v
+                agv_w = 0.0
+                agv_commands.append((agv_v, agv_w))
+
+        self.get_logger().info(f"Generated {len(uav_commands)} commands for UAV and AGV.")
+        return uav_commands, agv_commands
+
+
+    def generate_velocity_commands(self):
+        """Generate random linear and angular velocity commands."""
+        uav_commands = []
+        agv_commands = []
+        distance_covered = 0.0
+        
+        uav_last_v = np.array([0.0, 0.0])  # Linear velocity [vx, vy]
+        uav_last_w = 0.0  # Angular velocity
+        agv_last_v = np.array([0.0, 0.0])  # Linear velocity [vx, vy]
+        agv_last_w = 0.0  # Angular velocity
+
+        max_dacc_v = self.max_linear_acceleration / self.publish_rate
+        max_dacc_w = self.max_angular_acceleration / self.publish_rate
+
+        while distance_covered < self.total_distance:
+            
+            agv_v = np.clip(agv_last_v + np.random.uniform(-max_dacc_v, max_dacc_v, size=2), *self.linear_velocity_range)
+
+            if self.holonomic_xy is False:
+
+                agv_w = np.clip(agv_last_w + np.random.uniform(-max_dacc_w, max_dacc_w), *self.angular_velocity_range)
+
+            
+            else: #independent velocity commands
+                
+                #Change angular motion independently
+                if distance_covered < 10.0: 
+                    agv_w = np.clip(0.1, *self.angular_velocity_range)
+                elif distance_covered < 25.0: 
+                    agv_w = np.clip(-0.1, *self.angular_velocity_range)
+                elif distance_covered < 50.0: 
+                    agv_w = np.clip(0.0, *self.angular_velocity_range)
+                elif distance_covered < 75.0: 
+                    agv_w = np.clip(-0.25, *self.angular_velocity_range)
+                else: 
+                    agv_w = np.clip(0.25, *self.angular_velocity_range)
+                
+            #Uncomment this to make them follow similar trajectories
+            uav_last_v = agv_last_v
+            uav_last_w = agv_last_w
+
+            # Smooth velocity changes
+            uav_v = np.clip(uav_last_v + np.random.uniform(-max_dacc_v, max_dacc_v, size=2), *self.linear_velocity_range)
+            uav_w = np.clip(uav_last_w + np.random.uniform(-max_dacc_w, max_dacc_w), *self.angular_velocity_range)
+
+            # uav_v = agv_v
+            # uav_w = agv_w
+            
+            uav_commands.append((*uav_v, uav_w))
+            agv_commands.append((*agv_v, agv_w))
+
+            self.get_logger().info(f"UAV_V: {uav_v}, UAV_W: {uav_w}.")
+
+            uav_last_v = uav_v
+            uav_last_w = uav_w
+            agv_last_v = agv_v
+            agv_last_w = agv_w
+
+            distance_increment = (np.linalg.norm(uav_v) + np.linalg.norm(agv_v)) / 2 / self.publish_rate
+
+            distance_covered += distance_increment
+            
+        return uav_commands, agv_commands
+
+    
+
+    def update_odometry(self):
+        """Update UAV and AGV poses based on velocity commands."""
+        if len(self.uav_velocity_commands) == 0 or len(self.agv_velocity_commands) == 0:
+            self.get_logger().warning("Trajectory completed")
+            return
+
+        dt = 1.0 / self.publish_rate 
+
+        # Update UAV pose - GT and Odometry
+        uav_command = self.uav_velocity_commands.pop(0)
+        v_uav = np.array(uav_command[:2])  # Extract [v_x, v_y]
+        w_uav = uav_command[2]  # Extract angular velocity
+    
+        incremental_distance_uav = np.linalg.norm(v_uav) * dt
+        incremental_angle_uav = abs(w_uav) * dt
+        self.traveled_distance_uav += incremental_distance_uav
+        self.traveled_angle_uav += np.rad2deg(incremental_angle_uav)
+        self.uav_pose, self.uav_odom_pose = self.integrate_odometry(self.uav_pose, self.uav_odom_pose, v_uav, w_uav, dt, self.traveled_distance_uav, self.traveled_angle_uav, self.holonomic_xy)
+
+        # Update AGV pose - GT and Odometry
+        agv_command = self.agv_velocity_commands.pop(0)
+        v_agv = np.array(agv_command[:2])  # Extract [v_x, v_y]
+        w_agv = agv_command[2]  # Extract angular velocity
+
+        incremental_distance_agv = np.linalg.norm(v_agv) * dt
+        incremental_angle_agv = abs(w_agv) * dt
+        self.traveled_distance_agv += incremental_distance_agv
+        self.traveled_angle_agv += np.rad2deg(incremental_angle_agv)
+        self.agv_pose, self.agv_odom_pose = self.integrate_odometry(self.agv_pose, self.agv_odom_pose, v_agv, w_agv, dt, self.traveled_distance_agv, self.traveled_angle_uav, self.holonomic_xy)
+
+        self.get_logger().info(f'Traveled distance AGV: {self.traveled_distance_agv:.2f}', throttle_duration_sec=1)
+
+        # Publish transforms (ground truth)
+        self.transform_publisher(self.uav_pose, 'world', 'uav_gt')
+        self.transform_publisher(self.agv_pose, 'world', 'agv_gt')
+
+        # Publish odometry
+        self.transform_publisher(self.uav_odom_pose, 'world', 'uav_odom')
+        self.transform_publisher(self.agv_odom_pose, 'world', 'agv_odom')
+
+        # Publish odometry messages for UAV and AGV
+        self.publish_odometry(
+            self.uav_odom_pose, v_uav, w_uav, dt, self.traveled_distance_uav, self.traveled_angle_uav, 'world', '/uav/odom',
+            cumulative_covariance=self.uav_cumulative_covariance
+        )
+        self.publish_odometry(
+            self.agv_odom_pose, v_agv, w_agv, dt, self.traveled_distance_agv, self.traveled_angle_agv, 'world', '/agv/odom',
+            cumulative_covariance=self.agv_cumulative_covariance
+        )
+
+    def integrate_odometry(self, pose_gt, pose_odom, v, w, dt, traveled_distance, traveled_angle, holonomic = True):
+        """Integrate odometry using simple kinematic equations."""
+        x, y, z, theta = pose_gt
+        xp, yp, zp, thetap = pose_odom    
+        
+        #Systematic error based on total distance traveled (cumulative)
+        error_distance_sys = traveled_distance * self.odom_error_position / 100.0
+        error_angle_sys = np.deg2rad(traveled_angle * self.odom_error_angle / 100.0)
+        
+        # Error delta based on increments (independent, non-cumulative)
+        delta_distance = np.linalg.norm(v)*dt
+        delta_angle = abs(w) * dt
+
+        error_distance_delta = delta_distance * self.odom_error_position / 100.0
+        error_angle_delta = np.deg2rad(delta_angle * self.odom_error_angle / 100.0)  # Convert to radians
+        
+        # Odometry error
+        error_distance = np.random.normal(error_distance_sys, error_distance_delta)
+        error_angle = np.random.normal(error_angle_sys, error_angle_delta)
+
+        if holonomic is True:
+            # Independent motion in x, y, and yaw
+            dx = v[0] * dt
+            dy = v[1] * dt
+            dtheta = w * dt
+        else:
+            if abs(w) < 1e-6:
+                # Straight-line motion (special case when angular velocity is very small)
+                dx = v[0] * dt * np.cos(theta)
+                dy = v[1] * dt * np.sin(theta)
+            else:
+                # Arc-based motion model
+                r = v[0] / w
+                dx = r * (np.sin(theta + w * dt) - np.sin(theta))
+                dy = r * (np.cos(theta) - np.cos(theta + w * dt))
+        
+        dtheta = w * dt
+
+        dxp = dx + error_distance * np.cos(thetap)
+        dyp = dy + error_distance * np.sin(thetap)
+
+        # Apply angular error to odometry (affecting yaw estimation)
+        dthetap = dtheta + error_angle
+
+        dz = 0.0
+        dzp = 0.0
+
+        pose_gt = np.array([x + dx, y + dy, z + dz, theta + dtheta])
+        pose_odom = np.array([x + dxp, y + dyp, z + dzp, theta + dthetap])
+
+        return pose_gt, pose_odom
+    
+
+    def publish_odometry(self, pose, linear_velocity, angular_velocity, dt, traveled_distance, traveled_angle, frame_id, topic, cumulative_covariance):
+        """Publish an odometry message for the given pose."""
+        odom_msg = Odometry()
+        odom_msg.header.stamp = self.get_clock().now().to_msg()
+        odom_msg.header.frame_id = frame_id
+        odom_msg.child_frame_id = topic
+
+        # Set position and orientation
+        odom_msg.pose.pose.position.x = pose[0]
+        odom_msg.pose.pose.position.y = pose[1]
+        odom_msg.pose.pose.position.z = pose[2]
+        quat = R.from_euler('z', pose[3]).as_quat()
+        odom_msg.pose.pose.orientation.x = quat[0]
+        odom_msg.pose.pose.orientation.y = quat[1]
+        odom_msg.pose.pose.orientation.z = quat[2]
+        odom_msg.pose.pose.orientation.w = quat[3]
+
+        # Set linear and angular velocity
+        odom_msg.twist.twist.linear.x = linear_velocity[0]
+        odom_msg.twist.twist.linear.y = linear_velocity[1]
+        odom_msg.twist.twist.linear.z = 0.0
+        odom_msg.twist.twist.angular.z = angular_velocity
+
+        # Calculate systematic error covariance (cumulative drift)
+        systematic_position_variance = (traveled_distance * self.odom_error_position / 100.0) ** 2
+        systematic_angle_variance = np.deg2rad(traveled_angle * self.odom_error_angle / 100.0) ** 2
+
+        # Calculate incremental covariance based on traveled distance
+        delta_distance = np.linalg.norm(linear_velocity) * dt
+        delta_angle = angular_velocity * dt
+        incremental_position_variance = (delta_distance * self.odom_error_position / 100.0) ** 2
+        incremental_angle_variance = np.deg2rad(delta_angle * self.odom_error_angle / 100.0) ** 2
+
+        # Update cumulative covariance incrementally
+        cumulative_covariance[0] += incremental_position_variance  # x
+        cumulative_covariance[7] += incremental_position_variance  # y
+        cumulative_covariance[14] += incremental_position_variance  # z
+        cumulative_covariance[35] += incremental_angle_variance  # yaw
+
+        # Populate pose covariance (6x6 matrix in row-major order)
+        odom_msg.pose.covariance = cumulative_covariance.copy()
+        odom_msg.pose.covariance[0] = max(1e-6, cumulative_covariance[0] + systematic_position_variance)
+        odom_msg.pose.covariance[7] = max(1e-6,cumulative_covariance[7] + systematic_position_variance)
+        odom_msg.pose.covariance[14] = max(1e-6,cumulative_covariance[14] + systematic_position_variance)
+        odom_msg.pose.covariance[35] = max(1e-6,cumulative_covariance[35] + systematic_angle_variance)
+
+
+        # Publish the odometry message
+        if topic == '/uav/odom':
+            self.uav_odom_publisher.publish(odom_msg)
+        elif topic == '/agv/odom':
+            self.agv_odom_publisher.publish(odom_msg)
+
+
+    def plot_trajectories(self):
+        """Plot UAV and AGV trajectories based on velocity commands."""
+        uav_positions_gt = [self.uav_pose[:3]]
+        agv_positions_gt = [self.agv_pose[:3]]
+        uav_positions_odom = [self.uav_odom_pose[:3]]
+        agv_positions_odom = [self.agv_odom_pose[:3]]
+
+        temp_uav_pose = self.uav_pose.copy()
+        temp_uav_odom_pose = self.uav_odom_pose.copy()
+        temp_agv_pose = self.agv_pose.copy()
+        temp_agv_odom_pose = self.agv_odom_pose.copy()
+
+        temp_traveled_distance_uav = temp_traveled_distance_agv = 0
+        temp_traveled_angle_uav = temp_traveled_angle_agv = 0
+
+        dt = 1.0 / self.publish_rate
+
+        for uav_command in self.uav_velocity_commands:
+            v_uav = np.array(uav_command[:2])  # Extract [v_x, v_y]
+            w_uav = uav_command[2]  # Extract angular velocity
+            temp_traveled_distance_uav += np.linalg.norm(v_uav) * dt
+            temp_traveled_angle_uav += np.rad2deg(abs(w_uav) * dt)
+            temp_uav_pose, temp_uav_odom_pose = self.integrate_odometry(
+                temp_uav_pose, temp_uav_odom_pose, v_uav, w_uav, dt, temp_traveled_distance_uav, temp_traveled_angle_uav, self.holonomic_xy
+            )
+            uav_positions_gt.append(temp_uav_pose[:3])
+            uav_positions_odom.append(temp_uav_odom_pose[:3])
+
+        for agv_command in self.agv_velocity_commands:
+            v_agv = np.array(agv_command[:2])  # Extract [v_x, v_y]
+            w_agv = agv_command[2]  # Extract angular velocity
+            temp_traveled_distance_agv += np.linalg.norm(v_agv) * dt
+            temp_traveled_angle_agv += np.rad2deg(abs(w_agv) * dt)
+            temp_agv_pose, temp_agv_odom_pose = self.integrate_odometry(
+                temp_agv_pose, temp_agv_odom_pose, v_agv, w_agv, dt, temp_traveled_distance_agv, temp_traveled_angle_agv, self.holonomic_xy
+            )
+            agv_positions_gt.append(temp_agv_pose[:3])
+            agv_positions_odom.append(temp_agv_odom_pose[:3])
+
+        uav_positions_gt = np.array(uav_positions_gt)
+        uav_positions_odom = np.array(uav_positions_odom)
+        agv_positions_gt = np.array(agv_positions_gt)
+        agv_positions_odom = np.array(agv_positions_odom)
+
+
+        fig = plt.figure()
+        ax = fig.add_subplot(111, projection='3d')
+
+        ax.plot(uav_positions_gt[:, 0], uav_positions_gt[:, 1], uav_positions_gt[:, 2], label='UAV GT', color='blue')
+        ax.plot(uav_positions_odom[:, 0], uav_positions_odom[:, 1], uav_positions_odom[:, 2], label='UAV Odom', color='blue', linestyle='--')
+
+        ax.plot(agv_positions_gt[:, 0], agv_positions_gt[:, 1], agv_positions_gt[:, 2], label='AGV GT', color='red')
+        ax.plot(agv_positions_odom[:, 0], agv_positions_odom[:, 1], agv_positions_odom[:, 2], label='AGV Odom', color='red', linestyle='--')
+
+        ax.set_xlabel('X Position')
+        ax.set_ylabel('Y Position')
+        ax.set_zlabel('Z Position')
+
+        ax.set_title('UAV and AGV Trajectories')
+        ax.legend()
+
+        plt.show()
+
+    def transform_publisher(self, pose, parent_frame, child_frame):
+        """Publish the transform for a given pose."""
+        x, y, z, theta = pose
+        transform = TransformStamped()
+        transform.header.stamp = self.get_clock().now().to_msg()
+        transform.header.frame_id = parent_frame
+        transform.child_frame_id = child_frame
+
+        transform.transform.translation.x = x
+        transform.transform.translation.y = y
+        transform.transform.translation.z = z
+
+        quat = R.from_euler('z', theta).as_quat()
+        transform.transform.rotation.x = quat[0]
+        transform.transform.rotation.y = quat[1]
+        transform.transform.rotation.z = quat[2]
+        transform.transform.rotation.w = quat[3]
+
+        self.tf_broadcaster.sendTransform(transform)
+
+    def create_tag(self, position, label):
+
+        # Tag transform
+
+        tag_transform = TransformStamped()
+        tag_transform.header.stamp = self.get_clock().now().to_msg()
+        tag_transform.header.frame_id = 'uav_gt'
+        tag_transform.child_frame_id = label
+
+        tag_transform.transform.translation.x = position[0]
+        tag_transform.transform.translation.y = position[1]
+        tag_transform.transform.translation.z = position[2]
+        tag_transform.transform.rotation.w = 1.0  # No rotation for simplicity
+
+        self.tf_static_broadcaster.sendTransform(tag_transform)
+
+    def create_anchor(self, position, label):
+
+        # Tag transform
+
+        anchor_transform = TransformStamped()
+        anchor_transform.header.stamp = self.get_clock().now().to_msg()
+        anchor_transform.header.frame_id = 'agv_gt'
+        anchor_transform.child_frame_id = label
+
+        anchor_transform.transform.translation.x = position[0]
+        anchor_transform.transform.translation.y = position[1]
+        anchor_transform.transform.translation.z = position[2]
+        anchor_transform.transform.rotation.w = 1.0  # No rotation for simplicity
+
+        self.tf_static_broadcaster.sendTransform(anchor_transform)
+
+
+    def save_trajectories(self):
+            """Save generated trajectories to a file."""
+            data = {
+                'uav': self.uav_velocity_commands,
+                'agv': self.agv_velocity_commands
+            }
+            np.save(self.trajectory_name, data)
+            self.get_logger().info(f"Trajectories saved to {self.trajectory_name}")
+
+
+
+def main(args=None):
+    rclpy.init(args=args)
+
+    odometry_simulator = OdometrySimulator()
+
+    rclpy.spin(odometry_simulator)
+
+    odometry_simulator.destroy_node()
+    rclpy.shutdown()
+
+
+if __name__ == '__main__':
+    main()
