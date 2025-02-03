@@ -149,28 +149,25 @@ class OdometrySimulator(Node):
         if use_circular_trajectory:
             # Circular trajectory parameters
             radius = 2.0  # Radius of the circular trajectory
-            angular_velocity = 0.1  # Angular velocity for the circular motion
+            angular_velocity = 0.5  # Angular velocity for the circular motion
             duration = self.total_distance / (radius * angular_velocity)  # Time to complete the trajectory
             dt = 1.0 / self.publish_rate
             total_steps = int(duration * self.publish_rate)
             half_steps = total_steps // 2
 
-            # Fixed yaw rotation between UAV and AGV
-            yaw_offset = np.pi / 4  # 45-degree offset
-
             for step in range(total_steps):
                 
-                direction_multiplier = 1 if step < half_steps else -1
+                #direction_multiplier = 1 if step < half_steps else -1
 
                 # UAV circular trajectory
-                agv_v = radius * angular_velocity
-                agv_w = angular_velocity * direction_multiplier
-                agv_commands.append((agv_v, agv_w))
+                agv_v = [radius * angular_velocity, 0.0]
+                agv_w = angular_velocity
+                agv_commands.append((*agv_v, agv_w))
 
                 # AGV circular trajectory with yaw offset
                 uav_v = agv_v
-                uav_w = - agv_w 
-                uav_commands.append((uav_v, uav_w))
+                uav_w = agv_w 
+                uav_commands.append((*uav_v, uav_w))
 
         else:
             # Straight-line trajectory parameters
@@ -184,7 +181,7 @@ class OdometrySimulator(Node):
 
             for step in range(total_steps):
                 # UAV straight-line trajectory
-                uav_v = linear_speed
+                uav_v = [linear_speed, 0.0]
                 uav_w = 0.0
                 uav_commands.append((uav_v, uav_w))
 
@@ -224,15 +221,15 @@ class OdometrySimulator(Node):
                 
                 #Change angular motion independently
                 if distance_covered < 10.0: 
-                    agv_w = 0.1
+                    agv_w = np.clip(0.1, *self.angular_velocity_range)
                 elif distance_covered < 25.0: 
-                    agv_w = -0.1
+                    agv_w = np.clip(-0.1, *self.angular_velocity_range)
                 elif distance_covered < 50.0: 
-                    agv_w = 0.0
+                    agv_w = np.clip(0.0, *self.angular_velocity_range)
                 elif distance_covered < 75.0: 
-                    agv_w = -0.25
+                    agv_w = np.clip(-0.25, *self.angular_velocity_range)
                 else: 
-                    agv_w = 0.25
+                    agv_w = np.clip(0.25, *self.angular_velocity_range)
                 
             #Uncomment this to make them follow similar trajectories
             uav_last_v = agv_last_v
@@ -305,11 +302,11 @@ class OdometrySimulator(Node):
 
         # Publish odometry messages for UAV and AGV
         self.publish_odometry(
-            self.uav_odom_pose, v_uav, w_uav, dt, 'world', '/uav/odom',
+            self.uav_odom_pose, v_uav, w_uav, dt, self.traveled_distance_uav, self.traveled_angle_uav, 'world', '/uav/odom',
             cumulative_covariance=self.uav_cumulative_covariance
         )
         self.publish_odometry(
-            self.agv_odom_pose, v_agv, w_agv, dt, 'world', '/agv/odom',
+            self.agv_odom_pose, v_agv, w_agv, dt, self.traveled_distance_agv, self.traveled_angle_agv, 'world', '/agv/odom',
             cumulative_covariance=self.agv_cumulative_covariance
         )
 
@@ -329,12 +326,9 @@ class OdometrySimulator(Node):
         error_distance_delta = delta_distance * self.odom_error_position / 100.0
         error_angle_delta = np.deg2rad(delta_angle * self.odom_error_angle / 100.0)  # Convert to radians
         
-        # Random error
-        error_distance_random = np.random.normal(0.0, error_distance_delta)
-        error_angle_random = np.random.normal(0.0, error_angle_delta)
-
-        error_distance = error_distance_sys + error_distance_random #systematic + noise
-        error_angle = error_angle_sys + error_angle_random
+        # Odometry error
+        error_distance = np.random.normal(error_distance_sys, error_distance_delta)
+        error_angle = np.random.normal(error_angle_sys, error_angle_delta)
 
         if holonomic is True:
             # Independent motion in x, y, and yaw
@@ -369,7 +363,7 @@ class OdometrySimulator(Node):
         return pose_gt, pose_odom
     
 
-    def publish_odometry(self, pose, linear_velocity, angular_velocity, dt, frame_id, topic, cumulative_covariance):
+    def publish_odometry(self, pose, linear_velocity, angular_velocity, dt, traveled_distance, traveled_angle, frame_id, topic, cumulative_covariance):
         """Publish an odometry message for the given pose."""
         odom_msg = Odometry()
         odom_msg.header.stamp = self.get_clock().now().to_msg()
@@ -392,6 +386,10 @@ class OdometrySimulator(Node):
         odom_msg.twist.twist.linear.z = 0.0
         odom_msg.twist.twist.angular.z = angular_velocity
 
+        # Calculate systematic error covariance (cumulative drift)
+        systematic_position_variance = (traveled_distance * self.odom_error_position / 100.0) ** 2
+        systematic_angle_variance = np.deg2rad(traveled_angle * self.odom_error_angle / 100.0) ** 2
+
         # Calculate incremental covariance based on traveled distance
         delta_distance = np.linalg.norm(linear_velocity) * dt
         delta_angle = angular_velocity * dt
@@ -406,6 +404,11 @@ class OdometrySimulator(Node):
 
         # Populate pose covariance (6x6 matrix in row-major order)
         odom_msg.pose.covariance = cumulative_covariance.copy()
+        odom_msg.pose.covariance[0] = max(1e-6, cumulative_covariance[0] + systematic_position_variance)
+        odom_msg.pose.covariance[7] = max(1e-6,cumulative_covariance[7] + systematic_position_variance)
+        odom_msg.pose.covariance[14] = max(1e-6,cumulative_covariance[14] + systematic_position_variance)
+        odom_msg.pose.covariance[35] = max(1e-6,cumulative_covariance[35] + systematic_angle_variance)
+
 
         # Publish the odometry message
         if topic == '/uav/odom':

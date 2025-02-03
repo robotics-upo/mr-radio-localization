@@ -36,9 +36,9 @@ trajectory_simulator:
 
 odometry_simulator:
   ros__parameters:
-    simple_trajectory: False
+    simple_trajectory: True
     holonomic_xy: False    #move independently in horizontal plane
-    trajectory_name: "trajectory_identical_inc2"
+    trajectory_name: "trajectory_similar_inc"
     total_distance: 100
     pub_rate: 10.0
     use_sim_time: True

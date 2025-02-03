@@ -72,17 +72,15 @@ public:
 
     global_opt_window_s_ = 5.0; //size of the sliding window in seconds
     global_opt_rate_s_ = 0.1 * global_opt_window_s_; //rate of the optimization -> displace the window 10% of its size
-    min_measurements_ = 200; //min number of measurements for running optimizer
+    min_measurements_ = (global_opt_window_s_ / 2.0) * 80.0; //min number of measurements for running optimizer
     measurement_stdev_ = 0.1; //10 cm measurement noise
     measurement_covariance_ = measurement_stdev_ * measurement_stdev_;
-
-    full_accumulated_covariance_ = Eigen::Matrix4d::Identity() * measurement_covariance_;; //opt + odom, odom starts as zero
 
     global_optimization_timer_ = this->create_wall_timer(
             std::chrono::milliseconds(int(global_opt_rate_s_*1000)), std::bind(&ElikoGlobalOptNode::global_opt_cb_, this));
 
-    window_opt_timer_ = this->create_wall_timer(
-            std::chrono::milliseconds(int(global_opt_window_s_*1000)), std::bind(&ElikoGlobalOptNode::window_opt_cb_, this));
+    // window_opt_timer_ = this->create_wall_timer(
+    //         std::chrono::milliseconds(int(global_opt_window_s_*1000)), std::bind(&ElikoGlobalOptNode::window_opt_cb_, this));
 
 
     anchor_positions_ = {
@@ -99,8 +97,8 @@ public:
 
    
     //Initial values for state
-    init_state_.state = Eigen::Vector4d(0.0, 0.0, -2.0, 0.0);
-    init_state_.covariance = Eigen::Matrix4d::Identity() * 1e-6; // We assume prior is good enough
+    init_state_.state = Eigen::Vector4d(0.0, 0.0, 0.0, 0.0);
+    init_state_.covariance = Eigen::Matrix4d::Identity(); //
     init_state_.roll = 0.0;
     init_state_.pitch = 0.0;
     init_state_.timestamp = this->get_clock()->now();
@@ -110,11 +108,11 @@ public:
     moving_average_ = true;
     moving_average_window_s_ = global_opt_window_s_ / 2.0;
 
-    // Initialize odometry positions
-    uav_odom_pos_ = Eigen::Vector3d::Zero();
-    uav_last_odom_pos_ = Eigen::Vector3d::Zero();
-    agv_odom_pos_ = Eigen::Vector3d::Zero();
-    agv_last_odom_pos_ = Eigen::Vector3d::Zero();
+    // Initialize odometry positions and errors
+    uav_odom_pos_ = Eigen::Vector4d::Zero();
+    uav_last_odom_pos_ = Eigen::Vector4d::Zero();
+    agv_odom_pos_ = Eigen::Vector4d::Zero();
+    agv_last_odom_pos_ = Eigen::Vector4d::Zero();
     min_traveled_distance_ = 0.25;
     
     RCLCPP_INFO(this->get_logger(), "Eliko Optimization Node initialized.");
@@ -125,10 +123,23 @@ private:
 
     void uav_odom_cb_(const nav_msgs::msg::Odometry::SharedPtr msg) {
         
-        uav_odom_pos_ = Eigen::Vector3d(
+        // Extract quaternion components.
+        double qx = msg->pose.pose.orientation.x;
+        double qy = msg->pose.pose.orientation.y;
+        double qz = msg->pose.pose.orientation.z;
+        double qw = msg->pose.pose.orientation.w;
+
+        // Compute yaw.
+        double siny_cosp = 2.0 * (qw * qz + qx * qy);
+        double cosy_cosp = 1.0 - 2.0 * (qy * qy + qz * qz);
+        double yaw = std::atan2(siny_cosp, cosy_cosp);
+
+        // Assign the position and yaw to a 4D vector.
+        uav_odom_pos_ = Eigen::Vector4d(
             msg->pose.pose.position.x,
             msg->pose.pose.position.y,
-            msg->pose.pose.position.z
+            msg->pose.pose.position.z,
+            yaw
         );
 
         // Extract covariance from the odometry message and store it in Eigen::Matrix4d
@@ -141,10 +152,23 @@ private:
 
     void agv_odom_cb_(const nav_msgs::msg::Odometry::SharedPtr msg) {
         
-        agv_odom_pos_ = Eigen::Vector3d(
+        // Extract quaternion components.
+        double qx = msg->pose.pose.orientation.x;
+        double qy = msg->pose.pose.orientation.y;
+        double qz = msg->pose.pose.orientation.z;
+        double qw = msg->pose.pose.orientation.w;
+
+        // Compute yaw.
+        double siny_cosp = 2.0 * (qw * qz + qx * qy);
+        double cosy_cosp = 1.0 - 2.0 * (qy * qy + qz * qz);
+        double yaw = std::atan2(siny_cosp, cosy_cosp);
+
+        // Assign the position and yaw to a 4D vector.
+        agv_odom_pos_ = Eigen::Vector4d(
             msg->pose.pose.position.x,
             msg->pose.pose.position.y,
-            msg->pose.pose.position.z
+            msg->pose.pose.position.z,
+            yaw
         );
 
         // Extract covariance from the odometry message and store it in Eigen::Matrix4d
@@ -202,19 +226,31 @@ private:
 
         /*Check enough translation in the window*/
 
-        // Check if both robots have moved enough distance
-        double uav_distance = (uav_odom_pos_ - uav_last_odom_pos_).norm(); 
-        double agv_distance = (agv_odom_pos_ - agv_last_odom_pos_).norm();
+        // Compute UAV translational distance using only [x, y, z]
+        double uav_distance = (uav_odom_pos_.head<3>() - uav_last_odom_pos_.head<3>()).norm();
+        // Compute UAV yaw difference and normalize it to [-pi, pi]
+        double uav_angle = normalize_angle(uav_odom_pos_[3] - uav_last_odom_pos_[3]);
+
+        // Similarly, compute AGV translation using only [x, y, z]
+        double agv_distance = (agv_odom_pos_.head<3>() - agv_last_odom_pos_.head<3>()).norm();
+
 
         if (uav_distance < min_traveled_distance_ || agv_distance < min_traveled_distance_) {
             RCLCPP_WARN(this->get_logger(), "[Eliko global_opt node] Insufficient movement by UAV or AGV. Skipping optimization.");
             return;
         }
 
-        
+        // Compute odometry covariance based on distance increments from step to step 
+        Eigen::Matrix4d predicted_motion_covariance = Eigen::Matrix4d::Zero();
+        predicted_motion_covariance(0,0) = std::pow(uav_distance, 2.0);
+        predicted_motion_covariance(1,1) = std::pow(uav_distance, 2.0);
+        predicted_motion_covariance(2,2) = std::pow(uav_distance, 2.0);
+        predicted_motion_covariance(3,3) = std::pow(uav_angle, 2.0);
+
+        //Optimize    
         RCLCPP_INFO(this->get_logger(), "[Eliko global_opt node] Optimizing trajectory of %ld measurements", global_measurements_.size());
         //Update transforms after convergence
-        if(run_optimization(current_time)){
+        if(run_optimization(current_time, predicted_motion_covariance)){
         
             if(moving_average_){
                 // /*Run moving average*/
@@ -226,7 +262,8 @@ private:
             Eigen::Matrix4d That_ts = build_transformation_matrix(opt_state_.roll, opt_state_.pitch, opt_state_.state);
 
             publish_transform(That_ts, opt_state_.timestamp);
-            publish_covariance_with_timestamp(full_accumulated_covariance_, opt_state_.timestamp);
+            publish_covariance_with_timestamp(opt_state_.covariance + predicted_motion_covariance, opt_state_.timestamp);
+            //publish_covariance_with_timestamp(opt_state_.covariance, opt_state_.timestamp);
 
             //Update odom for next optimization
             uav_last_odom_pos_ = uav_odom_pos_;
@@ -241,8 +278,7 @@ private:
     }
 
     void window_opt_cb_() {
-
-        RCLCPP_WARN(this->get_logger(), "[Eliko global_opt node] Changing initial solution...");
+        
         init_state_ = opt_state_; 
 
     }
@@ -284,7 +320,6 @@ private:
             // Initialize accumulators for circular mean of yaw
             double sum_sin = 0.0;
             double sum_cos = 0.0;
-
 
             // Initialize total weight
             double total_weight = 0.0;
@@ -420,14 +455,14 @@ private:
         return T;
     }
 
+
     // Run the optimization once all measurements are received
-    bool run_optimization(const rclcpp::Time &current_time) {
+    bool run_optimization(const rclcpp::Time &current_time, const Eigen::Matrix4d& motion_covariance) {
 
             ceres::Problem problem;
 
             //Initial conditions
-            //State opt_state = opt_state_;
-            State opt_state = init_state_;
+            State opt_state = opt_state_;
             
             //Update the timestamp
             opt_state.timestamp = current_time;
@@ -436,10 +471,12 @@ private:
             double huber_threshold = 2.5; // = residuals higher than 2.5 times sigma are outliers
             ceres::LossFunction* robust_loss = new ceres::HuberLoss(huber_threshold);
 
-            // // Add the prior residual with the full covariance
-            ceres::CostFunction* prior_cost = PriorResidual::Create(init_state_.state, init_state_.covariance);
-            problem.AddResidualBlock(prior_cost, nullptr, opt_state.state.data());
+            Eigen::Matrix4d prior_covariance = opt_state_.covariance + motion_covariance;
 
+            // Add the prior residual with the full covariance
+            ceres::CostFunction* prior_cost = PriorResidual::Create(opt_state_.state, prior_covariance);
+
+            problem.AddResidualBlock(prior_cost, nullptr, opt_state.state.data());
 
             for (const auto& measurement : global_measurements_) {
                 if (anchor_positions_.count(measurement.anchor_id) > 0 &&
@@ -456,11 +493,7 @@ private:
 
             // Configure solver options
             ceres::Solver::Options options;
-            options.linear_solver_type = ceres::DENSE_QR;
-
-            // // Use Levenberg-Marquardt (default):
-            // options.minimizer_type = ceres::TRUST_REGION;
-            // options.trust_region_strategy_type = ceres::LEVENBERG_MARQUARDT;
+            options.linear_solver_type = ceres::DENSE_QR; // ceres::SPARSE_NORMAL_CHOLESKY,  ceres::DENSE_QR
 
             // Logging
             //options.minimizer_progress_to_stdout = true;
@@ -487,21 +520,16 @@ private:
                 if (covariance.Compute(covariance_blocks, &problem)) {
                     // Extract the full covariance matrix
                     covariance.GetCovarianceBlock(opt_state.state.data(), opt_state.state.data(), opt_covariance.data());
- 
-                    // // Compute odometry covariance based on distance increments from step to step
-                    // Eigen::Matrix4d odom_covariance = compute_odometry_covariance(opts_state); //incremental
-                    full_accumulated_covariance_ += opt_covariance;
-
-
-                    RCLCPP_INFO_THROTTLE(this->get_logger(), *this->get_clock(), 1000, "Full accumulated covariance:\n"
+                    
+                    RCLCPP_INFO_THROTTLE(this->get_logger(), *this->get_clock(), 1000, "State covariance:\n"
                         "[%f, %f, %f, %f]\n[%f, %f, %f, %f]\n[%f, %f, %f, %f]\n[%f, %f, %f, %f]",
-                        full_accumulated_covariance_(0, 0), full_accumulated_covariance_(0, 1), full_accumulated_covariance_(0, 2), full_accumulated_covariance_(0, 3),
-                        full_accumulated_covariance_(1, 0), full_accumulated_covariance_(1, 1), full_accumulated_covariance_(1, 2), full_accumulated_covariance_(1, 3),
-                        full_accumulated_covariance_(2, 0), full_accumulated_covariance_(2, 1), full_accumulated_covariance_(2, 2), full_accumulated_covariance_(2, 3),
-                        full_accumulated_covariance_(3, 0), full_accumulated_covariance_(3, 1), full_accumulated_covariance_(3, 2), full_accumulated_covariance_(3, 3));
+                        opt_covariance(0, 0), opt_covariance(0, 1), opt_covariance(0, 2), opt_covariance(0, 3),
+                        opt_covariance(1, 0), opt_covariance(1, 1), opt_covariance(1, 2), opt_covariance(1, 3),
+                        opt_covariance(2, 0), opt_covariance(2, 1), opt_covariance(2, 2), opt_covariance(2, 3),
+                        opt_covariance(3, 0), opt_covariance(3, 1), opt_covariance(3, 2), opt_covariance(3, 3));
                     
                     // Optionally, store covariance for further use
-                    opt_state.covariance = full_accumulated_covariance_;  // Add this to your State struct if needed
+                    opt_state.covariance = opt_covariance;  // Add this to your State struct if needed
 
                     //Update global state variable
                     opt_state_ = opt_state;
@@ -665,8 +693,6 @@ private:
     std::unordered_map<std::string, Eigen::Vector3d> anchor_positions_;
     std::unordered_map<std::string, Eigen::Vector3d> tag_positions_;
 
-    Eigen::Matrix4d full_accumulated_covariance_;
-
     std::string eliko_frame_id_, uav_frame_id_;
 
     State opt_state_;
@@ -679,8 +705,8 @@ private:
     double measurement_stdev_, measurement_covariance_;
     double moving_average_window_s_;
 
-    Eigen::Vector3d uav_odom_pos_, uav_last_odom_pos_;         // Current UAV odometry position and last used for optimization
-    Eigen::Vector3d agv_odom_pos_, agv_last_odom_pos_;        // Current AGV odometry position and last used for optimization
+    Eigen::Vector4d uav_odom_pos_, uav_last_odom_pos_;         // Current UAV odometry position and last used for optimization
+    Eigen::Vector4d agv_odom_pos_, agv_last_odom_pos_;        // Current AGV odometry position and last used for optimization
     Eigen::Matrix4d uav_odom_covariance_;  // UAV odometry covariance
     Eigen::Matrix4d agv_odom_covariance_;  // AGV odometry covariance
     double min_traveled_distance_;
