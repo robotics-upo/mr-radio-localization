@@ -41,7 +41,7 @@ target_link_libraries(optimizer_node_fusion Ceres::ceres ${PCL_LIBRARIES}  ${pcl
 
 ament_target_dependencies(optimizer_node_eliko rclcpp std_msgs geometry_msgs tf2_ros tf2_geometry_msgs eliko_messages)
 ament_target_dependencies(global_opt_node_eliko rclcpp std_msgs geometry_msgs nav_msgs tf2_ros tf2_geometry_msgs eliko_messages)
-ament_target_dependencies(optimizer_node_fusion rclcpp std_msgs geometry_msgs sensor_msgs tf2_ros tf2_geometry_msgs eliko_messages pcl_ros pcl_conversions)
+ament_target_dependencies(optimizer_node_fusion rclcpp std_msgs geometry_msgs nav_msgs sensor_msgs tf2_ros tf2_geometry_msgs eliko_messages pcl_ros pcl_conversions)
 
 
 target_include_directories(optimizer_node_eliko PUBLIC

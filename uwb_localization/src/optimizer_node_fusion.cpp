@@ -1,16 +1,15 @@
 #include <rclcpp/rclcpp.hpp>
 #include <std_msgs/msg/float32.hpp>
-
 #include <geometry_msgs/msg/transform_stamped.hpp>
-#include <sensor_msgs/msg/point_cloud2.hpp>
-
 #include <tf2_ros/transform_broadcaster.h>
+#include <tf2_ros/transform_listener.h>
+#include <tf2_ros/buffer.h>
 
 #include <tf2/LinearMath/Quaternion.h>
 #include <tf2/LinearMath/Matrix3x3.h>
 #include <tf2_geometry_msgs/tf2_geometry_msgs.hpp>
 #include "geometry_msgs/msg/quaternion_stamped.hpp"
-
+#include <nav_msgs/msg/odometry.hpp>
 
 #include <pcl_conversions/pcl_conversions.h>
 #include <pcl/point_cloud.h>
@@ -22,6 +21,7 @@
 #include "eliko_messages/msg/distances_list.hpp"
 #include "eliko_messages/msg/anchor_coords_list.hpp"
 #include "eliko_messages/msg/tag_coords_list.hpp"
+#include "eliko_messages/msg/covariance_matrix_with_header.hpp"
 
 #include <ceres/ceres.h>
 #include <ceres/rotation.h>
@@ -34,24 +34,24 @@
 #include <unordered_map>
 #include <chrono>
 
-using MeasurementKey = std::pair<std::string, std::string>; // (anchor_sn, tag_sn)
+struct State {
+    Eigen::Vector4d state; // [x,y,z,yaw]
+    Eigen::Matrix4d covariance;
+    double roll;
+    double pitch;
+    rclcpp::Time timestamp;  // e.g., seconds since epoch
 
+    // Pointer to an associated point cloud (keyframe scan).
+    pcl::PointCloud<pcl::PointXYZ>::Ptr scan;
 
-// Define a hash function for pair of strings
-struct PairHash {
-    template <class T1, class T2>
-    std::size_t operator()(const std::pair<T1, T2>& p) const {
-        auto hash1 = std::hash<T1>{}(p.first);
-        auto hash2 = std::hash<T2>{}(p.second);
-        return hash1 ^ (hash2 << 1); // Combine the two hashes
-    }
+    // Constructor to initialize the pointer.
+    State() : scan(new pcl::PointCloud<pcl::PointXYZ>) {}
 };
 
-
-struct State {
-    Eigen::Vector3d translation;
-    double yaw;
-    rclcpp::Time timestamp;  // e.g., seconds since epoch
+// In addition, we create a structure for a pose graph which holds separate trajectories for each robot.
+struct PoseGraph {
+    std::vector<State> agv_states;
+    std::vector<State> uav_states;
 };
 
 
@@ -59,152 +59,168 @@ class FusionOptimizationNode : public rclcpp::Node {
 
 public:
 
-    FusionOptimizationNode() : Node("fusion_optimization_node"), roll_(0.0), pitch_(0.0), yaw_(0.0) {
+    FusionOptimizationNode() : Node("fusion_optimization_node") {
     
-
-    //Subscribe to distances publisher
-    eliko_distances_sub_ = this->create_subscription<eliko_messages::msg::DistancesList>(
-                "/eliko/Distances", 10, std::bind(&FusionOptimizationNode::distances_coords_cb_, this, std::placeholders::_1));
     
     dji_attitude_sub_ = this->create_subscription<geometry_msgs::msg::QuaternionStamped>(
                 "/dji_sdk/attitude", 10, std::bind(&FusionOptimizationNode::attitude_cb_, this, std::placeholders::_1));
 
-    rclcpp::SensorDataQoS qos; // Use a QoS profile compatible with sensor data
 
+    //Option 1: get odometry through topics -> includes covariance
+    std::string odom_topic_agv = "/arco/idmind_motors/odom"; //or "/agv/odom"
+    std::string odom_topic_uav = "/uav/odom"; //or "/uav/odom"
+    
+    uav_odom_sub_ = this->create_subscription<nav_msgs::msg::Odometry>(
+    odom_topic_uav, 10, std::bind(&FusionOptimizationNode::uav_odom_cb_, this, std::placeholders::_1));
+
+    agv_odom_sub_ = this->create_subscription<nav_msgs::msg::Odometry>(
+    odom_topic_agv, 10, std::bind(&FusionOptimizationNode::agv_odom_cb_, this, std::placeholders::_1));
+
+
+    //Option 2: get odometry through tf readings -> only transform
+    odom_tf_agv_s_ = "agv_odom"; //source
+    odom_tf_agv_t_ = "world"; //target
+    odom_tf_uav_s_ = "uav_odom"; //source
+    odom_tf_uav_t_ = "world"; //target
+
+    // Set up transform listener for UAV odometry.
+    tf_buffer_uav_ = std::make_shared<tf2_ros::Buffer>(this->get_clock());
+    tf_listener_uav_ = std::make_shared<tf2_ros::TransformListener>(*tf_buffer_uav_);
+
+    // Set up transform listener for AGV odometry.
+    tf_buffer_agv_ = std::make_shared<tf2_ros::Buffer>(this->get_clock());
+    tf_listener_agv_ = std::make_shared<tf2_ros::TransformListener>(*tf_buffer_agv_);
+
+
+    rclcpp::SensorDataQoS qos; // Use a QoS profile compatible with sensor data
     pcl_source_sub_ = this->create_subscription<sensor_msgs::msg::PointCloud2>(
                 "/arco/ouster/points", qos, std::bind(&FusionOptimizationNode::pcl_source_cb_, this, std::placeholders::_1));
 
     pcl_target_sub_ = this->create_subscription<sensor_msgs::msg::PointCloud2>(
                 "/os1_cloud_node/points_non_dense", qos, std::bind(&FusionOptimizationNode::pcl_target_cb_, this, std::placeholders::_1));
 
-    // Create publisher/broadcaster for optimized transformation
-    tf_publisher_ = this->create_publisher<geometry_msgs::msg::TransformStamped>("fusion_optimization_node/optimized_T", 10);
+    optimized_tf_sub_ = this->create_subscription<geometry_msgs::msg::TransformStamped>(
+        "/eliko_optimization_node/optimized_T", 10,
+        std::bind(&FusionOptimizationNode::optimized_tf_cb_, this, std::placeholders::_1));
+
+    
     tf_broadcaster_ = std::make_shared<tf2_ros::TransformBroadcaster>(this);
 
-    optimizer_time_window_s_ = 0.2; //use only messages in this window for optimization
-    min_measurements_ = 1; //min number of measurements for running optimizer
+    covariance_publisher_ = this->create_publisher<eliko_messages::msg::CovarianceMatrixWithHeader>("eliko_optimization_node/covariance", 10);
 
-    optimization_timer_ = this->create_wall_timer(
-            std::chrono::milliseconds(int(optimizer_time_window_s_*1000)), std::bind(&FusionOptimizationNode::optimizer_cb_, this));
+    global_opt_window_s_ = 5.0; //size of the sliding window in seconds
+    global_opt_rate_s_ = 0.25 * global_opt_window_s_; //rate of the optimization -> displace the window 10% of its size
 
-    anchor_positions_ = {
-        {"0x0009D6", {-0.32, 0.3, 0.875}}, {"0x0009E5", {0.32, -0.3, 0.875}},
-        {"0x0016FA", {0.32, 0.3, 0.33}}, {"0x0016CF", {-0.32, -0.3, 0.33}}
-    };
+    global_optimization_timer_ = this->create_wall_timer(
+            std::chrono::milliseconds(int(global_opt_rate_s_*1000)), std::bind(&FusionOptimizationNode::global_opt_cb_, this));
+
+
+    eliko_frame_id_ = "agv_odom"; //frame of the eliko system-> arco/eliko, for simulation use "agv_gt" for ground truth, "agv_odom" for odometry w/ errors
+    uav_frame_id_ = "uav_opt"; //frame of the uav -> "base_link", for simulation use "uav_opt"
+
+    //Initial values for state
+    init_state_.state = Eigen::Vector4d(0.0, 0.0, 0.0, 0.0);
+    init_state_.covariance = Eigen::Matrix4d::Identity(); //
+    init_state_.roll = 0.0;
+    init_state_.pitch = 0.0;
+    init_state_.timestamp = this->get_clock()->now();
+
+    // For each robot, start with the same initial state.
+    pose_graph_.agv_states.push_back(init_state_);
+    pose_graph_.uav_states.push_back(init_state_);
+
+    moving_average_ = true;
+    moving_average_window_s_ = global_opt_window_s_ / 2.0;
+
+    // Initialize odometry positions and errors
+    uav_odom_pos_ = Eigen::Vector4d::Zero();
+    agv_odom_pos_ = Eigen::Vector4d::Zero();
+
+    latest_relative_available_ = false;
     
-    tag_positions_ = {
-        {"0x001155", {-0.24, -0.24, -0.06}}, {"0x001397", {0.24, 0.24, -0.06}}
-    };
-
-    eliko_frame_id_ = "arco/eliko"; //frame of the eliko system-> arco/eliko, for simulation use "ground_vehicle"
-    uav_frame_id_ = "base_link"; //frame of the uav -> "base_link", for simulation use "uav_opt"
-
-    // Known roll and pitch values
-    roll_ = 0.0;   // Example roll in radians
-    pitch_ = 0.0;  // Example pitch in radians
-    yaw_ = 0.0;    // Initial guess for yaw
-
-    t_ = Eigen::Vector3d(0.0, 0.0, 0.0);       // Translation That_ts (x, y, z)
-
-    icp_tf_ = Eigen::Matrix4f::Identity();
-
-    moving_average_window_size_ = 10; //moving average sample window (N)
-
     RCLCPP_INFO(this->get_logger(), "Eliko Optimization Node initialized.");
   }
 
 private:
 
-    // Callback for each measurement
-    void distances_coords_cb_(const eliko_messages::msg::DistancesList::SharedPtr msg) {
-            
-            if(msg->anchor_distances[0].tag_sn == "0x001155") distances_t1_ = *msg;
-            else if(msg->anchor_distances[0].tag_sn == "0x001397") distances_t2_ = *msg;
 
-            for (const auto& distance_msg : msg->anchor_distances) {
-                RCLCPP_INFO(this->get_logger(), "[Eliko optimizer node] Distance received from Anchor %s to tag %s: %.2f cm", distance_msg.anchor_sn.c_str(), distance_msg.tag_sn.c_str(), distance_msg.distance);
-            }
+    void uav_odom_cb_(const nav_msgs::msg::Odometry::SharedPtr msg) {
+        
+        // Extract quaternion components.
+        double qx = msg->pose.pose.orientation.x;
+        double qy = msg->pose.pose.orientation.y;
+        double qz = msg->pose.pose.orientation.z;
+        double qw = msg->pose.pose.orientation.w;
 
+        // Compute yaw.
+        double siny_cosp = 2.0 * (qw * qz + qx * qy);
+        double cosy_cosp = 1.0 - 2.0 * (qy * qy + qz * qz);
+        double yaw = std::atan2(siny_cosp, cosy_cosp);
+
+        // Assign the position and yaw to a 4D vector.
+        uav_odom_pos_ = Eigen::Vector4d(
+            msg->pose.pose.position.x,
+            msg->pose.pose.position.y,
+            msg->pose.pose.position.z,
+            yaw
+        );
+
+        // Extract covariance from the odometry message and store it in Eigen::Matrix4d
+        uav_odom_covariance_ = Eigen::Matrix4d::Zero();
+        uav_odom_covariance_(0, 0) = msg->pose.covariance[0];  // x variance
+        uav_odom_covariance_(1, 1) = msg->pose.covariance[7];  // y variance
+        uav_odom_covariance_(2, 2) = msg->pose.covariance[14]; // z variance
+        uav_odom_covariance_(3, 3) = msg->pose.covariance[35]; // yaw variance
     }
 
-    void optimizer_cb_() {
+    void agv_odom_cb_(const nav_msgs::msg::Odometry::SharedPtr msg) {
+        
+        // Extract quaternion components.
+        double qx = msg->pose.pose.orientation.x;
+        double qy = msg->pose.pose.orientation.y;
+        double qz = msg->pose.pose.orientation.z;
+        double qw = msg->pose.pose.orientation.w;
 
-        rclcpp::Time current_time = this->get_clock()->now();
+        // Compute yaw.
+        double siny_cosp = 2.0 * (qw * qz + qx * qy);
+        double cosy_cosp = 1.0 - 2.0 * (qy * qy + qz * qz);
+        double yaw = std::atan2(siny_cosp, cosy_cosp);
 
-        if(!distances_t1_.anchor_distances.empty()){
-            for (const auto& distance_msg : distances_t1_.anchor_distances) {
-                    // Store distance measurements using (anchor_sn, tag_sn) as key
-                    MeasurementKey key(distance_msg.anchor_sn, distance_msg.tag_sn);
-                    current_measurements_[key] = distance_msg.distance / 100.0; // Convert to meters
-                }
-            RCLCPP_DEBUG(this->get_logger(), "[Eliko optimizer node] Using %ld measurements from t1", distances_t1_.anchor_distances.size());
-        }
+        // Assign the position and yaw to a 4D vector.
+        agv_odom_pos_ = Eigen::Vector4d(
+            msg->pose.pose.position.x,
+            msg->pose.pose.position.y,
+            msg->pose.pose.position.z,
+            yaw
+        );
 
-        if(!distances_t2_.anchor_distances.empty()){
-            for (const auto& distance_msg : distances_t2_.anchor_distances) {
-                    // Store distance measurements using (anchor_sn, tag_sn) as key
-                    MeasurementKey key(distance_msg.anchor_sn, distance_msg.tag_sn);
-                    current_measurements_[key] = distance_msg.distance / 100.0; // Convert to meters
-                }
-            RCLCPP_DEBUG(this->get_logger(), "[Eliko optimizer node] Using %ld measurements from t2", distances_t2_.anchor_distances.size());
-        }
-
-        //RUN ICP
-        if(!source_cloud_->points.empty() || !target_cloud_->points.empty()){
-            icp_tf_ = run_icp(source_cloud_, target_cloud_);
-        } else {
-            RCLCPP_WARN(this->get_logger(), "Source or target point cloud is empty. Skipping ICP.");
-            icp_tf_ = Eigen::Matrix4f::Zero();
-        }
-            
-        //Update transforms after convergence
-        if(run_optimization()){
-            
-            /*Run moving average*/
-            State sample {t_, yaw_, current_time};
-            auto [smoothed_translation, smoothed_yaw] = moving_average(sample);
-            //Update for initial estimation of following step
-            t_ = smoothed_translation;
-            yaw_ = normalize_angle(smoothed_yaw);
-
-            // Construct transformation matrix T with optimized yaw, roll, pitch, and translation
-            Eigen::Matrix4d That_ts = build_transformation_matrix(roll_, pitch_, yaw_, t_);
-            publish_transform(That_ts, current_time);
-        }
-
-        else{
-            RCLCPP_INFO(this->get_logger(), "[Eliko optimizer node] Optimizer did not converge");
-        }
-
-        /*Clear measurements in this window*/
-        current_measurements_.clear();
-        distances_t1_.anchor_distances.clear();
-        distances_t2_.anchor_distances.clear();
-        source_cloud_->points.clear();
-        target_cloud_->points.clear();
-
+        // Extract covariance from the odometry message and store it in Eigen::Matrix4d
+        agv_odom_covariance_ = Eigen::Matrix4d::Zero();
+        agv_odom_covariance_(0, 0) = msg->pose.covariance[0];  // x variance
+        agv_odom_covariance_(1, 1) = msg->pose.covariance[7];  // y variance
+        agv_odom_covariance_(2, 2) = msg->pose.covariance[14]; // z variance
+        agv_odom_covariance_(3, 3) = msg->pose.covariance[35]; // yaw variance
     }
 
 
     void pcl_source_cb_(const sensor_msgs::msg::PointCloud2::SharedPtr msg){
-
         
         if (!msg->data.empty()) {  // Ensure the incoming message has data
-            pcl::fromROSMsg(*msg, *source_cloud_);
-            RCLCPP_DEBUG(this->get_logger(), "Source cloud received with %zu points", source_cloud_->points.size());
+            pcl::fromROSMsg(*msg, *agv_cloud_);
+            RCLCPP_DEBUG(this->get_logger(), "AGV cloud received with %zu points", agv_cloud_->points.size());
         } 
 
         else {
                 RCLCPP_WARN(this->get_logger(), "Empty source point cloud received!");
         }
             return;
-        }
+    }
 
     void pcl_target_cb_(const sensor_msgs::msg::PointCloud2::SharedPtr msg){
 
         if (!msg->data.empty()) {  // Ensure the incoming message has data
-            pcl::fromROSMsg(*msg, *target_cloud_);
-            RCLCPP_DEBUG(this->get_logger(), "Target cloud received with %zu points", target_cloud_->points.size());
+            pcl::fromROSMsg(*msg, *uav_cloud_);
+            RCLCPP_DEBUG(this->get_logger(), "UAV cloud received with %zu points", uav_cloud_->points.size());
         } 
         
         else {            
@@ -214,181 +230,142 @@ private:
         return;
     }
 
-    void attitude_cb_(const geometry_msgs::msg::QuaternionStamped::SharedPtr msg) {
 
-            const auto& q = msg->quaternion;
-            // Convert the quaternion to roll, pitch, yaw
-            tf2::Quaternion tf_q(q.x, q.y, q.z, q.w);
-            tf2::Matrix3x3 m(tf_q);
-            double yaw;
-            m.getRPY(roll_, pitch_, yaw);  // Get roll and pitch, but ignore yaw as we optimize it separately
-        }
-
-        // Normalize an angle to the range [-pi, pi]
-    double normalize_angle(double angle) {
-        while (angle > M_PI) angle -= 2.0 * M_PI;
-        while (angle < -M_PI) angle += 2.0 * M_PI;
-        return angle;
-        }
-
-
-    std::pair<Eigen::Vector3d, double> moving_average(const State &sample) {
-        
-            // Add the new sample with timestamp
-            sample_history_.push_back(sample);
-
-            // Remove samples that are too old or if we exceed the window size
-            while (!sample_history_.empty() &&
-                (sample_history_.size() > moving_average_window_size_ || 
-                    sample.timestamp - sample_history_.front().timestamp > rclcpp::Duration::from_seconds(optimizer_time_window_s_*moving_average_window_size_))) {
-                sample_history_.pop_front();
-            }
-
-            // Initialize smoothed values
-            Eigen::Vector3d smoothed_translation = Eigen::Vector3d(0.0, 0.0, 0.0);
-            double smoothed_yaw = 0.0;
-
-            // Initialize accumulators for circular mean of yaw
-            double sum_sin = 0.0;
-            double sum_cos = 0.0;
-
-
-            // Initialize total weight
-            double total_weight = 0.0;
-            // Define a decay factor (e.g., between 0 and 1) for exponential weighting
-            double decay_factor = 0.9;  // Adjust as needed for desired weighting effect
-            double weight = 1.0;  // Start with a weight of 1.0 for the most recent sample
-
-            // Iterate over samples in reverse order (from newest to oldest)
-            for (auto it = sample_history_.rbegin(); it != sample_history_.rend(); ++it) {
-                // Apply the weight to each sample's translation and accumulate
-                smoothed_translation[0] += weight * it->translation[0];
-                smoothed_translation[1] += weight * it->translation[1];
-                smoothed_translation[2] += weight * it->translation[2];
-                
-                // Convert yaw to sine and cosine, apply the weight, then accumulate
-                sum_sin += weight * std::sin(it->yaw);
-                sum_cos += weight * std::cos(it->yaw);
-
-                // Accumulate total weight for averaging
-                total_weight += weight;
-
-                // Decay the weight for the next (older) sample
-                weight *= decay_factor;
-            }
-
-            // Normalize to get the weighted average
-            if (total_weight > 0.0) {
-                smoothed_translation[0] /= total_weight;
-                smoothed_translation[1] /= total_weight;
-                smoothed_translation[2] /= total_weight;
-
-                // Calculate weighted average yaw using the weighted sine and cosine
-                smoothed_yaw = std::atan2(sum_sin / total_weight, sum_cos / total_weight);
-            }
-
-            return {smoothed_translation, smoothed_yaw};
-    }
-
-    void publish_transform(const Eigen::Matrix4d& T, const rclcpp::Time &current_time) {
-
-
-        geometry_msgs::msg::TransformStamped that_ts_msg;
-        that_ts_msg.header.stamp = current_time;
-
-        // Extract translation
-        that_ts_msg.transform.translation.x = T(0, 3);
-        that_ts_msg.transform.translation.y = T(1, 3);
-        that_ts_msg.transform.translation.z = T(2, 3);
-
-        // Extract rotation (Convert Eigen rotation matrix to quaternion)
-        Eigen::Matrix3d rotation_matrix_that_ts = T.block<3, 3>(0, 0);
-
-        Eigen::Quaterniond q_that_ts(rotation_matrix_that_ts);
-
-        that_ts_msg.transform.rotation.x = q_that_ts.x();
-        that_ts_msg.transform.rotation.y = q_that_ts.y();
-        that_ts_msg.transform.rotation.z = q_that_ts.z();
-        that_ts_msg.transform.rotation.w = q_that_ts.w();
-        
-        /*Create the inverse to publish to tf tree*/
-        
-        Eigen::Matrix4d That_st = T.inverse();
-
-        geometry_msgs::msg::TransformStamped that_st_msg;
-        that_st_msg.header.stamp = that_ts_msg.header.stamp;
-        that_st_msg.header.frame_id = eliko_frame_id_;  // Adjust frame_id as needed
-        that_st_msg.child_frame_id = uav_frame_id_;            // Adjust child_frame_id as needed
-
-        // Extract translation
-        that_st_msg.transform.translation.x = That_st(0, 3);
-        that_st_msg.transform.translation.y = That_st(1, 3);
-        that_st_msg.transform.translation.z = That_st(2, 3);
-
-        // Convert Eigen rotation matrix of inverse transform to tf2 Matrix3x3
-        Eigen::Matrix3d rotation_matrix_that_st = That_st.block<3, 3>(0, 0);
-    
-        Eigen::Quaterniond q_that_st(rotation_matrix_that_st);
-
-        that_st_msg.transform.rotation.x = q_that_st.x();
-        that_st_msg.transform.rotation.y = q_that_st.y();
-        that_st_msg.transform.rotation.z = q_that_st.z();
-        that_st_msg.transform.rotation.w = q_that_st.w();
-
-
-        // Publish the estimated transform
-        tf_publisher_->publish(that_ts_msg);
-        // Broadcast the inverse transform
-        tf_broadcaster_->sendTransform(that_st_msg);
-    }
-
-
-  // Build transformation matrix from roll, pitch, optimized yaw, and translation vector
-    Eigen::Matrix4d build_transformation_matrix(double roll, double pitch, double yaw, const Eigen::Vector3d& t) {
-        Eigen::Matrix3d R;
-        R = Eigen::AngleAxisd(yaw, Eigen::Vector3d::UnitZ()) *
-            Eigen::AngleAxisd(pitch, Eigen::Vector3d::UnitY()) *
-            Eigen::AngleAxisd(roll, Eigen::Vector3d::UnitX());
-
-        R = Eigen::Quaterniond(R).normalized().toRotationMatrix();
-        
+     // Callback for receiving the optimized relative transform from the fast node.
+    void optimized_tf_cb_(const geometry_msgs::msg::TransformStamped::SharedPtr msg) {
+        // Convert the TransformStamped to a 4x4 Eigen matrix.
         Eigen::Matrix4d T = Eigen::Matrix4d::Identity();
-        T.block<3, 3>(0, 0) = R;
-        T(0, 3) = t[0];
-        T(1, 3) = t[1];
-        T(2, 3) = t[2];
+        T(0,3) = msg->transform.translation.x;
+        T(1,3) = msg->transform.translation.y;
+        T(2,3) = msg->transform.translation.z;
+        // Convert quaternion to rotation matrix.
+        Eigen::Quaterniond q(msg->transform.rotation.w,
+                            msg->transform.rotation.x,
+                            msg->transform.rotation.y,
+                            msg->transform.rotation.z);
+        T.block<3,3>(0,0) = q.toRotationMatrix();
+        latest_relative_transform_ = T;
+        latest_relative_available_ = true;
+        RCLCPP_INFO(this->get_logger(), "Received optimized relative transform.");
+    
+    }
 
-        return T;
+
+
+    void global_opt_cb_() {
+
+        rclcpp::Time current_time = this->get_clock()->now();
+
+        // Create a new AGV node from the current odometry.
+        State new_agv;
+        new_agv.state = agv_odom_pos_;
+        new_agv.covariance = agv_odom_covariance_;
+        new_agv.timestamp = current_time;
+        new_agv.roll = 0.0;   // or update with additional sensors
+        new_agv.pitch = 0.0;
+
+        //Downsample the latest scan and store as keyframe
+        *(new_agv.scan) = *(downsamplePointCloud(agv_cloud_, 0.05f));
+
+        pose_graph_.agv_states.push_back(new_agv);
+        
+        // Similarly, create a new UAV node.
+        State new_uav;
+        new_uav.state = uav_odom_pos_;
+        new_uav.covariance = uav_odom_covariance_;
+        new_uav.timestamp = current_time;
+        new_uav.roll = roll_uav_;  // from attitude callback
+        new_uav.pitch = pitch_uav_;
+        
+        //Downsample the latest scan and store as keyframe
+        *(new_uav.scan) = *(downsamplePointCloud(uav_cloud_, 0.05f));
+
+        pose_graph_.uav_states.push_back(new_uav);
+        
+        
+        // Remove old nodes outside the sliding window.
+        while (!pose_graph_.agv_states.empty() &&
+               (current_time - pose_graph_.agv_states.front().timestamp).seconds() > global_opt_window_s_) {
+            pose_graph_.agv_states.erase(pose_graph_.agv_states.begin());
+        }
+        while (!pose_graph_.uav_states.empty() &&
+               (current_time - pose_graph_.uav_states.front().timestamp).seconds() > global_opt_window_s_) {
+            pose_graph_.uav_states.erase(pose_graph_.uav_states.begin());
+        }
+
+
+        //Read the transform (if odom topics not available)
+        try {
+            auto transform_agv = tf_buffer_agv_->lookupTransform(odom_tf_agv_t_, odom_tf_agv_s_, rclcpp::Time(0));
+            agv_odom_pos_ = transformMsgToState(transform_agv);
+            } catch (const tf2::TransformException &ex) {
+            RCLCPP_WARN(this->get_logger(), "Could not get transform for AGV: %s", ex.what());
+            }
+
+        try {
+            auto transform_uav = tf_buffer_uav_->lookupTransform(odom_tf_uav_t_, odom_tf_uav_s_, rclcpp::Time(0));
+            uav_odom_pos_ = transformMsgToState(transform_uav);
+            } catch (const tf2::TransformException &ex) {
+            RCLCPP_WARN(this->get_logger(), "Could not get transform for UAV: %s", ex.what());
+            }
+
+        //Update transforms after convergence
+        if(run_posegraph_optimization()){
+        
+            // if(moving_average_){
+            //     // /*Run moving average*/
+            //     auto smoothed_state = moving_average(opt_state_);
+            //     //Update for initial estimation of following step
+            //     opt_state_.state = smoothed_state;
+            // }
+
+            State& agv_node = pose_graph_.agv_states.back();
+            State& uav_node = pose_graph_.uav_states.back();
+
+            Eigen::Matrix4d That_ws = build_transformation_matrix(0.0, 0.0, agv_node.state);
+            Eigen::Matrix4d That_wt = build_transformation_matrix(uav_node.roll, uav_node.pitch, uav_node.state);
+
+            publish_transform(That_ws, current_time, "world", "agv_opt");
+            publish_transform(That_wt, current_time, "world", "uav_opt");
+
+        }
+
+        else{
+            RCLCPP_INFO(this->get_logger(), "[Eliko global_opt node] Optimizer did not converge");
+        }
+        
+
+    }
+
+
+    // Helper function to downsample a point cloud using a voxel grid filter.
+    pcl::PointCloud<pcl::PointXYZ>::Ptr downsamplePointCloud(
+        const pcl::PointCloud<pcl::PointXYZ>::ConstPtr &input_cloud,
+        float leaf_size = 0.05f) // default leaf size of 5cm
+    {
+        // Create a VoxelGrid filter and set the input cloud.
+        pcl::VoxelGrid<pcl::PointXYZ> voxel_filter;
+        voxel_filter.setInputCloud(input_cloud);
+        voxel_filter.setLeafSize(leaf_size, leaf_size, leaf_size);
+
+        // Create a new point cloud to hold the filtered data.
+        pcl::PointCloud<pcl::PointXYZ>::Ptr output_cloud(new pcl::PointCloud<pcl::PointXYZ>);
+        voxel_filter.filter(*output_cloud);
+
+        RCLCPP_DEBUG(this->get_logger(), "Pointcloud downsampled to %zu points", output_cloud->points.size());
+
+        return output_cloud;
     }
 
 
     Eigen::Matrix4f run_icp(const pcl::PointCloud<pcl::PointXYZ>::ConstPtr &source_cloud,
              const pcl::PointCloud<pcl::PointXYZ>::ConstPtr &target_cloud) const {
-        
-          
-        //Downsample source point cloud      
-        pcl::VoxelGrid<pcl::PointXYZ> voxel_filter_src;
-        voxel_filter_src.setInputCloud(source_cloud);
-        voxel_filter_src.setLeafSize(0.05f, 0.05f, 0.05f);  // Adjust leaf size as needed
-        pcl::PointCloud<pcl::PointXYZ>::Ptr source_cloud_filtered(new pcl::PointCloud<pcl::PointXYZ>);
-        voxel_filter_src.filter(*source_cloud_filtered); 
-
-        RCLCPP_DEBUG(this->get_logger(), "Source cloud downsampled to %zu points", source_cloud_filtered->points.size());
-
-        //Downsample target point cloud
-        pcl::VoxelGrid<pcl::PointXYZ> voxel_filter_target;
-        voxel_filter_target.setInputCloud(target_cloud);
-        voxel_filter_target.setLeafSize(0.05f, 0.05f, 0.05f);  // Adjust leaf size as needed
-        pcl::PointCloud<pcl::PointXYZ>::Ptr target_cloud_filtered(new pcl::PointCloud<pcl::PointXYZ>);
-        voxel_filter_target.filter(*target_cloud_filtered);
-
-        RCLCPP_DEBUG(this->get_logger(), "Target cloud downsampled to %zu points", target_cloud_filtered->points.size());
                
         
         // Perform ICP
         pcl::IterativeClosestPoint<pcl::PointXYZ, pcl::PointXYZ> icp;
-        icp.setInputSource(source_cloud_filtered);
-        icp.setInputTarget(target_cloud_filtered);
+        icp.setInputSource(source_cloud);
+        icp.setInputTarget(target_cloud);
 
         pcl::PointCloud<pcl::PointXYZ>::Ptr aligned_cloud(new pcl::PointCloud<pcl::PointXYZ>);
         icp.align(*aligned_cloud);
@@ -408,194 +385,656 @@ private:
         return transformation;
     }
 
-    // Run the optimization once all measurements are received
-    bool run_optimization() {
+    // Converts a TransformStamped message to an Eigen::Matrix4d.
+    Eigen::Vector4d transformMsgToState(const geometry_msgs::msg::TransformStamped &msg) {
 
-            ceres::Problem problem;
+        double qw = msg.transform.rotation.w;
+        double qx = msg.transform.rotation.x;
+        double qy = msg.transform.rotation.y;
+        double qz = msg.transform.rotation.z;
 
-            // Temporary variables to hold optimized results
-            Eigen::Vector3d t = t_;
-            double yaw = yaw_;
+        // Compute yaw.
+        double siny_cosp = 2.0 * (qw * qz + qx * qy);
+        double cosy_cosp = 1.0 - 2.0 * (qy * qy + qz * qz);
+        double yaw = std::atan2(siny_cosp, cosy_cosp);
 
-            
-            // Dynamically set weights based on UWB measurements and ICP score
-            double weight_uwb = 0.0;
+        // Assign the position and yaw to a 4D vector.
+        Eigen::Vector4d odom_pos = Eigen::Vector4d(
+            msg.transform.translation.x,
+            msg.transform.translation.y,
+            msg.transform.translation.z,
+            yaw
+        );
 
-            if(!current_measurements_.empty()){
-
-                // Dynamically set weights based on UWB measurements and ICP score
-                weight_uwb = static_cast<double>(current_measurements_.size()) / 8.0;
-
-                // Dynamically add residuals for available measurements
-                for (const auto& [key, distance] : current_measurements_) {
-                    const auto& [anchor_sn, tag_sn] = key;
-                    if (anchor_positions_.count(anchor_sn) > 0 && tag_positions_.count(tag_sn) > 0) {
-                        Eigen::Vector3d anchor_pos = anchor_positions_[anchor_sn];
-                        Eigen::Vector3d tag_pos = tag_positions_[tag_sn];
-                        
-                        // Create cost function with the received distance
-                        ceres::CostFunction* uwb_cost_function = UWBResidual::Create(anchor_pos, tag_pos, distance, roll_, pitch_);
-                        problem.AddResidualBlock(uwb_cost_function, nullptr, &yaw, t.data());
-                        problem.AddResidualBlock(uwb_cost_function, new ceres::ScaledLoss(nullptr, weight_uwb, ceres::TAKE_OWNERSHIP), &yaw, t.data());
-                    }
-                }
-            }
-
-            double weight_icp = 1.0 - weight_uwb;
-
-            // Add ICP residual to the optimization problem
-            if (!icp_tf_.isZero(0)) {  // Ensure ICP transform is valid
-                Eigen::Matrix3d icp_rotation = icp_tf_.block<3, 3>(0, 0).cast<double>();
-                Eigen::Vector3d icp_translation = icp_tf_.block<3, 1>(0, 3).cast<double>();
-
-                // Create a cost function for ICP residual
-                ceres::CostFunction* icp_cost_function = ICPResidual::Create(icp_rotation, icp_translation);
-                problem.AddResidualBlock(icp_cost_function, nullptr, &yaw, t.data());
-                problem.AddResidualBlock(icp_cost_function, new ceres::ScaledLoss(nullptr, weight_icp, ceres::TAKE_OWNERSHIP), &yaw, t.data());
-
-            } else {
-                RCLCPP_WARN(this->get_logger(), "[FusionOptimizationNode] ICP transform is invalid, skipping ICP residual.");
-            }
-
-            // Configure solver options
-            ceres::Solver::Options options;
-            options.linear_solver_type = ceres::DENSE_QR;
-
-            // // Use Levenberg-Marquardt (default):
-            // options.minimizer_type = ceres::TRUST_REGION;
-            // options.trust_region_strategy_type = ceres::LEVENBERG_MARQUARDT;
-
-            options.minimizer_progress_to_stdout = true;
-
-            // Solve
-            ceres::Solver::Summary summary;
-            ceres::Solve(options, &problem, &summary);
-            RCLCPP_INFO(this->get_logger(), summary.BriefReport().c_str());
-
-            // Notify and update values if optimization converged
-            if (summary.termination_type == ceres::CONVERGENCE){
-                t_ = t;
-                yaw_ = yaw;
-                return true;
-            } 
-            
-            return false;
-
+        return odom_pos;
     }
 
-  // Residual struct for Ceres
-  struct UWBResidual {
-        UWBResidual(const Eigen::Vector3d& anchor, const Eigen::Vector3d& tag, double measured_distance, double roll, double pitch)
-            : anchor_(anchor), tag_(tag), measured_distance_(measured_distance), roll_(roll), pitch_(pitch) {}
 
-        template <typename T>
-        bool operator()(const T* const yaw, const T* const t, T* residual) const {
-                // Build rotation matrix using roll, pitch, and variable yaw
-                Eigen::Matrix<T, 3, 3> R;
-                R = Eigen::AngleAxis<T>(yaw[0], Eigen::Matrix<T, 3, 1>::UnitZ()) *
-                    Eigen::AngleAxis<T>(T(pitch_), Eigen::Matrix<T, 3, 1>::UnitY()) *
-                    Eigen::AngleAxis<T>(T(roll_), Eigen::Matrix<T, 3, 1>::UnitX());
 
-                // Transform the anchor point
-                Eigen::Matrix<T, 3, 1> anchor_transformed = R * anchor_.cast<T>() + Eigen::Matrix<T, 3, 1>(t[0], t[1], t[2]);
+    void attitude_cb_(const geometry_msgs::msg::QuaternionStamped::SharedPtr msg) {
 
-                // Calculate the predicted distance
-                T dx = T(tag_(0)) - anchor_transformed[0];
-                T dy = T(tag_(1)) - anchor_transformed[1];
-                T dz = T(tag_(2)) - anchor_transformed[2];
-                T predicted_distance = ceres::sqrt(dx * dx + dy * dy + dz * dz);
-
-                // Residual as (measured - predicted)
-                residual[0] = T(measured_distance_) - predicted_distance;
-                return true;
+            const auto& q = msg->quaternion;
+            // Convert the quaternion to roll, pitch, yaw
+            tf2::Quaternion tf_q(q.x, q.y, q.z, q.w);
+            tf2::Matrix3x3 m(tf_q);
+            double yaw;
+            m.getRPY(roll_uav_, pitch_uav_, yaw);
         }
 
-      static ceres::CostFunction* Create(const Eigen::Vector3d& anchor, const Eigen::Vector3d& tag, double measured_distance, double roll, double pitch) {
-            return (new ceres::AutoDiffCostFunction<UWBResidual, 1, 1, 3>(
-                new UWBResidual(anchor, tag, measured_distance, roll, pitch)));
+    
+    // Normalize an angle to the range [-pi, pi]
+    double normalize_angle(double angle) {
+        while (angle > M_PI) angle -= 2.0 * M_PI;
+        while (angle < -M_PI) angle += 2.0 * M_PI;
+        return angle;
         }
 
-        const Eigen::Vector3d anchor_;
-        const Eigen::Vector3d tag_;
-        const double measured_distance_;
-        const double roll_;
-        const double pitch_;
-  };
+
+    // Computes the weighted moving average for UAV states.
+    Eigen::Vector4d moving_average_uav(const State &new_sample) {
+
+        // Append the new sample to the UAV moving average deque.
+        moving_average_states_uav_.push_back(new_sample);
+
+        // Remove UAV samples that are too old.
+        while (!moving_average_states_uav_.empty() &&
+                (new_sample.timestamp - moving_average_states_uav_.front().timestamp) >
+                    rclcpp::Duration::from_seconds(global_opt_window_s_)) {
+            moving_average_states_uav_.pop_front();
+        }
+
+        // Initialize accumulators.
+        Eigen::Vector4d smoothed_state = Eigen::Vector4d::Zero();
+        double sum_sin = 0.0;
+        double sum_cos = 0.0;
+        double total_weight = 0.0;
+        double decay_factor = 0.9;  // Adjust as needed.
+        double weight = 1.0;        // Start with a weight of 1.0 for the most recent sample.
+
+        // Iterate over UAV samples from newest to oldest.
+        for (auto it = moving_average_states_uav_.rbegin();
+            it != moving_average_states_uav_.rend(); ++it) {
+            smoothed_state[0] += weight * it->state[0];
+            smoothed_state[1] += weight * it->state[1];
+            smoothed_state[2] += weight * it->state[2];
+            sum_sin += weight * std::sin(it->state[3]);
+            sum_cos += weight * std::cos(it->state[3]);
+            total_weight += weight;
+            weight *= decay_factor;
+        }
+
+        if (total_weight > 0.0) {
+            smoothed_state[0] /= total_weight;
+            smoothed_state[1] /= total_weight;
+            smoothed_state[2] /= total_weight;
+            smoothed_state[3] = std::atan2(sum_sin / total_weight, sum_cos / total_weight);
+            smoothed_state[3] = normalize_angle(smoothed_state[3]);
+        }
+
+    return smoothed_state;
+    
+    }
+
+    // Computes the weighted moving average for AGV states.
+    Eigen::Vector4d moving_average_agv(const State &new_sample) {
+
+        // Append the new sample to the AGV moving average deque.
+        moving_average_states_agv_.push_back(new_sample);
+
+        // Remove AGV samples that are too old.
+        while (!moving_average_states_agv_.empty() &&
+                (new_sample.timestamp - moving_average_states_agv_.front().timestamp) >
+                    rclcpp::Duration::from_seconds(global_opt_window_s_)) {
+            moving_average_states_agv_.pop_front();
+        }
+
+        // Initialize accumulators.
+        Eigen::Vector4d smoothed_state = Eigen::Vector4d::Zero();
+        double sum_sin = 0.0;
+        double sum_cos = 0.0;
+        double total_weight = 0.0;
+        double decay_factor = 0.9;  // Adjust as needed.
+        double weight = 1.0;        // Start with a weight of 1.0 for the most recent sample.
+
+        // Iterate over AGV samples from newest to oldest.
+        for (auto it = moving_average_states_agv_.rbegin();
+            it != moving_average_states_agv_.rend(); ++it) {
+            smoothed_state[0] += weight * it->state[0];
+            smoothed_state[1] += weight * it->state[1];
+            smoothed_state[2] += weight * it->state[2];
+            sum_sin += weight * std::sin(it->state[3]);
+            sum_cos += weight * std::cos(it->state[3]);
+            total_weight += weight;
+            weight *= decay_factor;
+        }
+
+        if (total_weight > 0.0) {
+            smoothed_state[0] /= total_weight;
+            smoothed_state[1] /= total_weight;
+            smoothed_state[2] /= total_weight;
+            smoothed_state[3] = std::atan2(sum_sin / total_weight, sum_cos / total_weight);
+            smoothed_state[3] = normalize_angle(smoothed_state[3]);
+        }
+
+  return smoothed_state;
+}
 
 
-  struct ICPResidual {
-    ICPResidual(const Eigen::Matrix3d& icp_rotation, const Eigen::Vector3d& icp_translation)
-        : icp_rotation_(icp_rotation), icp_translation_(icp_translation) {}
+    void publish_covariance_with_timestamp(const Eigen::Matrix4d& covariance, const rclcpp::Time& timestamp) {
 
-    template <typename T>
-    bool operator()(const T* const yaw, const T* const t, T* residual) const {
-        // Build rotation matrix using roll, pitch, and optimized yaw
-        Eigen::Matrix<T, 3, 3> R;
-        R = Eigen::AngleAxis<T>(yaw[0], Eigen::Matrix<T, 3, 1>::UnitZ()) *
-            Eigen::AngleAxis<T>(T(0.0), Eigen::Matrix<T, 3, 1>::UnitY()) *  // Assume pitch is fixed
-            Eigen::AngleAxis<T>(T(0.0), Eigen::Matrix<T, 3, 1>::UnitX());  // Assume roll is fixed
+        auto msg = eliko_messages::msg::CovarianceMatrixWithHeader();
+        msg.header.stamp = timestamp;
+        msg.header.frame_id = "accumulated_covariance";  // Adjust as necessary
+        msg.matrix.layout.dim.resize(2);
+        msg.matrix.layout.dim[0].label = "rows";
+        msg.matrix.layout.dim[0].size = 4;
+        msg.matrix.layout.dim[0].stride = 4 * 4;
+        msg.matrix.layout.dim[1].label = "cols";
+        msg.matrix.layout.dim[1].size = 4;
+        msg.matrix.layout.dim[1].stride = 4;
+        msg.matrix.data.resize(4 * 4);
+
+        // Flatten the matrix
+        for (size_t i = 0; i < 4; ++i) {
+            for (size_t j = 0; j < 4; ++j) {
+                msg.matrix.data[i * 4 + j] = covariance(i, j);
+            }
+        }
+
+        covariance_publisher_->publish(msg);
+}
+
+    void publish_transform(const Eigen::Matrix4d& T, const rclcpp::Time &current_time,
+                           const std::string &frame_id, const std::string &child_frame_id) {
+
+
+        geometry_msgs::msg::TransformStamped T_msg;
+        T_msg.header.stamp = current_time;
+        T_msg.header.frame_id = frame_id;  // Adjust frame_id as needed
+        T_msg.child_frame_id = child_frame_id;            // Adjust child_frame_id as needed
 
         // Extract translation
-        Eigen::Matrix<T, 3, 1> translation(t[0], t[1], t[2]);
+        T_msg.transform.translation.x = T(0, 3);
+        T_msg.transform.translation.y = T(1, 3);
+        T_msg.transform.translation.z = T(2, 3);
 
-        // Compute residual for rotation
-        Eigen::Matrix<T, 3, 3> rotation_residual = R.transpose() * icp_rotation_.cast<T>() - Eigen::Matrix<T, 3, 3>::Identity();
-        residual[0] = rotation_residual.norm();  // Frobenius norm of rotation residual
+        // Convert Eigen rotation matrix of inverse transform to tf2 Matrix3x3
+        Eigen::Matrix3d rotation_matrix_T = T.block<3, 3>(0, 0);
 
-        // Compute residual for translation
-        Eigen::Matrix<T, 3, 1> translation_residual = translation - icp_translation_.cast<T>();
-        residual[1] = translation_residual.norm();  // L2 norm of translation residual
+        Eigen::Quaterniond q(rotation_matrix_T);
+
+        T_msg.transform.rotation.x = q.x();
+        T_msg.transform.rotation.y = q.y();
+        T_msg.transform.rotation.z = q.z();
+        T_msg.transform.rotation.w = q.w();
+
+
+        // Broadcast the inverse transform
+        tf_broadcaster_->sendTransform(T_msg);
+    }
+
+
+  // Build transformation matrix from roll, pitch, optimized yaw, and translation vector
+    Eigen::Matrix4d build_transformation_matrix(double roll, double pitch, const Eigen::Vector4d& s) {
+        Eigen::Matrix3d R;
+        R = Eigen::AngleAxisd(s[3], Eigen::Vector3d::UnitZ()) *
+            Eigen::AngleAxisd(pitch, Eigen::Vector3d::UnitY()) *
+            Eigen::AngleAxisd(roll, Eigen::Vector3d::UnitX());
+
+        R = Eigen::Quaterniond(R).normalized().toRotationMatrix();
+        
+        Eigen::Matrix4d T = Eigen::Matrix4d::Identity();
+        T.block<3, 3>(0, 0) = R;
+        T(0, 3) = s[0];
+        T(1, 3) = s[1];
+        T(2, 3) = s[2];
+
+        return T;
+    }
+
+    // ---------------- Pose Graph Optimization -------------------
+    //
+    // In this function we build a Ceres problem that fuses:
+    // - A prior on the first node of each robot.
+    // - Inter-robot UWB factor linking nodes based on relative transform estimation input
+    // - Intra-robot ICP factors linking consecutive nodes.
+    // - Inter-robot ICP factors linking nodes from the two robots.
+    
+    bool run_posegraph_optimization() {
+
+        ceres::Problem problem;
+
+        // For convenience, alias the vectors.
+        std::vector<State>& agv = pose_graph_.agv_states;
+        std::vector<State>& uav = pose_graph_.uav_states;
+        
+        // Add prior factors on the first nodes (anchor the graph)
+        {
+            ceres::CostFunction* prior_cost_agv = PriorResidual::Create(agv.front().state, agv.front().covariance);
+            problem.AddResidualBlock(prior_cost_agv, nullptr, agv.front().state.data());
+            ceres::CostFunction* prior_cost_uav = PriorResidual::Create(uav.front().state, uav.front().covariance);
+            problem.AddResidualBlock(prior_cost_uav, nullptr, uav.front().state.data());
+        }
+
+        // Add residual based on UWB relative transform
+
+        if (latest_relative_available_) {
+            // Ensure both trajectories have the same number of nodes.
+            size_t num_nodes = std::min(pose_graph_.agv_states.size(), pose_graph_.uav_states.size());
+            for (size_t i = 0; i < num_nodes; ++i) {
+                State& agv_node = pose_graph_.agv_states[i];
+                State& uav_node = pose_graph_.uav_states[i];
+                ceres::CostFunction* rel_cost = RelativeTransformResidual::Create(latest_relative_transform_, uav_node.roll, uav_node.pitch);
+                problem.AddResidualBlock(rel_cost, nullptr, agv_node.state.data(), uav_node.state.data());
+            }
+        }
+
+        // Add inter-robot ICP factors.
+
+
+        // Add intra-robot ICP factors for AGV.
+        if (agv.size() >= 2 /* && agv_icp_available */) {
+            for (size_t i = 0; i + 1 < agv.size(); ++i) {
+
+                if (pose_graph_.agv_states[i].scan->points.empty() ||
+                    pose_graph_.agv_states[i+1].scan->points.empty()) {
+                    RCLCPP_WARN(this->get_logger(), "One of the AGV scans is empty. Skipping ICP for this pair.");
+                    continue;
+                }
+
+                Eigen::Matrix4f T_icp_agv = run_icp(pose_graph_.agv_states[i].scan, pose_graph_.agv_states[i+1].scan);
+                ceres::CostFunction* icp_cost = IntraRobotICPResidual::Create(T_icp_agv.cast<double>(), 0.0, 0.0, 0.0, 0.0);
+                problem.AddResidualBlock(icp_cost, nullptr,
+                                        agv[i].state.data(), agv[i+1].state.data());
+            }
+        }
+        
+        // Add intra-robot ICP factors for UAV.
+        if (uav.size() >= 2 /* && uav_icp_available */) {
+            for (size_t i = 0; i + 1 < uav.size(); ++i) {
+
+                if (pose_graph_.uav_states[i].scan->points.empty() ||
+                    pose_graph_.uav_states[i+1].scan->points.empty()) {
+                    RCLCPP_WARN(this->get_logger(), "One of the UAV scans is empty. Skipping ICP for this pair.");
+                    continue;
+                }
+
+                Eigen::Matrix4f T_icp_uav = run_icp(pose_graph_.uav_states[i].scan, pose_graph_.uav_states[i+1].scan);
+                double roll = pose_graph_.uav_states[i+1].roll;
+                double roll_prev = pose_graph_.uav_states[i].roll;
+                double pitch = pose_graph_.uav_states[i+1].pitch;
+                double pitch_prev = pose_graph_.uav_states[i+1].pitch;
+                ceres::CostFunction* icp_cost = IntraRobotICPResidual::Create(T_icp_uav.cast<double>(), roll, roll_prev, pitch, pitch_prev);
+
+                problem.AddResidualBlock(icp_cost, nullptr,
+                                        uav[i].state.data(), uav[i+1].state.data());
+            }
+        }
+
+        // Configure solver options
+        ceres::Solver::Options options;
+        options.linear_solver_type = ceres::DENSE_QR; // ceres::SPARSE_NORMAL_CHOLESKY,  ceres::DENSE_QR
+
+        // Logging
+        //options.minimizer_progress_to_stdout = true;
+
+        // Solve
+        ceres::Solver::Summary summary;
+        ceres::Solve(options, &problem, &summary);
+        RCLCPP_INFO(this->get_logger(), summary.BriefReport().c_str());
+
+        // Notify and update values if optimization converged
+        if (summary.termination_type == ceres::CONVERGENCE){
+
+            // --- Compute Covariances for the Last Nodes ---
+            // Here we compute the covariance for the last AGV and UAV states.
+            ceres::Covariance::Options cov_options;
+            ceres::Covariance covariance(cov_options);
+            std::vector<std::pair<const double*, const double*>> covariance_blocks;
+
+            // Get references to the last node for each trajectory.
+            State& last_agv = agv.back();
+            State& last_uav = uav.back();
+
+            covariance_blocks.emplace_back(last_agv.state.data(), last_agv.state.data());
+            covariance_blocks.emplace_back(last_uav.state.data(), last_uav.state.data());
+
+            Eigen::Matrix4d cov_agv = Eigen::Matrix4d::Zero();
+            Eigen::Matrix4d cov_uav = Eigen::Matrix4d::Zero();
+
+            if (covariance.Compute(covariance_blocks, &problem)) {
+                
+                // Extract the covariance blocks for the last nodes.
+                
+                covariance.GetCovarianceBlock(last_agv.state.data(), last_agv.state.data(), cov_agv.data());
+                covariance.GetCovarianceBlock(last_uav.state.data(), last_uav.state.data(), cov_uav.data());
+                
+                last_agv.covariance = cov_agv;
+                last_uav.covariance = cov_uav;
+
+                } else {
+                
+                RCLCPP_WARN(this->get_logger(), "Failed to compute covariance in pose graph optimization.");
+                
+                return false;
+                }
+
+            return true;
+
+            } else {
+
+                RCLCPP_WARN(this->get_logger(), "Failed to compute covariance.");
+                
+                return false;
+            }
+                                    
+        return false; 
+            
+    }
+
+ 
+    // ---------- Residual to enforce relative transform constraint ----------
+    //
+    // This residual forces the relative transform computed from the current AGV and UAV
+    // nodes to be consistent with the optimized transform coming from the fast relative node.
+    //
+
+    struct RelativeTransformResidual {
+    RelativeTransformResidual(const Eigen::Matrix4d& T_opt, double roll_uav, double pitch_uav)
+        : T_opt_(T_opt), roll_uav_(roll_uav), pitch_uav_(pitch_uav) {}
+
+    template <typename T>
+    bool operator()(const T* const agv_state, const T* const uav_state, T* residual) const {
+        // Build homogeneous transforms from the state vectors.
+        Eigen::Matrix<T, 4, 4> T_agv = buildTransformationMatrix(agv_state, 0.0, 0.0);
+        Eigen::Matrix<T, 4, 4> T_uav = buildTransformationMatrix(uav_state, roll_uav_, pitch_uav_);
+        // Compute the relative transform from AGV to UAV:
+        Eigen::Matrix<T, 4, 4> T_rel = T_uav * T_agv.inverse();
+        // We want T_rel == T_opt_. For simplicity, we enforce that:
+        // - The translation components are equal.
+        // - The yaw difference is zero.
+        T dx = T(T_opt_(0, 3)) - T_rel(0, 3);
+        T dy = T(T_opt_(1, 3)) - T_rel(1, 3);
+        T dz = T(T_opt_(2, 3)) - T_rel(2, 3);
+        // Extract yaw from T_rel and T_opt (assuming zero roll/pitch).
+        T yaw_rel = ceres::atan2(T_rel(1, 0), T_rel(0, 0));
+        T yaw_opt = ceres::atan2(T(T_opt_(1, 0)), T(T_opt_(0, 0)));
+        T dyaw = normalize_angle(yaw_opt - yaw_rel);
+        
+        residual[0] = dx;
+        residual[1] = dy;
+        residual[2] = dz;
+        residual[3] = dyaw;
 
         return true;
     }
 
-    static ceres::CostFunction* Create(const Eigen::Matrix3d& icp_rotation, const Eigen::Vector3d& icp_translation) {
-        return (new ceres::AutoDiffCostFunction<ICPResidual, 2, 1, 3>(
-            new ICPResidual(icp_rotation, icp_translation)));
+    static ceres::CostFunction* Create(const Eigen::Matrix4d& T_opt, double roll_uav, double pitch_uav) {
+        return new ceres::AutoDiffCostFunction<RelativeTransformResidual, 4, 4, 4>(
+            new RelativeTransformResidual(T_opt, roll_uav, pitch_uav));
+    }
+
+    private:
+        // Helper: build a 4x4 homogeneous transformation from a state vector [x,y,z,yaw].
+        template <typename T>
+        static Eigen::Matrix<T, 4, 4> buildTransformationMatrix(const T* state, double roll, double pitch) {
+            T x = state[0], y = state[1], z = state[2], yaw = state[3];
+            
+            Eigen::Matrix<T, 3, 3> R;
+            R = Eigen::AngleAxis<T>(yaw, Eigen::Matrix<T, 3, 1>::UnitZ()) *
+                Eigen::AngleAxis<T>(T(pitch), Eigen::Matrix<T, 3, 1>::UnitY()) *
+                Eigen::AngleAxis<T>(T(roll), Eigen::Matrix<T, 3, 1>::UnitX());
+
+            Eigen::Matrix<T, 4, 4> Tmat = Eigen::Matrix<T, 4, 4>::Identity();
+            Tmat.template block<3, 3>(0, 0) = R;
+            Tmat(0, 3) = x; Tmat(1, 3) = y; Tmat(2, 3) = z;
+
+            return Tmat;
+        }
+
+        template <typename T>
+        T normalize_angle(const T& angle) const {
+            T normalized_angle = angle;
+            while (normalized_angle > T(M_PI)) normalized_angle -= T(2.0 * M_PI);
+            while (normalized_angle < T(-M_PI)) normalized_angle += T(2.0 * M_PI);
+            return normalized_angle;
+        }
+
+    const Eigen::Matrix4d T_opt_;
+    const double roll_uav_;
+    const double pitch_uav_;
+
+};
+
+
+  struct PriorResidual {
+    PriorResidual(const Eigen::Vector4d& prior_state, const Eigen::Matrix4d& state_covariance)
+        : prior_state_(prior_state), state_covariance_(state_covariance) {}
+
+    template <typename T>
+    bool operator()(const T* const state, T* residual) const {
+        // Combine translation and yaw into a single residual vector
+        Eigen::Matrix<T, 4, 1> delta_state;
+        delta_state << state[0] - T(prior_state_(0)),
+                       state[1] - T(prior_state_(1)),
+                       state[2] - T(prior_state_(2)),
+                       normalize_angle(state[3] - T(prior_state_(3)));
+
+        
+        // Scale by the square root of the inverse covariance matrix
+        Eigen::LLT<Eigen::Matrix4d> chol(state_covariance_);
+        Eigen::Matrix4d sqrt_inv_covariance = Eigen::Matrix4d(chol.matrixL().transpose()).inverse();
+        //Eigen::Matrix4d sqrt_covariance = Eigen::Matrix4d(chol.matrixL());
+
+        Eigen::Matrix<T, 4, 1> weighted_residual = sqrt_inv_covariance.cast<T>() * delta_state;
+
+        // Assign to residual
+        residual[0] = weighted_residual[0];
+        residual[1] = weighted_residual[1];
+        residual[2] = weighted_residual[2];
+        residual[3] = weighted_residual[3];
+
+        std::cout << "Prior residual: ["
+          << residual[0] << ", " << residual[1] << ", " 
+          << residual[2] << ", " << residual[3] << "]" 
+          << std::endl;
+
+        return true;
+    }
+
+    static ceres::CostFunction* Create(const Eigen::Vector4d& prior_state, const Eigen::Matrix4d& state_covariance) {
+        return new ceres::AutoDiffCostFunction<PriorResidual, 4, 4>(
+            new PriorResidual(prior_state, state_covariance));
+    }
+
+private:
+    template <typename T>
+    T normalize_angle(const T& angle) const {
+        T normalized_angle = angle;
+        while (normalized_angle > T(M_PI)) normalized_angle -= T(2.0 * M_PI);
+        while (normalized_angle < T(-M_PI)) normalized_angle += T(2.0 * M_PI);
+        return normalized_angle;
+    }
+
+    const Eigen::Vector4d prior_state_;
+    const Eigen::Matrix4d state_covariance_;
+};
+
+
+
+  struct ICPResidual {
+        ICPResidual(const Eigen::Matrix3d& icp_rotation, const Eigen::Vector3d& icp_translation)
+            : icp_rotation_(icp_rotation), icp_translation_(icp_translation) {}
+
+        template <typename T>
+        bool operator()(const T* const yaw, const T* const t, T* residual) const {
+            
+            Eigen::Matrix<T, 3, 3> R;
+            R = Eigen::AngleAxis<T>(yaw[0], Eigen::Matrix<T, 3, 1>::UnitZ()) *
+            Eigen::AngleAxis<T>(T(0.0), Eigen::Matrix<T, 3, 1>::UnitY()) *  // Assume pitch is fixed
+            Eigen::AngleAxis<T>(T(0.0), Eigen::Matrix<T, 3, 1>::UnitX());  // Assume roll is fixed
+
+            // Extract estimated yaw directly from R.
+            T estimated_yaw = ceres::atan2(R(1,0), R(0,0));
+            // Extract yaw from icp_rotation_ (assuming the same convention).
+            T icp_yaw = ceres::atan2(T(icp_rotation_(1,0)), T(icp_rotation_(0,0)));
+            // Rotation residual: difference in yaw (normalized)
+            T yaw_residual = normalize_angle(estimated_yaw - icp_yaw);
+            residual[0] = yaw_residual;
+
+            // Translation residual: component-wise difference.
+            residual[1] = t[0] - T(icp_translation_(0));
+            residual[2] = t[1] - T(icp_translation_(1));
+            residual[3] = t[2] - T(icp_translation_(2));
+
+            return true;
+        }
+
+        static ceres::CostFunction* Create(const Eigen::Matrix3d& icp_rotation, const Eigen::Vector3d& icp_translation) {
+            return (new ceres::AutoDiffCostFunction<ICPResidual, 4, 1, 3>(
+                new ICPResidual(icp_rotation, icp_translation)));
+        }
+
+    private:
+
+        template <typename T>
+        T normalize_angle(const T& angle) const {
+            T normalized_angle = angle;
+            while (normalized_angle > T(M_PI)) normalized_angle -= T(2.0 * M_PI);
+            while (normalized_angle < T(-M_PI)) normalized_angle += T(2.0 * M_PI);
+            return normalized_angle;
+        }
+
+        const Eigen::Matrix3d icp_rotation_;
+        const Eigen::Vector3d icp_translation_;
+    };
+
+
+
+    // Residual to enforce that the relative transform between consecutive nodes 
+    // (computed from the states) is close to the measured relative transform from scan matching.
+    struct IntraRobotICPResidual {
+    IntraRobotICPResidual(const Eigen::Matrix4d& T_icp, double roll, double roll_prev, double pitch, double pitch_prev)
+        : T_icp_(T_icp), roll_(roll), roll_prev_(roll_prev), pitch_(pitch), pitch_prev_(pitch_prev) {}
+
+    template <typename T>
+    bool operator()(const T* const state_source, const T* const state_target, T* residual) const {
+        // Build homogeneous transforms from state_i and state_j.
+        // Here we assume states are 4-vectors: [x,y,z,yaw]. (Roll and pitch are fixed.)
+        Eigen::Matrix<T, 4, 4> w_T_s = buildTransformationMatrix(state_source, roll_prev_, pitch_prev_);
+        Eigen::Matrix<T, 4, 4> w_T_t = buildTransformationMatrix(state_target, roll_, pitch_);
+        // Compute the predicted relative transform from node i to node j.
+        Eigen::Matrix<T, 4, 4> t_T_s = w_T_t.inverse() * w_T_s;
+        // We compare t_T_s to the ICP measurement T_icp_.
+        // For simplicity we compare the translation and yaw only.
+        T dx = T(T_icp_(0,3)) - t_T_s(0,3);
+        T dy = T(T_icp_(1,3)) - t_T_s(1,3);
+        T dz = T(T_icp_(2,3)) - t_T_s(2,3);
+        // Extract yaw from t_T_s (assuming no roll/pitch)
+        T yaw_rel = ceres::atan2(t_T_s(1,0), t_T_s(0,0));
+        T yaw_icp = ceres::atan2(T(T_icp_(1,0)), T(T_icp_(0,0)));
+        T dyaw = normalize_angle(yaw_icp - yaw_rel);
+        
+        residual[0] = dx;
+        residual[1] = dy;
+        residual[2] = dz;
+        residual[3] = dyaw;
+
+        return true;
+    }
+
+    static ceres::CostFunction* Create(const Eigen::Matrix4d& T_icp, 
+                                        double roll, double roll_prev,
+                                        double pitch, double pitch_prev) {
+        return new ceres::AutoDiffCostFunction<IntraRobotICPResidual, 4, 4, 4>(
+            new IntraRobotICPResidual(T_icp, roll, roll_prev, pitch, pitch_prev));
     }
 
     private:
 
-        const Eigen::Matrix3d icp_rotation_;
-        const Eigen::Vector3d icp_translation_;
+        // Helper: build a 4x4 homogeneous transformation from a state vector [x,y,z,yaw].
+        template <typename T>
+        static Eigen::Matrix<T, 4, 4> buildTransformationMatrix(const T* state, double roll, double pitch) {
+            T x = state[0], y = state[1], z = state[2], yaw = state[3];
+            
+            Eigen::Matrix<T, 3, 3> R;
+            R = Eigen::AngleAxis<T>(yaw, Eigen::Matrix<T, 3, 1>::UnitZ()) *
+                Eigen::AngleAxis<T>(T(pitch), Eigen::Matrix<T, 3, 1>::UnitY()) *
+                Eigen::AngleAxis<T>(T(roll), Eigen::Matrix<T, 3, 1>::UnitX());
+
+            Eigen::Matrix<T, 4, 4> Tmat = Eigen::Matrix<T, 4, 4>::Identity();
+            Tmat.template block<3, 3>(0, 0) = R;
+            Tmat(0, 3) = x; Tmat(1, 3) = y; Tmat(2, 3) = z;
+
+            return Tmat;
+        }
+
+        template <typename T>
+        T normalize_angle(const T& angle) const {
+            T normalized_angle = angle;
+            while (normalized_angle > T(M_PI)) normalized_angle -= T(2.0 * M_PI);
+            while (normalized_angle < T(-M_PI)) normalized_angle += T(2.0 * M_PI);
+            return normalized_angle;
+        }
+        
+        const Eigen::Matrix4d T_icp_;
+        const double roll_, roll_prev_;
+        const double pitch_, pitch_prev_;
 
     };
 
     
+    // Subscriptions
     rclcpp::Subscription<eliko_messages::msg::DistancesList>::SharedPtr eliko_distances_sub_;
     rclcpp::Subscription<geometry_msgs::msg::QuaternionStamped>::SharedPtr dji_attitude_sub_;
+    rclcpp::Subscription<nav_msgs::msg::Odometry>::SharedPtr uav_odom_sub_, agv_odom_sub_;
     rclcpp::Subscription<sensor_msgs::msg::PointCloud2>::SharedPtr pcl_source_sub_, pcl_target_sub_;
-    rclcpp::Publisher<geometry_msgs::msg::TransformStamped>::SharedPtr tf_publisher_;
+    rclcpp::Subscription<geometry_msgs::msg::TransformStamped>::SharedPtr optimized_tf_sub_;
+
+    // Timers
+    rclcpp::TimerBase::SharedPtr global_optimization_timer_, window_opt_timer_;
+
+
+    // Transform buffers and listeners for each odometry source.
+    std::shared_ptr<tf2_ros::Buffer> tf_buffer_agv_;
+    std::shared_ptr<tf2_ros::TransformListener> tf_listener_agv_;
+    std::shared_ptr<tf2_ros::Buffer> tf_buffer_uav_;
+    std::shared_ptr<tf2_ros::TransformListener> tf_listener_uav_;
+
+
+    //Measurements
+    pcl::PointCloud<pcl::PointXYZ>::Ptr uav_cloud_{new pcl::PointCloud<pcl::PointXYZ>};
+    pcl::PointCloud<pcl::PointXYZ>::Ptr agv_cloud_{new pcl::PointCloud<pcl::PointXYZ>};
+    bool icp_available_;
+    Eigen::Matrix4d latest_relative_transform_;
+    bool latest_relative_available_;
+
+    // For pose graph (multi-robot) optimization:
+    PoseGraph pose_graph_;
+    State init_state_;
+    
+    // Publishers/Broadcasters
     std::shared_ptr<tf2_ros::TransformBroadcaster> tf_broadcaster_;
-
-    rclcpp::TimerBase::SharedPtr optimization_timer_;
-
-    eliko_messages::msg::DistancesList distances_t1_, distances_t2_;
-    std::unordered_map<MeasurementKey, float, PairHash> current_measurements_;
-
-
-    pcl::PointCloud<pcl::PointXYZ>::Ptr source_cloud_{new pcl::PointCloud<pcl::PointXYZ>};
-    pcl::PointCloud<pcl::PointXYZ>::Ptr target_cloud_{new pcl::PointCloud<pcl::PointXYZ>};
-    Eigen::Matrix4f icp_tf_;
-
-    std::unordered_map<std::string, Eigen::Vector3d> anchor_positions_;
-    std::unordered_map<std::string, Eigen::Vector3d> tag_positions_;
+    rclcpp::Publisher<eliko_messages::msg::CovarianceMatrixWithHeader>::SharedPtr covariance_publisher_;
 
     std::string eliko_frame_id_, uav_frame_id_;
+    std::string odom_tf_agv_s_, odom_tf_agv_t_;
+    std::string odom_tf_uav_s_, odom_tf_uav_t_;
 
-    // Known roll and pitch, and yaw to be optimized
-    double roll_, pitch_;
-    double yaw_;
-    Eigen::Vector3d t_;  // Translation vector (x, y, z)
+    std::deque<State> moving_average_states_uav_, moving_average_states_agv_;
 
-    std::deque<State> sample_history_;
+    double global_opt_window_s_, global_opt_rate_s_;
+    double measurement_stdev_, measurement_covariance_;
+    double moving_average_window_s_;
+    double moving_average_;
+    double roll_uav_, pitch_uav_;
 
-    size_t moving_average_window_size_;
-    size_t min_measurements_;
-    double optimizer_time_window_s_;
+    Eigen::Vector4d uav_odom_pos_;         // Current UAV odometry position 
+    Eigen::Vector4d agv_odom_pos_;        // Current AGV odometry position
+    Eigen::Matrix4d uav_odom_covariance_;  // UAV odometry covariance
+    Eigen::Matrix4d agv_odom_covariance_;  // AGV odometry covariance
 
 };
-
 int main(int argc, char** argv) {
     rclcpp::init(argc, argv);
     auto node = std::make_shared<FusionOptimizationNode>();

@@ -2,6 +2,8 @@
 #include <std_msgs/msg/float32.hpp>
 #include <geometry_msgs/msg/transform_stamped.hpp>
 #include <tf2_ros/transform_broadcaster.h>
+#include <tf2_ros/buffer.h>
+#include <tf2_ros/transform_listener.h>
 
 #include <tf2/LinearMath/Quaternion.h>
 #include <tf2/LinearMath/Matrix3x3.h>
@@ -58,15 +60,35 @@ public:
     dji_attitude_sub_ = this->create_subscription<geometry_msgs::msg::QuaternionStamped>(
                 "/dji_sdk/attitude", 10, std::bind(&ElikoGlobalOptNode::attitude_cb_, this, std::placeholders::_1));
 
+    
+    //Option 1: get odometry through topics -> includes covariance
+    std::string odom_topic_agv = "/agv/odom"; //or "/agv/odom" "/arco/idmind_motors/odom"
+    std::string odom_topic_uav = "/uav/odom"; //or "/uav/odom"
+
     uav_odom_sub_ = this->create_subscription<nav_msgs::msg::Odometry>(
-    "/uav/odom", 10, std::bind(&ElikoGlobalOptNode::uav_odom_cb_, this, std::placeholders::_1));
+    odom_topic_uav, 10, std::bind(&ElikoGlobalOptNode::uav_odom_cb_, this, std::placeholders::_1));
 
     agv_odom_sub_ = this->create_subscription<nav_msgs::msg::Odometry>(
-    "/agv/odom", 10, std::bind(&ElikoGlobalOptNode::agv_odom_cb_, this, std::placeholders::_1));
+    odom_topic_agv, 10, std::bind(&ElikoGlobalOptNode::agv_odom_cb_, this, std::placeholders::_1));
+    
+    //Option 2: get odometry through tf readings -> only transform
+    odom_tf_agv_s_ = "agv_odom"; //source
+    odom_tf_agv_t_ = "world"; //target
+    odom_tf_uav_s_ = "uav_odom"; //source
+    odom_tf_uav_t_ = "world"; //target
 
+    // Set up transform listener for UAV odometry.
+    tf_buffer_uav_ = std::make_shared<tf2_ros::Buffer>(this->get_clock());
+    tf_listener_uav_ = std::make_shared<tf2_ros::TransformListener>(*tf_buffer_uav_);
+
+    // Set up transform listener for AGV odometry.
+    tf_buffer_agv_ = std::make_shared<tf2_ros::Buffer>(this->get_clock());
+    tf_listener_agv_ = std::make_shared<tf2_ros::TransformListener>(*tf_buffer_agv_);
+    
     // Create publisher/broadcaster for optimized transformation
     tf_publisher_ = this->create_publisher<geometry_msgs::msg::TransformStamped>("eliko_optimization_node/optimized_T", 10);
     tf_broadcaster_ = std::make_shared<tf2_ros::TransformBroadcaster>(this);
+
 
     covariance_publisher_ = this->create_publisher<eliko_messages::msg::CovarianceMatrixWithHeader>("eliko_optimization_node/covariance", 10);
 
@@ -95,7 +117,6 @@ public:
     eliko_frame_id_ = "agv_odom"; //frame of the eliko system-> arco/eliko, for simulation use "agv_gt" for ground truth, "agv_odom" for odometry w/ errors
     uav_frame_id_ = "uav_opt"; //frame of the uav -> "base_link", for simulation use "uav_opt"
 
-   
     //Initial values for state
     init_state_.state = Eigen::Vector4d(0.0, 0.0, 0.0, 0.0);
     init_state_.covariance = Eigen::Matrix4d::Identity(); //
@@ -228,6 +249,21 @@ private:
 
         /*Check enough translation in the window*/
 
+        //Read the transform (if odom topics not available)
+        try {
+            auto transform_agv = tf_buffer_agv_->lookupTransform(odom_tf_agv_t_, odom_tf_agv_s_, rclcpp::Time(0));
+            agv_odom_pos_ = transformMsgToState(transform_agv);
+            } catch (const tf2::TransformException &ex) {
+            RCLCPP_WARN(this->get_logger(), "Could not get transform for AGV: %s", ex.what());
+            }
+
+        try {
+            auto transform_uav = tf_buffer_uav_->lookupTransform(odom_tf_uav_t_, odom_tf_uav_s_, rclcpp::Time(0));
+            uav_odom_pos_ = transformMsgToState(transform_uav);
+            } catch (const tf2::TransformException &ex) {
+            RCLCPP_WARN(this->get_logger(), "Could not get transform for UAV: %s", ex.what());
+            }
+
         // Compute UAV translational distance using only [x, y, z]
         double uav_distance = (uav_odom_pos_.head<3>() - uav_last_odom_pos_.head<3>()).norm();
         // Compute UAV yaw difference and normalize it to [-pi, pi]
@@ -279,11 +315,11 @@ private:
 
     }
 
-    void window_opt_cb_() {
+    // void window_opt_cb_() {
         
-        init_state_ = opt_state_; 
+    //     init_state_ = opt_state_; 
 
-    }
+    // }
 
 
 
@@ -455,6 +491,30 @@ private:
         T(2, 3) = s[2];
 
         return T;
+    }
+
+    // Converts a TransformStamped message to an Eigen::Matrix4d.
+    Eigen::Vector4d transformMsgToState(const geometry_msgs::msg::TransformStamped &msg) {
+
+        double qw = msg.transform.rotation.w;
+        double qx = msg.transform.rotation.x;
+        double qy = msg.transform.rotation.y;
+        double qz = msg.transform.rotation.z;
+
+        // Compute yaw.
+        double siny_cosp = 2.0 * (qw * qz + qx * qy);
+        double cosy_cosp = 1.0 - 2.0 * (qy * qy + qz * qz);
+        double yaw = std::atan2(siny_cosp, cosy_cosp);
+
+        // Assign the position and yaw to a 4D vector.
+        Eigen::Vector4d odom_pos = Eigen::Vector4d(
+            msg.transform.translation.x,
+            msg.transform.translation.y,
+            msg.transform.translation.z,
+            yaw
+        );
+
+        return odom_pos;
     }
 
 
@@ -692,10 +752,20 @@ private:
     std::shared_ptr<tf2_ros::TransformBroadcaster> tf_broadcaster_;
     rclcpp::Publisher<eliko_messages::msg::CovarianceMatrixWithHeader>::SharedPtr covariance_publisher_;
 
+
+    // Transform buffers and listeners for each odometry source.
+    std::shared_ptr<tf2_ros::Buffer> tf_buffer_agv_;
+    std::shared_ptr<tf2_ros::TransformListener> tf_listener_agv_;
+    std::shared_ptr<tf2_ros::Buffer> tf_buffer_uav_;
+    std::shared_ptr<tf2_ros::TransformListener> tf_listener_uav_;
+
+
     std::unordered_map<std::string, Eigen::Vector3d> anchor_positions_;
     std::unordered_map<std::string, Eigen::Vector3d> tag_positions_;
 
     std::string eliko_frame_id_, uav_frame_id_;
+    std::string odom_tf_agv_s_, odom_tf_agv_t_;
+    std::string odom_tf_uav_s_, odom_tf_uav_t_;
 
     State opt_state_;
     State init_state_;
