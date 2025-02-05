@@ -288,7 +288,7 @@ class OdometrySimulator(Node):
         incremental_angle_agv = abs(w_agv) * dt
         self.traveled_distance_agv += incremental_distance_agv
         self.traveled_angle_agv += np.rad2deg(incremental_angle_agv)
-        self.agv_pose, self.agv_odom_pose = self.integrate_odometry(self.agv_pose, self.agv_odom_pose, v_agv, w_agv, dt, self.traveled_distance_agv, self.traveled_angle_uav, self.holonomic_xy)
+        self.agv_pose, self.agv_odom_pose = self.integrate_odometry(self.agv_pose, self.agv_odom_pose, v_agv, w_agv, dt, self.traveled_distance_agv, self.traveled_angle_agv, self.holonomic_xy)
 
         self.get_logger().info(f'Traveled distance AGV: {self.traveled_distance_agv:.2f}', throttle_duration_sec=1)
 

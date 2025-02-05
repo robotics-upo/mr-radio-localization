@@ -114,6 +114,8 @@ public:
     agv_odom_pos_ = Eigen::Vector4d::Zero();
     agv_last_odom_pos_ = Eigen::Vector4d::Zero();
     min_traveled_distance_ = 0.25;
+    odom_error_distance_ = 2.0;
+    odom_error_angle_ = 2.0;
     
     RCLCPP_INFO(this->get_logger(), "Eliko Optimization Node initialized.");
   }
@@ -242,10 +244,10 @@ private:
 
         // Compute odometry covariance based on distance increments from step to step 
         Eigen::Matrix4d predicted_motion_covariance = Eigen::Matrix4d::Zero();
-        predicted_motion_covariance(0,0) = std::pow(uav_distance, 2.0);
-        predicted_motion_covariance(1,1) = std::pow(uav_distance, 2.0);
-        predicted_motion_covariance(2,2) = std::pow(uav_distance, 2.0);
-        predicted_motion_covariance(3,3) = std::pow(uav_angle, 2.0);
+        predicted_motion_covariance(0,0) = std::pow((2.0 * odom_error_distance_ / 100.0) * uav_distance, 2.0);
+        predicted_motion_covariance(1,1) = std::pow((2.0 * odom_error_distance_ / 100.0) * uav_distance, 2.0);
+        predicted_motion_covariance(2,2) = std::pow((2.0 * odom_error_distance_ / 100.0) * uav_distance, 2.0);
+        predicted_motion_covariance(3,3) = std::pow(((2.0 * odom_error_angle_ / 100.0) * M_PI / 180.0) * uav_angle, 2.0);
 
         //Optimize    
         RCLCPP_INFO(this->get_logger(), "[Eliko global_opt node] Optimizing trajectory of %ld measurements", global_measurements_.size());
@@ -710,6 +712,7 @@ private:
     Eigen::Matrix4d uav_odom_covariance_;  // UAV odometry covariance
     Eigen::Matrix4d agv_odom_covariance_;  // AGV odometry covariance
     double min_traveled_distance_;
+    double odom_error_distance_, odom_error_angle_;
 
 };
 int main(int argc, char** argv) {
