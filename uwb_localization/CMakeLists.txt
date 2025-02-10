@@ -15,12 +15,26 @@ find_package(sensor_msgs REQUIRED)
 find_package(tf2_ros REQUIRED)
 
 find_package(Ceres REQUIRED)
+
+find_package(Boost REQUIRED date_time)
+find_package(Qt5OpenGL REQUIRED)
+
 find_package(PCL REQUIRED)
 find_package(pcl_ros REQUIRED)
 find_package(pcl_conversions REQUIRED)
 
 find_package(eliko_messages REQUIRED)
 find_package(tf2_geometry_msgs REQUIRED)
+
+find_package(rosidl_default_generators REQUIRED)
+
+rosidl_generate_interfaces(${PROJECT_NAME}
+  "srv/UpdatePointClouds.srv"
+  DEPENDENCIES std_msgs sensor_msgs # Add packages that above messages depend on, in this case geometry_msgs for Sphere.msg
+)
+
+# Export the dependencies so that downstream packages can find the generated files
+ament_export_dependencies(rosidl_default_runtime)
 
 # uncomment the following section in order to fill in
 # further dependencies manually.
@@ -29,6 +43,7 @@ find_package(tf2_geometry_msgs REQUIRED)
 add_executable(optimizer_node_eliko src/optimizer_node_eliko.cpp)
 add_executable(global_opt_node_eliko src/global_opt_node_eliko.cpp)
 add_executable(optimizer_node_fusion src/optimizer_node_fusion.cpp)
+add_executable(pcl_visualizer src/PCLVisualizer.cpp)
 
 include_directories(${PCL_INCLUDE_DIRS})
 include_directories(${pcl_conversions_INCLUDE_DIRS})
@@ -42,7 +57,11 @@ target_link_libraries(optimizer_node_fusion Ceres::ceres ${PCL_LIBRARIES}  ${pcl
 ament_target_dependencies(optimizer_node_eliko rclcpp std_msgs geometry_msgs tf2_ros tf2_geometry_msgs eliko_messages)
 ament_target_dependencies(global_opt_node_eliko rclcpp std_msgs geometry_msgs nav_msgs tf2_ros tf2_geometry_msgs eliko_messages)
 ament_target_dependencies(optimizer_node_fusion rclcpp std_msgs geometry_msgs nav_msgs sensor_msgs tf2_ros tf2_geometry_msgs eliko_messages pcl_ros pcl_conversions)
-
+rosidl_target_interfaces(optimizer_node_fusion
+  ${PROJECT_NAME} "rosidl_typesupport_cpp")
+ament_target_dependencies(pcl_visualizer rclcpp std_msgs sensor_msgs pcl_ros pcl_conversions)
+rosidl_target_interfaces(pcl_visualizer
+  ${PROJECT_NAME} "rosidl_typesupport_cpp")
 
 target_include_directories(optimizer_node_eliko PUBLIC
   $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
@@ -59,8 +78,13 @@ target_include_directories(optimizer_node_fusion PUBLIC
   $<INSTALL_INTERFACE:include>)
 target_compile_features(optimizer_node_fusion PUBLIC c_std_99 cxx_std_17)  # Require C99 and C++17
 
+target_include_directories(pcl_visualizer PUBLIC
+  $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+  $<INSTALL_INTERFACE:include>)
+target_compile_features(optimizer_node_fusion PUBLIC c_std_99 cxx_std_17)  # Require C99 and C++17
 
-install(TARGETS optimizer_node_eliko global_opt_node_eliko optimizer_node_fusion
+
+install(TARGETS optimizer_node_eliko global_opt_node_eliko optimizer_node_fusion pcl_visualizer
   DESTINATION lib/${PROJECT_NAME})
 
 if(BUILD_TESTING)
