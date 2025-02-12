@@ -15,6 +15,7 @@ find_package(sensor_msgs REQUIRED)
 find_package(tf2_ros REQUIRED)
 
 find_package(Ceres REQUIRED)
+find_package(Sophus REQUIRED)
 
 find_package(Boost REQUIRED date_time)
 find_package(Qt5OpenGL REQUIRED)
@@ -45,13 +46,14 @@ add_executable(global_opt_node_eliko src/global_opt_node_eliko.cpp)
 add_executable(optimizer_node_fusion src/optimizer_node_fusion.cpp)
 add_executable(pcl_visualizer src/PCLVisualizer.cpp)
 
+include_directories(${CERES_INCLUDE_DIRS})
 include_directories(${PCL_INCLUDE_DIRS})
 include_directories(${pcl_conversions_INCLUDE_DIRS})
 include_directories(${pcl_ros_INCLUDE_DIRS})
 
 target_link_libraries(optimizer_node_eliko Ceres::ceres)
-target_link_libraries(global_opt_node_eliko Ceres::ceres)
-target_link_libraries(optimizer_node_fusion Ceres::ceres ${PCL_LIBRARIES}  ${pcl_conversions_LIBRARIES} ${pcl_ros_LIBRARIES})
+target_link_libraries(global_opt_node_eliko Ceres::ceres ${CERES_LIBRARIES} Sophus::Sophus)
+target_link_libraries(optimizer_node_fusion Ceres::ceres ${PCL_LIBRARIES}  ${pcl_conversions_LIBRARIES} ${pcl_ros_LIBRARIES} Sophus::Sophus)
 
 
 ament_target_dependencies(optimizer_node_eliko rclcpp std_msgs geometry_msgs tf2_ros tf2_geometry_msgs eliko_messages)

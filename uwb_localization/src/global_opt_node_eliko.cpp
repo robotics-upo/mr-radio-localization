@@ -15,10 +15,14 @@
 #include "eliko_messages/msg/anchor_coords_list.hpp"
 #include "eliko_messages/msg/tag_coords_list.hpp"
 
-#include "eliko_messages/msg/covariance_matrix_with_header.hpp"
+#include "eliko_messages/msg/transform_stamped_with_covariance.hpp"
 
 #include <ceres/ceres.h>
 #include <ceres/rotation.h>
+#include <ceres/manifold.h>
+
+#include <sophus/se3.hpp>   // Include Sophus for SE(3) operations
+
 #include <Eigen/Core>
 #include <vector>
 #include <sstream>
@@ -46,6 +50,74 @@ struct State {
 };
 
 
+
+// Custom manifold for a state in R^3 x S^1.
+class StateManifold : public ceres::Manifold {
+    public:
+      // Ambient space dimension is 4.
+      virtual int AmbientSize() const override { return 4; }
+      // Tangent space dimension is also 4.
+      virtual int TangentSize() const override { return 4; }
+    
+      // Plus(x, delta) = [x0+delta0, x1+delta1, x2+delta2, wrap(x3+delta3)]
+      virtual bool Plus(const double* x,
+                        const double* delta,
+                        double* x_plus_delta) const override {
+        // Translation is standard addition.
+        x_plus_delta[0] = x[0] + delta[0];
+        x_plus_delta[1] = x[1] + delta[1];
+        x_plus_delta[2] = x[2] + delta[2];
+        // For yaw, perform addition with wrapping to [-pi, pi].
+        double new_yaw = x[3] + delta[3];
+        while(new_yaw > M_PI)  new_yaw -= 2.0 * M_PI;
+        while(new_yaw < -M_PI) new_yaw += 2.0 * M_PI;
+        x_plus_delta[3] = new_yaw;
+        return true;
+      }
+    
+      // The Jacobian of Plus with respect to delta at delta = 0 is the identity.
+      virtual bool PlusJacobian(const double* /*x*/, double* jacobian) const override {
+        // Fill a 4x4 identity matrix (row-major ordering).
+        for (int i = 0; i < 16; ++i) {
+          jacobian[i] = 0.0;
+        }
+        jacobian[0]  = 1.0;
+        jacobian[5]  = 1.0;
+        jacobian[10] = 1.0;
+        jacobian[15] = 1.0;
+        return true;
+      }
+    
+      // Minus(y, x) computes the tangent vector delta such that x ⊕ delta = y.
+      virtual bool Minus(const double* y,
+                         const double* x,
+                         double* y_minus_x) const override {
+        // For translation, simple subtraction.
+        y_minus_x[0] = y[0] - x[0];
+        y_minus_x[1] = y[1] - x[1];
+        y_minus_x[2] = y[2] - x[2];
+        // For yaw, compute the difference and wrap it.
+        double dtheta = y[3] - x[3];
+        while (dtheta > M_PI)  dtheta -= 2.0 * M_PI;
+        while (dtheta < -M_PI) dtheta += 2.0 * M_PI;
+        y_minus_x[3] = dtheta;
+        return true;
+      }
+    
+      // The Jacobian of Minus with respect to y at y = x is the identity.
+      virtual bool MinusJacobian(const double* /*x*/, double* jacobian) const override {
+        for (int i = 0; i < 16; ++i) {
+          jacobian[i] = 0.0;
+        }
+        jacobian[0]  = 1.0;
+        jacobian[5]  = 1.0;
+        jacobian[10] = 1.0;
+        jacobian[15] = 1.0;
+        return true;
+      }
+    };
+
+
 class ElikoGlobalOptNode : public rclcpp::Node {
 
 public:
@@ -62,7 +134,7 @@ public:
 
     
     //Option 1: get odometry through topics -> includes covariance
-    std::string odom_topic_agv = "/agv/odom"; //or "/agv/odom" "/arco/idmind_motors/odom"
+    std::string odom_topic_agv = "/arco/idmind_motors/odom"; //or "/agv/odom" "/arco/idmind_motors/odom"
     std::string odom_topic_uav = "/uav/odom"; //or "/uav/odom"
 
     // uav_odom_sub_ = this->create_subscription<nav_msgs::msg::Odometry>(
@@ -86,15 +158,12 @@ public:
     tf_listener_agv_ = std::make_shared<tf2_ros::TransformListener>(*tf_buffer_agv_);
     
     // Create publisher/broadcaster for optimized transformation
-    tf_publisher_ = this->create_publisher<geometry_msgs::msg::TransformStamped>("eliko_optimization_node/optimized_T", 10);
+    tf_publisher_ = this->create_publisher<eliko_messages::msg::TransformStampedWithCovariance>("eliko_optimization_node/optimized_T", 10);
     tf_broadcaster_ = std::make_shared<tf2_ros::TransformBroadcaster>(this);
-
-
-    covariance_publisher_ = this->create_publisher<eliko_messages::msg::CovarianceMatrixWithHeader>("eliko_optimization_node/covariance", 10);
 
     global_opt_window_s_ = 5.0; //size of the sliding window in seconds
     global_opt_rate_s_ = 0.1 * global_opt_window_s_; //rate of the optimization -> displace the window 10% of its size
-    min_measurements_ = 100.0; //(global_opt_window_s_ / 2.0) * 80.0; //min number of measurements for running optimizer
+    min_measurements_ = 100.0; //min number of measurements for running optimizer
     measurement_stdev_ = 0.1; //10 cm measurement noise
     measurement_covariance_ = measurement_stdev_ * measurement_stdev_;
 
@@ -115,7 +184,7 @@ public:
     };
 
     eliko_frame_id_ = "arco/eliko"; //frame of the eliko system-> arco/eliko, for simulation use "agv_gt" for ground truth, "agv_odom" for odometry w/ errors
-    uav_frame_id_ = "uav_opt"; //frame of the uav -> "base_link", for simulation use "uav_opt"
+    uav_frame_id_ = "base_link"; //frame of the uav -> "base_link", for simulation use "uav_opt"
 
     //Initial values for state
     init_state_.state = Eigen::Vector4d(0.0, 0.0, 0.0, 0.0);
@@ -301,9 +370,7 @@ private:
 
             Eigen::Matrix4d That_ts = build_transformation_matrix(opt_state_.roll, opt_state_.pitch, opt_state_.state);
 
-            publish_transform(That_ts, opt_state_.timestamp);
-            publish_covariance_with_timestamp(opt_state_.covariance + predicted_motion_covariance, opt_state_.timestamp);
-            //publish_covariance_with_timestamp(opt_state_.covariance, opt_state_.timestamp);
+            publish_transform(That_ts, opt_state_.covariance + predicted_motion_covariance, opt_state_.timestamp);
 
         }
 
@@ -333,7 +400,7 @@ private:
             tf2::Quaternion tf_q(q.x, q.y, q.z, q.w);
             tf2::Matrix3x3 m(tf_q);
             double yaw;
-            m.getRPY(opt_state_.roll, opt_state_.pitch, yaw);  // Get roll and pitch, but ignore yaw as we optimize it separately
+            m.getRPY(uav_roll_, uav_pitch_, yaw);  // Get roll and pitch, but ignore yaw as we optimize it separately
         }
 
         // Normalize an angle to the range [-pi, pi]
@@ -400,32 +467,7 @@ private:
             return smoothed_state;
     }
 
-
-    void publish_covariance_with_timestamp(const Eigen::Matrix4d& covariance, const rclcpp::Time& timestamp) {
-
-        auto msg = eliko_messages::msg::CovarianceMatrixWithHeader();
-        msg.header.stamp = timestamp;
-        msg.header.frame_id = "accumulated_covariance";  // Adjust as necessary
-        msg.matrix.layout.dim.resize(2);
-        msg.matrix.layout.dim[0].label = "rows";
-        msg.matrix.layout.dim[0].size = 4;
-        msg.matrix.layout.dim[0].stride = 4 * 4;
-        msg.matrix.layout.dim[1].label = "cols";
-        msg.matrix.layout.dim[1].size = 4;
-        msg.matrix.layout.dim[1].stride = 4;
-        msg.matrix.data.resize(4 * 4);
-
-        // Flatten the matrix
-        for (size_t i = 0; i < 4; ++i) {
-            for (size_t j = 0; j < 4; ++j) {
-                msg.matrix.data[i * 4 + j] = covariance(i, j);
-            }
-        }
-
-        covariance_publisher_->publish(msg);
-}
-
-    void publish_transform(const Eigen::Matrix4d& T, const rclcpp::Time &current_time) {
+    void publish_transform(const Eigen::Matrix4d& T, const Eigen::Matrix4d& cov, const rclcpp::Time &current_time) {
 
 
         geometry_msgs::msg::TransformStamped that_ts_msg;
@@ -470,9 +512,29 @@ private:
         that_st_msg.transform.rotation.z = q_that_st.z();
         that_st_msg.transform.rotation.w = q_that_st.w();
 
+        eliko_messages::msg::TransformStampedWithCovariance that_ts_cov_msg;
+        that_ts_cov_msg.transform = that_ts_msg;
+
+        //Fill in the covariance part
+        that_ts_cov_msg.covariance.layout.dim.resize(2);
+        that_ts_cov_msg.covariance.layout.dim[0].label = "rows";
+        that_ts_cov_msg.covariance.layout.dim[0].size = 4;
+        that_ts_cov_msg.covariance.layout.dim[0].stride = 4 * 4;
+        that_ts_cov_msg.covariance.layout.dim[1].label = "cols";
+        that_ts_cov_msg.covariance.layout.dim[1].size = 4;
+        that_ts_cov_msg.covariance.layout.dim[1].stride = 4;
+        that_ts_cov_msg.covariance.data.resize(4 * 4);
+
+        // Flatten the matrix
+        for (size_t i = 0; i < 4; ++i) {
+            for (size_t j = 0; j < 4; ++j) {
+                that_ts_cov_msg.covariance.data[i * 4 + j] = cov(i, j);
+            }
+        }
 
         // Publish the estimated transform
-        tf_publisher_->publish(that_ts_msg);
+        tf_publisher_->publish(that_ts_cov_msg);
+
         // Broadcast the inverse transform
         tf_broadcaster_->sendTransform(that_st_msg);
     }
@@ -528,9 +590,19 @@ private:
 
             //Initial conditions
             State opt_state = opt_state_;
+            opt_state.roll = uav_roll_;
+            opt_state.pitch = uav_pitch_;
             
             //Update the timestamp
             opt_state.timestamp = current_time;
+
+            // Create an instance of our custom manifold.
+            ceres::Manifold* state_manifold = new StateManifold();
+            // Attach it to the parameter block.
+            problem.AddParameterBlock(opt_state.state.data(), 4);
+
+            //Tell the optimizer to perform updates in the manifold space
+            problem.SetManifold(opt_state.state.data(), state_manifold);
 
             // Define a robust kernel
             double huber_threshold = 2.5; // = residuals higher than 2.5 times sigma are outliers
@@ -538,8 +610,9 @@ private:
 
             Eigen::Matrix4d prior_covariance = opt_state_.covariance + motion_covariance;
 
+            Eigen::Matrix4d prior_T = build_transformation_matrix(opt_state_.roll, opt_state_.pitch, opt_state_.state);
             // Add the prior residual with the full covariance
-            ceres::CostFunction* prior_cost = PriorResidual::Create(opt_state_.state, prior_covariance);
+            ceres::CostFunction* prior_cost = PriorResidual::Create(prior_T, opt_state.roll, opt_state.pitch, prior_covariance);
 
             problem.AddResidualBlock(prior_cost, nullptr, opt_state.state.data());
 
@@ -586,12 +659,12 @@ private:
                     // Extract the full covariance matrix
                     covariance.GetCovarianceBlock(opt_state.state.data(), opt_state.state.data(), opt_covariance.data());
                     
-                    RCLCPP_INFO_THROTTLE(this->get_logger(), *this->get_clock(), 1000, "State covariance:\n"
-                        "[%f, %f, %f, %f]\n[%f, %f, %f, %f]\n[%f, %f, %f, %f]\n[%f, %f, %f, %f]",
-                        opt_covariance(0, 0), opt_covariance(0, 1), opt_covariance(0, 2), opt_covariance(0, 3),
-                        opt_covariance(1, 0), opt_covariance(1, 1), opt_covariance(1, 2), opt_covariance(1, 3),
-                        opt_covariance(2, 0), opt_covariance(2, 1), opt_covariance(2, 2), opt_covariance(2, 3),
-                        opt_covariance(3, 0), opt_covariance(3, 1), opt_covariance(3, 2), opt_covariance(3, 3));
+                    // RCLCPP_INFO_THROTTLE(this->get_logger(), *this->get_clock(), 1000, "State covariance:\n"
+                    //     "[%f, %f, %f, %f]\n[%f, %f, %f, %f]\n[%f, %f, %f, %f]\n[%f, %f, %f, %f]",
+                    //     opt_covariance(0, 0), opt_covariance(0, 1), opt_covariance(0, 2), opt_covariance(0, 3),
+                    //     opt_covariance(1, 0), opt_covariance(1, 1), opt_covariance(1, 2), opt_covariance(1, 3),
+                    //     opt_covariance(2, 0), opt_covariance(2, 1), opt_covariance(2, 2), opt_covariance(2, 3),
+                    //     opt_covariance(3, 0), opt_covariance(3, 1), opt_covariance(3, 2), opt_covariance(3, 3));
                     
                     // Optionally, store covariance for further use
                     opt_state.covariance = opt_covariance;  // Add this to your State struct if needed
@@ -621,14 +694,9 @@ private:
         template <typename T>
         bool operator()(const T* const state, T* residual) const {
 
-                // Extract state variables
-                T x = state[0];
-                T y = state[1];
-                T z = state[2];
-                T yaw = state[3];
 
                 // Build the 4x4 transformation matrix
-                Eigen::Matrix<T, 4, 4> T_transform = build_transformation_matrix(roll_, pitch_, yaw, x, y, z);
+                Eigen::Matrix<T, 4, 4> T_transform = buildTransformationMatrix(state, roll_, pitch_);
 
                  // Transform the anchor point (as a homogeneous vector)
                 Eigen::Matrix<T, 4, 1> anchor_h;
@@ -655,25 +723,21 @@ private:
                 new UWBResidual(anchor, tag, measured_distance, roll, pitch, measurement_stdev)));
         }
 
-        // Build a 4x4 transformation matrix
+        // Helper: build a 4x4 homogeneous transformation from a state vector [x,y,z,yaw].
         template <typename T>
-        static Eigen::Matrix<T, 4, 4> build_transformation_matrix(double roll, double pitch, T yaw, T x, T y, T z) {
+        static Eigen::Matrix<T, 4, 4> buildTransformationMatrix(const T* state, double roll, double pitch) {
+            T x = state[0], y = state[1], z = state[2], yaw = state[3];
+            
             Eigen::Matrix<T, 3, 3> R;
             R = Eigen::AngleAxis<T>(yaw, Eigen::Matrix<T, 3, 1>::UnitZ()) *
                 Eigen::AngleAxis<T>(T(pitch), Eigen::Matrix<T, 3, 1>::UnitY()) *
                 Eigen::AngleAxis<T>(T(roll), Eigen::Matrix<T, 3, 1>::UnitX());
 
-            // Normalize rotation
-            R = Eigen::Quaternion<T>(R).normalized().toRotationMatrix();
+            Eigen::Matrix<T, 4, 4> Tmat = Eigen::Matrix<T, 4, 4>::Identity();
+            Tmat.template block<3, 3>(0, 0) = R;
+            Tmat(0, 3) = x; Tmat(1, 3) = y; Tmat(2, 3) = z;
 
-            Eigen::Matrix<T, 4, 4> T_transform = Eigen::Matrix<T, 4, 4>::Identity();
-            // Assign rotation matrix to top-left block
-            T_transform.template block<3, 3>(0, 0) = R;            
-            T_transform(0, 3) = x;
-            T_transform(1, 3) = y;
-            T_transform(2, 3) = z;
-
-            return T_transform;
+            return Tmat;
         }
 
         const Eigen::Vector3d anchor_;
@@ -685,25 +749,38 @@ private:
   };
 
   struct PriorResidual {
-    PriorResidual(const Eigen::Vector4d& prior_state, const Eigen::Matrix4d& state_covariance)
-        : prior_state_(prior_state), state_covariance_(state_covariance) {}
+    PriorResidual(const Eigen::Matrix4d& prior_T, const double &roll, const double &pitch, const Eigen::Matrix4d& state_covariance)
+        : prior_T_(prior_T), roll_(roll), pitch_(pitch), state_covariance_(state_covariance) {}
 
     template <typename T>
     bool operator()(const T* const state, T* residual) const {
-        // Combine translation and yaw into a single residual vector
-        Eigen::Matrix<T, 4, 1> delta_state;
-        delta_state << state[0] - T(prior_state_(0)),
-                       state[1] - T(prior_state_(1)),
-                       state[2] - T(prior_state_(2)),
-                       normalize_angle(state[3] - T(prior_state_(3)));
-
         
+        Eigen::Matrix<T, 4, 4> T_pred = buildTransformationMatrix(state, roll_, pitch_);
+        Eigen::Matrix<T, 4, 4> T_meas = prior_T_.template cast<T>();
+
+        // Create Sophus SE3 objects from the 4x4 matrices.
+        Sophus::SE3<T> SE3_pred(T_pred);
+        Sophus::SE3<T> SE3_meas(T_meas);
+
+        // Compute the error transformation: T_err = T_meas^{-1} * T_pred.
+        Sophus::SE3<T> T_err = SE3_meas.inverse() * SE3_pred;
+        
+        // Compute the full 6-vector logarithm (xi = [rho; phi]),
+        // where phi is the rotation vector.
+        Eigen::Matrix<T,6,1> xi = T_err.log();
+
+        // Project the 6-vector error onto the 4-DOF space:
+        // Keep the three translation components and only the z component of the rotation.
+        Eigen::Matrix<T,4,1> error_vec;
+        error_vec.template segment<3>(0) = xi.template segment<3>(0); // translation error
+        error_vec[3] = xi[5];  // use the z-component (yaw) of the rotation error
+
         // Scale by the square root of the inverse covariance matrix
         Eigen::LLT<Eigen::Matrix4d> chol(state_covariance_);
         Eigen::Matrix4d sqrt_inv_covariance = Eigen::Matrix4d(chol.matrixL().transpose()).inverse();
         //Eigen::Matrix4d sqrt_covariance = Eigen::Matrix4d(chol.matrixL());
 
-        Eigen::Matrix<T, 4, 1> weighted_residual = sqrt_inv_covariance.cast<T>() * delta_state;
+        Eigen::Matrix<T, 4, 1> weighted_residual = sqrt_inv_covariance.cast<T>() * error_vec;
 
         // Assign to residual
         residual[0] = weighted_residual[0];
@@ -719,9 +796,9 @@ private:
         return true;
     }
 
-    static ceres::CostFunction* Create(const Eigen::Vector4d& prior_state, const Eigen::Matrix4d& state_covariance) {
+    static ceres::CostFunction* Create(const Eigen::Matrix4d& prior_T, const double& roll, const double &pitch, const Eigen::Matrix4d& state_covariance) {
         return new ceres::AutoDiffCostFunction<PriorResidual, 4, 4>(
-            new PriorResidual(prior_state, state_covariance));
+            new PriorResidual(prior_T, roll, pitch, state_covariance));
     }
 
 private:
@@ -733,7 +810,25 @@ private:
         return normalized_angle;
     }
 
-    const Eigen::Vector4d prior_state_;
+    // Helper: build a 4x4 homogeneous transformation from a state vector [x,y,z,yaw].
+    template <typename T>
+    static Eigen::Matrix<T, 4, 4> buildTransformationMatrix(const T* state, double roll, double pitch) {
+        T x = state[0], y = state[1], z = state[2], yaw = state[3];
+        
+        Eigen::Matrix<T, 3, 3> R;
+        R = Eigen::AngleAxis<T>(yaw, Eigen::Matrix<T, 3, 1>::UnitZ()) *
+            Eigen::AngleAxis<T>(T(pitch), Eigen::Matrix<T, 3, 1>::UnitY()) *
+            Eigen::AngleAxis<T>(T(roll), Eigen::Matrix<T, 3, 1>::UnitX());
+
+        Eigen::Matrix<T, 4, 4> Tmat = Eigen::Matrix<T, 4, 4>::Identity();
+        Tmat.template block<3, 3>(0, 0) = R;
+        Tmat(0, 3) = x; Tmat(1, 3) = y; Tmat(2, 3) = z;
+
+        return Tmat;
+    }
+
+    const Eigen::Matrix4d prior_T_;
+    const double roll_, pitch_;
     const Eigen::Matrix4d state_covariance_;
 };
 
@@ -751,9 +846,8 @@ private:
     std::deque<Measurement> global_measurements_;
     
     // Publishers/Broadcasters
-    rclcpp::Publisher<geometry_msgs::msg::TransformStamped>::SharedPtr tf_publisher_;
+    rclcpp::Publisher<eliko_messages::msg::TransformStampedWithCovariance>::SharedPtr tf_publisher_;
     std::shared_ptr<tf2_ros::TransformBroadcaster> tf_broadcaster_;
-    rclcpp::Publisher<eliko_messages::msg::CovarianceMatrixWithHeader>::SharedPtr covariance_publisher_;
 
 
     // Transform buffers and listeners for each odometry source.
@@ -787,6 +881,8 @@ private:
     double min_traveled_distance_;
     double uav_distance_, agv_distance_, uav_angle_;
     double odom_error_distance_, odom_error_angle_;
+
+    double uav_roll_, uav_pitch_;
 
 };
 int main(int argc, char** argv) {

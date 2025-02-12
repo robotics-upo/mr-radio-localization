@@ -15,8 +15,9 @@ from tf2_ros.transform_listener import TransformListener
 from geometry_msgs.msg import TransformStamped, QuaternionStamped
 from std_msgs.msg import Float32, Float32MultiArray
 from visualization_msgs.msg import Marker, MarkerArray  # Import Marker messages
-from eliko_messages.msg import Distances, DistancesList
+from eliko_messages.msg import Distances, DistancesList, TransformStampedWithCovariance
 import time
+
 
 
 class MeasurementSimulatorEliko(Node):
@@ -93,7 +94,7 @@ class MeasurementSimulatorEliko(Node):
    
 
         self.optimized_tf_sub = self.create_subscription(
-            TransformStamped,
+            TransformStampedWithCovariance,
             'eliko_optimization_node/optimized_T',
             self.optimized_tf_cb,
             10)
@@ -206,7 +207,7 @@ class MeasurementSimulatorEliko(Node):
 
     def optimized_tf_cb(self, msg):
 
-        that_ts_msg = msg
+        that_ts_msg = msg.transform
         That_t_s = self.transform_stamped_to_matrix(that_ts_msg)
 
         try:
