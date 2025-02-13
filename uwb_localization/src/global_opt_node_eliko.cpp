@@ -134,28 +134,28 @@ public:
 
     
     //Option 1: get odometry through topics -> includes covariance
-    std::string odom_topic_agv = "/arco/idmind_motors/odom"; //or "/agv/odom" "/arco/idmind_motors/odom"
+    std::string odom_topic_agv = "/agv/odom"; //or "/agv/odom" "/arco/idmind_motors/odom"
     std::string odom_topic_uav = "/uav/odom"; //or "/uav/odom"
 
-    // uav_odom_sub_ = this->create_subscription<nav_msgs::msg::Odometry>(
-    // odom_topic_uav, 10, std::bind(&ElikoGlobalOptNode::uav_odom_cb_, this, std::placeholders::_1));
+    uav_odom_sub_ = this->create_subscription<nav_msgs::msg::Odometry>(
+    odom_topic_uav, 10, std::bind(&ElikoGlobalOptNode::uav_odom_cb_, this, std::placeholders::_1));
 
-    // agv_odom_sub_ = this->create_subscription<nav_msgs::msg::Odometry>(
-    // odom_topic_agv, 10, std::bind(&ElikoGlobalOptNode::agv_odom_cb_, this, std::placeholders::_1));
+    agv_odom_sub_ = this->create_subscription<nav_msgs::msg::Odometry>(
+    odom_topic_agv, 10, std::bind(&ElikoGlobalOptNode::agv_odom_cb_, this, std::placeholders::_1));
     
-    //Option 2: get odometry through tf readings -> only transform
-    odom_tf_agv_s_ = "arco/eliko"; //source "agv_odom"
-    odom_tf_agv_t_ = "arco/odom"; //target "world"
-    odom_tf_uav_s_ = "odom"; // "uav_odom"
-    odom_tf_uav_t_ = "world"; //"world"
+    // //Option 2: get odometry through tf readings -> only transform
+    // odom_tf_agv_s_ = "arco/eliko"; //source "agv_odom"
+    // odom_tf_agv_t_ = "arco/odom"; //target "world"
+    // odom_tf_uav_s_ = "odom"; // "uav_odom"
+    // odom_tf_uav_t_ = "world"; //"world"
 
-    // Set up transform listener for UAV odometry.
-    tf_buffer_uav_ = std::make_shared<tf2_ros::Buffer>(this->get_clock());
-    tf_listener_uav_ = std::make_shared<tf2_ros::TransformListener>(*tf_buffer_uav_);
+    // // Set up transform listener for UAV odometry.
+    // tf_buffer_uav_ = std::make_shared<tf2_ros::Buffer>(this->get_clock());
+    // tf_listener_uav_ = std::make_shared<tf2_ros::TransformListener>(*tf_buffer_uav_);
 
-    // Set up transform listener for AGV odometry.
-    tf_buffer_agv_ = std::make_shared<tf2_ros::Buffer>(this->get_clock());
-    tf_listener_agv_ = std::make_shared<tf2_ros::TransformListener>(*tf_buffer_agv_);
+    // // Set up transform listener for AGV odometry.
+    // tf_buffer_agv_ = std::make_shared<tf2_ros::Buffer>(this->get_clock());
+    // tf_listener_agv_ = std::make_shared<tf2_ros::TransformListener>(*tf_buffer_agv_);
     
     // Create publisher/broadcaster for optimized transformation
     tf_publisher_ = this->create_publisher<eliko_messages::msg::TransformStampedWithCovariance>("eliko_optimization_node/optimized_T", 10);
@@ -183,8 +183,8 @@ public:
         {"0x001155", {-0.24, -0.24, -0.06}}, {"0x001397", {0.24, 0.24, -0.06}}  //{"0x001155", {-0.24, -0.24, -0.06}}, {"0x001397", {0.24, 0.24, -0.06}}
     };
 
-    eliko_frame_id_ = "arco/eliko"; //frame of the eliko system-> arco/eliko, for simulation use "agv_gt" for ground truth, "agv_odom" for odometry w/ errors
-    uav_frame_id_ = "base_link"; //frame of the uav -> "base_link", for simulation use "uav_opt"
+    eliko_frame_id_ = "agv_odom"; //frame of the eliko system-> arco/eliko, for simulation use "agv_gt" for ground truth, "agv_odom" for odometry w/ errors
+    uav_frame_id_ = "uav_opt"; //frame of the uav -> "base_link", for simulation use "uav_opt"
 
     //Initial values for state
     init_state_.state = Eigen::Vector4d(0.0, 0.0, 0.0, 0.0);
@@ -318,20 +318,20 @@ private:
         }
 
 
-        //Read the transform (if odom topics not available)
-        try {
-            auto transform_agv = tf_buffer_agv_->lookupTransform(odom_tf_agv_t_, odom_tf_agv_s_, rclcpp::Time(0));
-            agv_odom_pos_ = transformMsgToState(transform_agv);
-            } catch (const tf2::TransformException &ex) {
-            RCLCPP_WARN(this->get_logger(), "Could not get transform for AGV: %s", ex.what());
-            }
+        // //Read the transform (if odom topics not available)
+        // try {
+        //     auto transform_agv = tf_buffer_agv_->lookupTransform(odom_tf_agv_t_, odom_tf_agv_s_, rclcpp::Time(0));
+        //     agv_odom_pos_ = transformMsgToState(transform_agv);
+        //     } catch (const tf2::TransformException &ex) {
+        //     RCLCPP_WARN(this->get_logger(), "Could not get transform for AGV: %s", ex.what());
+        //     }
 
-        try {
-            auto transform_uav = tf_buffer_uav_->lookupTransform(odom_tf_uav_t_, odom_tf_uav_s_, rclcpp::Time(0));
-            uav_odom_pos_ = transformMsgToState(transform_uav);
-            } catch (const tf2::TransformException &ex) {
-            RCLCPP_WARN(this->get_logger(), "Could not get transform for UAV: %s", ex.what());
-            }
+        // try {
+        //     auto transform_uav = tf_buffer_uav_->lookupTransform(odom_tf_uav_t_, odom_tf_uav_s_, rclcpp::Time(0));
+        //     uav_odom_pos_ = transformMsgToState(transform_uav);
+        //     } catch (const tf2::TransformException &ex) {
+        //     RCLCPP_WARN(this->get_logger(), "Could not get transform for UAV: %s", ex.what());
+        //     }
 
 
         /*Check enough translation in the window*/
@@ -368,9 +368,9 @@ private:
                 opt_state_.state = smoothed_state;
             }
 
-            Eigen::Matrix4d That_ts = build_transformation_matrix(opt_state_.roll, opt_state_.pitch, opt_state_.state);
+            Sophus::SE3d That_ts = build_transformation_SE3(opt_state_.roll, opt_state_.pitch, opt_state_.state);
 
-            publish_transform(That_ts, opt_state_.covariance + predicted_motion_covariance, opt_state_.timestamp);
+            publish_transform(That_ts.matrix(), opt_state_.covariance + predicted_motion_covariance, opt_state_.timestamp);
 
         }
 
@@ -540,22 +540,12 @@ private:
     }
 
 
-  // Build transformation matrix from roll, pitch, optimized yaw, and translation vector
-    Eigen::Matrix4d build_transformation_matrix(double roll, double pitch, const Eigen::Vector4d& s) {
-        Eigen::Matrix3d R;
-        R = Eigen::AngleAxisd(s[3], Eigen::Vector3d::UnitZ()) *
-            Eigen::AngleAxisd(pitch, Eigen::Vector3d::UnitY()) *
-            Eigen::AngleAxisd(roll, Eigen::Vector3d::UnitX());
-
-        R = Eigen::Quaterniond(R).normalized().toRotationMatrix();
-        
-        Eigen::Matrix4d T = Eigen::Matrix4d::Identity();
-        T.block<3, 3>(0, 0) = R;
-        T(0, 3) = s[0];
-        T(1, 3) = s[1];
-        T(2, 3) = s[2];
-
-        return T;
+    Sophus::SE3d build_transformation_SE3(double roll, double pitch, const Eigen::Vector4d& s) {
+        Eigen::Vector3d t(s[0], s[1], s[2]);  // Use Vector3d instead of an incorrect Matrix type.
+        Eigen::Matrix3d R = (Eigen::AngleAxisd(s[3], Eigen::Vector3d::UnitZ()) *
+                             Eigen::AngleAxisd(pitch, Eigen::Vector3d::UnitY()) *
+                             Eigen::AngleAxisd(roll,  Eigen::Vector3d::UnitX())).toRotationMatrix();
+        return Sophus::SE3d(R, t);
     }
 
     // Converts a TransformStamped message to an Eigen::Matrix4d.
@@ -610,7 +600,7 @@ private:
 
             Eigen::Matrix4d prior_covariance = opt_state_.covariance + motion_covariance;
 
-            Eigen::Matrix4d prior_T = build_transformation_matrix(opt_state_.roll, opt_state_.pitch, opt_state_.state);
+            Sophus::SE3d prior_T = build_transformation_SE3(opt_state_.roll, opt_state_.pitch, opt_state_.state);
             // Add the prior residual with the full covariance
             ceres::CostFunction* prior_cost = PriorResidual::Create(prior_T, opt_state.roll, opt_state.pitch, prior_covariance);
 
@@ -694,20 +684,18 @@ private:
         template <typename T>
         bool operator()(const T* const state, T* residual) const {
 
-
                 // Build the 4x4 transformation matrix
-                Eigen::Matrix<T, 4, 4> T_transform = buildTransformationMatrix(state, roll_, pitch_);
+                Sophus::SE3<T> SE3_rel = buildTransformationSE3(state, roll_, pitch_);
 
-                 // Transform the anchor point (as a homogeneous vector)
-                Eigen::Matrix<T, 4, 1> anchor_h;
-                anchor_h << T(anchor_(0)), T(anchor_(1)), T(anchor_(2)), T(1.0);
-                Eigen::Matrix<T, 4, 1> anchor_transformed_h = T_transform * anchor_h;
-
-                // Calculate the predicted distance
-                T dx = T(tag_(0)) - anchor_transformed_h(0);
-                T dy = T(tag_(1)) - anchor_transformed_h(1);
-                T dz = T(tag_(2)) - anchor_transformed_h(2);
-                T predicted_distance = ceres::sqrt(dx * dx + dy * dy + dz * dz);
+                // Transform the anchor point using the robot pose.
+                Eigen::Matrix<T,3,1> anchor_vec;
+                anchor_vec << T(anchor_(0)), T(anchor_(1)), T(anchor_(2));
+                Eigen::Matrix<T,3,1> anchor_transformed = SE3_rel * anchor_vec;
+                
+                // Compute the predicted distance from the transformed anchor to the tag.
+                Eigen::Matrix<T,3,1> tag_vec;
+                tag_vec << T(tag_(0)), T(tag_(1)), T(tag_(2));
+                T predicted_distance = (tag_vec - anchor_transformed).norm();
 
                 // Residual as (measured - predicted)
                 residual[0] = T(measured_distance_) - predicted_distance;
@@ -723,21 +711,17 @@ private:
                 new UWBResidual(anchor, tag, measured_distance, roll, pitch, measurement_stdev)));
         }
 
-        // Helper: build a 4x4 homogeneous transformation from a state vector [x,y,z,yaw].
         template <typename T>
-        static Eigen::Matrix<T, 4, 4> buildTransformationMatrix(const T* state, double roll, double pitch) {
-            T x = state[0], y = state[1], z = state[2], yaw = state[3];
-            
-            Eigen::Matrix<T, 3, 3> R;
-            R = Eigen::AngleAxis<T>(yaw, Eigen::Matrix<T, 3, 1>::UnitZ()) *
-                Eigen::AngleAxis<T>(T(pitch), Eigen::Matrix<T, 3, 1>::UnitY()) *
-                Eigen::AngleAxis<T>(T(roll), Eigen::Matrix<T, 3, 1>::UnitX());
-
-            Eigen::Matrix<T, 4, 4> Tmat = Eigen::Matrix<T, 4, 4>::Identity();
-            Tmat.template block<3, 3>(0, 0) = R;
-            Tmat(0, 3) = x; Tmat(1, 3) = y; Tmat(2, 3) = z;
-
-            return Tmat;
+        Sophus::SE3<T> buildTransformationSE3(const T* state, double roll, double pitch) const{
+            // Extract translation
+            Eigen::Matrix<T, 3, 1> t;
+            t << state[0], state[1], state[2];
+            // Build rotation from yaw, with fixed roll and pitch
+            Eigen::Matrix<T, 3, 3> R = (Eigen::AngleAxis<T>(state[3], Eigen::Matrix<T, 3, 1>::UnitZ()) *
+                                        Eigen::AngleAxis<T>(T(pitch), Eigen::Matrix<T, 3, 1>::UnitY()) *
+                                        Eigen::AngleAxis<T>(T(roll),  Eigen::Matrix<T, 3, 1>::UnitX())).toRotationMatrix();
+            // Return the Sophus SE3 object
+            return Sophus::SE3<T>(R, t);
         }
 
         const Eigen::Vector3d anchor_;
@@ -749,21 +733,17 @@ private:
   };
 
   struct PriorResidual {
-    PriorResidual(const Eigen::Matrix4d& prior_T, const double &roll, const double &pitch, const Eigen::Matrix4d& state_covariance)
+    PriorResidual(const Sophus::SE3d& prior_T, const double &roll, const double &pitch, const Eigen::Matrix4d& state_covariance)
         : prior_T_(prior_T), roll_(roll), pitch_(pitch), state_covariance_(state_covariance) {}
 
     template <typename T>
     bool operator()(const T* const state, T* residual) const {
         
-        Eigen::Matrix<T, 4, 4> T_pred = buildTransformationMatrix(state, roll_, pitch_);
-        Eigen::Matrix<T, 4, 4> T_meas = prior_T_.template cast<T>();
-
-        // Create Sophus SE3 objects from the 4x4 matrices.
-        Sophus::SE3<T> SE3_pred(T_pred);
-        Sophus::SE3<T> SE3_meas(T_meas);
+        Sophus::SE3<T> SE3_pred = buildTransformationSE3(state, roll_, pitch_);
+        Sophus::SE3<T> T_meas = prior_T_.template cast<T>();
 
         // Compute the error transformation: T_err = T_meas^{-1} * T_pred.
-        Sophus::SE3<T> T_err = SE3_meas.inverse() * SE3_pred;
+        Sophus::SE3<T> T_err = T_meas.inverse() * SE3_pred;
         
         // Compute the full 6-vector logarithm (xi = [rho; phi]),
         // where phi is the rotation vector.
@@ -788,46 +768,30 @@ private:
         residual[2] = weighted_residual[2];
         residual[3] = weighted_residual[3];
 
-        // std::cout << "Prior residual: ["
-        //   << residual[0] << ", " << residual[1] << ", " 
-        //   << residual[2] << ", " << residual[3] << "]" 
-        //   << std::endl;
-
         return true;
     }
 
-    static ceres::CostFunction* Create(const Eigen::Matrix4d& prior_T, const double& roll, const double &pitch, const Eigen::Matrix4d& state_covariance) {
+    static ceres::CostFunction* Create(const Sophus::SE3d& prior_T, const double& roll, const double &pitch, const Eigen::Matrix4d& state_covariance) {
         return new ceres::AutoDiffCostFunction<PriorResidual, 4, 4>(
             new PriorResidual(prior_T, roll, pitch, state_covariance));
     }
 
 private:
+
     template <typename T>
-    T normalize_angle(const T& angle) const {
-        T normalized_angle = angle;
-        while (normalized_angle > T(M_PI)) normalized_angle -= T(2.0 * M_PI);
-        while (normalized_angle < T(-M_PI)) normalized_angle += T(2.0 * M_PI);
-        return normalized_angle;
+    Sophus::SE3<T> buildTransformationSE3(const T* state, double roll, double pitch) const {
+        // Extract translation
+        Eigen::Matrix<T, 3, 1> t;
+        t << state[0], state[1], state[2];
+        // Build rotation from yaw, with fixed roll and pitch
+        Eigen::Matrix<T, 3, 3> R = (Eigen::AngleAxis<T>(state[3], Eigen::Matrix<T, 3, 1>::UnitZ()) *
+                                    Eigen::AngleAxis<T>(T(pitch), Eigen::Matrix<T, 3, 1>::UnitY()) *
+                                    Eigen::AngleAxis<T>(T(roll),  Eigen::Matrix<T, 3, 1>::UnitX())).toRotationMatrix();
+        // Return the Sophus SE3 object
+        return Sophus::SE3<T>(R, t);
     }
 
-    // Helper: build a 4x4 homogeneous transformation from a state vector [x,y,z,yaw].
-    template <typename T>
-    static Eigen::Matrix<T, 4, 4> buildTransformationMatrix(const T* state, double roll, double pitch) {
-        T x = state[0], y = state[1], z = state[2], yaw = state[3];
-        
-        Eigen::Matrix<T, 3, 3> R;
-        R = Eigen::AngleAxis<T>(yaw, Eigen::Matrix<T, 3, 1>::UnitZ()) *
-            Eigen::AngleAxis<T>(T(pitch), Eigen::Matrix<T, 3, 1>::UnitY()) *
-            Eigen::AngleAxis<T>(T(roll), Eigen::Matrix<T, 3, 1>::UnitX());
-
-        Eigen::Matrix<T, 4, 4> Tmat = Eigen::Matrix<T, 4, 4>::Identity();
-        Tmat.template block<3, 3>(0, 0) = R;
-        Tmat(0, 3) = x; Tmat(1, 3) = y; Tmat(2, 3) = z;
-
-        return Tmat;
-    }
-
-    const Eigen::Matrix4d prior_T_;
+    const Sophus::SE3d prior_T_;
     const double roll_, pitch_;
     const Eigen::Matrix4d state_covariance_;
 };

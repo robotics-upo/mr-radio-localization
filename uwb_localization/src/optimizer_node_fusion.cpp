@@ -197,14 +197,14 @@ public:
     global_opt_rate_s_ = 0.2 * global_opt_window_s_; //rate of the optimization
     min_keyframes_ = 3.0; //number of nodes to run optimization
 
-    T_uav_lidar_ = build_transformation_matrix(0.0,0.0, Eigen::Vector4d(0.21,0.0,0.25,0.0));
-    T_agv_lidar_ = build_transformation_matrix(3.14,0.0, Eigen::Vector4d(0.3,0.0,0.45,0.0));
+    T_uav_lidar_ = build_transformation_SE3(0.0,0.0, Eigen::Vector4d(0.21,0.0,0.25,0.0));
+    T_agv_lidar_ = build_transformation_SE3(3.14,0.0, Eigen::Vector4d(0.3,0.0,0.45,0.0));
 
     global_optimization_timer_ = this->create_wall_timer(
             std::chrono::milliseconds(int(global_opt_rate_s_*1000)), std::bind(&FusionOptimizationNode::global_opt_cb_, this));
 
 
-    eliko_frame_id_ = "agv_odom"; //frame of the eliko system-> arco/eliko, for simulation use "agv_gt" for ground truth, "agv_odom" for odometry w/ errors
+    eliko_frame_id_ = "agv_opt"; //frame of the eliko system-> arco/eliko, for simulation use "agv_gt" for ground truth, "agv_odom" for odometry w/ errors
     uav_frame_id_ = "uav_opt"; //frame of the uav -> "base_link", for simulation use "uav_opt"
 
     //Initial values for state
@@ -335,14 +335,14 @@ private:
         rclcpp::Time current_time = this->get_clock()->now();
 
         //Read the transform (if odom topics not available)
-        try {
-            auto transform_agv = tf_buffer_agv_->lookupTransform(odom_tf_agv_t_, odom_tf_agv_s_, rclcpp::Time(0));
-            Eigen::Matrix4d T_agv_odom = transform_matrix_from_msg(transform_agv);
-            agv_odom_pos_ = transformToState(T_agv_odom);
-            } catch (const tf2::TransformException &ex) {
-            RCLCPP_WARN(this->get_logger(), "Could not get transform for AGV: %s", ex.what());
-            return;
-            }
+        // try {
+        //     auto transform_agv = tf_buffer_agv_->lookupTransform(odom_tf_agv_t_, odom_tf_agv_s_, rclcpp::Time(0));
+        //     Eigen::Matrix4d T_agv_odom = transform_matrix_from_msg(transform_agv);
+        //     agv_odom_pos_ = transformToState(T_agv_odom);
+        //     } catch (const tf2::TransformException &ex) {
+        //     RCLCPP_WARN(this->get_logger(), "Could not get transform for AGV: %s", ex.what());
+        //     return;
+        //     }
 
         // try {
         //     auto transform_uav = tf_buffer_uav_->lookupTransform(odom_tf_uav_t_, odom_tf_uav_s_, rclcpp::Time(0));
@@ -355,17 +355,17 @@ private:
         // Create a new AGV node from the current odometry.
         State new_agv;
 
-        // if(pose_graph_.agv_states.empty()){
-        //     new_agv.state = init_state_.state;
-        //     new_agv.covariance = init_state_.covariance;
-        // }
-        // else {
-        //     new_agv.state = pose_graph_.agv_states.back().state;
-        //     new_agv.covariance = pose_graph_.agv_states.back().covariance;
-        // }
+        if(pose_graph_.agv_states.empty()){
+            new_agv.state = init_state_.state;
+            new_agv.covariance = init_state_.covariance;
+        }
+        else {
+            new_agv.state = pose_graph_.agv_states.back().state;
+            new_agv.covariance = pose_graph_.agv_states.back().covariance;
+        }
 
-        new_agv.state = agv_odom_pos_;
-        new_agv.covariance = Eigen::Matrix4d::Identity() * 1e-6;
+        // new_agv.state = agv_odom_pos_;
+        // new_agv.covariance = Eigen::Matrix4d::Identity() * 1e-6;
 
         new_agv.timestamp = current_time;
         new_agv.roll = 0.0;   // or update with additional sensors
@@ -398,18 +398,18 @@ private:
             new_uav.state = init_state_.state;
             new_uav.covariance = init_state_.covariance;
         }
-        else if(latest_relative_available_){
-            Eigen::Matrix4d pred_That_uav_w = transform_matrix_from_msg(latest_relative_transform_.transform)*(build_transformation_matrix(0.0,0.0,agv_odom_pos_).inverse());
-            new_uav.state = transformToState(pred_That_uav_w.inverse());
-            //Unflatten matrix to extract the covariance
-            Eigen::Matrix4d cov = Eigen::Matrix4d::Zero();
-            for (size_t i = 0; i < 4; ++i) {
-                for (size_t j = 0; j < 4; ++j) {
-                    cov(i,j) = latest_relative_transform_.covariance.data[i * 4 + j];
-                }
-            }
-            new_uav.covariance = cov;
-        }
+        // else if(latest_relative_available_){
+        //     Eigen::Matrix4d pred_That_uav_w = transform_matrix_from_msg(latest_relative_transform_.transform)*(build_transformation_matrix(0.0,0.0,agv_odom_pos_).inverse());
+        //     new_uav.state = transformToState(pred_That_uav_w.inverse());
+        //     //Unflatten matrix to extract the covariance
+        //     Eigen::Matrix4d cov = Eigen::Matrix4d::Zero();
+        //     for (size_t i = 0; i < 4; ++i) {
+        //         for (size_t j = 0; j < 4; ++j) {
+        //             cov(i,j) = latest_relative_transform_.covariance.data[i * 4 + j];
+        //         }
+        //     }
+        //     new_uav.covariance = cov;
+        // }
         else {
             new_uav.state = pose_graph_.uav_states.back().state;
             new_uav.covariance = pose_graph_.uav_states.back().covariance;
@@ -478,8 +478,8 @@ private:
             State& agv_node = pose_graph_.agv_states.back();
             State& uav_node = pose_graph_.uav_states.back();
 
-            Eigen::Matrix4d That_ws = build_transformation_matrix(0.0, 0.0, agv_node.state);
-            Eigen::Matrix4d That_wt = build_transformation_matrix(uav_node.roll, uav_node.pitch, uav_node.state);
+            Sophus::SE3d That_ws = build_transformation_SE3(0.0, 0.0, agv_node.state);
+            Sophus::SE3d That_wt = build_transformation_SE3(uav_node.roll, uav_node.pitch, uav_node.state);
 
             RCLCPP_INFO(this->get_logger(), "AGV Optimized pose:\n"
                         "[%f, %f, %f, %f]", agv_node.state[0], agv_node.state[1],agv_node.state[2], agv_node.state[3]);
@@ -487,8 +487,9 @@ private:
             RCLCPP_INFO(this->get_logger(), "UAV Optimized pose:\n"
                         "[%f, %f, %f, %f]", uav_node.state[0], uav_node.state[1], uav_node.state[2], uav_node.state[3]);
 
-            publish_transform(That_ws, current_time, "arco/odom", "agv_opt");
-            publish_transform(That_wt, current_time, "arco/odom", "base_link");
+            //AGV odom frame to be common reference frame
+            publish_transform(That_ws.matrix(), current_time, odom_tf_agv_t_, eliko_frame_id_);
+            publish_transform(That_wt.matrix(), current_time, odom_tf_agv_t_, uav_frame_id_);
 
         }
 
@@ -771,22 +772,12 @@ private:
     }
 
 
-  // Build transformation matrix from roll, pitch, optimized yaw, and translation vector
-    Eigen::Matrix4d build_transformation_matrix(double roll, double pitch, const Eigen::Vector4d& s) {
-        Eigen::Matrix3d R;
-        R = Eigen::AngleAxisd(s[3], Eigen::Vector3d::UnitZ()) *
-            Eigen::AngleAxisd(pitch, Eigen::Vector3d::UnitY()) *
-            Eigen::AngleAxisd(roll, Eigen::Vector3d::UnitX());
-
-        R = Eigen::Quaterniond(R).normalized().toRotationMatrix();
-        
-        Eigen::Matrix4d T = Eigen::Matrix4d::Identity();
-        T.block<3, 3>(0, 0) = R;
-        T(0, 3) = s[0];
-        T(1, 3) = s[1];
-        T(2, 3) = s[2];
-
-        return T;
+    Sophus::SE3d build_transformation_SE3(double roll, double pitch, const Eigen::Vector4d& s) {
+        Eigen::Vector3d t(s[0], s[1], s[2]);  // Use Vector3d instead of an incorrect Matrix type.
+        Eigen::Matrix3d R = (Eigen::AngleAxisd(s[3], Eigen::Vector3d::UnitZ()) *
+                             Eigen::AngleAxisd(pitch, Eigen::Vector3d::UnitY()) *
+                             Eigen::AngleAxisd(roll,  Eigen::Vector3d::UnitX())).toRotationMatrix();
+        return Sophus::SE3d(R, t);
     }
 
     // Convert transform matrix from ROS msg to Eigen
@@ -819,7 +810,7 @@ private:
     // ---------------- Pose Graph Optimization -------------------
     //
     // In this function we build a Ceres problem that fuses:
-    // - A prior on the first node of each robot.
+    // - A prior on each node and the previous.
     // - Inter-robot UWB factor linking nodes based on relative transform estimation input
     // - Intra-robot ICP factors linking consecutive nodes.
     // - Inter-robot ICP factors linking nodes from the two robots.
@@ -845,13 +836,19 @@ private:
         }
 
         
-        // Add prior factors on the first nodes (anchor the graph)
-        {
-            ceres::CostFunction* prior_cost_agv = PriorResidual::Create(agv.front().state, agv.front().covariance);
-            problem.AddResidualBlock(prior_cost_agv, nullptr, agv.front().state.data());
-            ceres::CostFunction* prior_cost_uav = PriorResidual::Create(uav.front().state, uav.front().covariance);
-            problem.AddResidualBlock(prior_cost_uav, nullptr, uav.front().state.data());
+        // Add prior factors (anchor the graph)
+        for (size_t i = 0; i + 1 < agv.size(); ++i) {
+            Sophus::SE3d prior_T = build_transformation_SE3(agv[i].roll, agv[i].pitch, agv[i].state);
+            ceres::CostFunction* prior_cost_agv = PriorResidual::Create(prior_T, agv[i+1].roll, agv[i+1].pitch, agv[i].covariance);
+            problem.AddResidualBlock(prior_cost_agv, nullptr, agv[i+1].state.data());
         }
+
+        for (size_t i = 0; i + 1 < uav.size(); ++i) {
+            Sophus::SE3d prior_T = build_transformation_SE3(uav[i].roll, uav[i].pitch, uav[i].state);
+            ceres::CostFunction* prior_cost_uav = PriorResidual::Create(prior_T, uav[i+1].roll, uav[i+1].pitch, uav[i].covariance);
+            problem.AddResidualBlock(prior_cost_uav, nullptr, uav[i+1].state.data());
+        }
+    
 
         // Add residual based on UWB relative transform, if available
         if (latest_relative_available_) {
@@ -861,17 +858,21 @@ private:
                 State& agv_node = agv[i];
                 State& uav_node = uav[i];
 
-                //Build the Eigen transform
-                Eigen::Matrix4d T = Eigen::Matrix4d::Identity();
-                T(0,3) = latest_relative_transform_.transform.transform.translation.x;
-                T(1,3) = latest_relative_transform_.transform.transform.translation.y;
-                T(2,3) = latest_relative_transform_.transform.transform.translation.z;
-                // Convert quaternion to rotation matrix.
-                Eigen::Quaterniond q(latest_relative_transform_.transform.transform.rotation.w,
-                                    latest_relative_transform_.transform.transform.rotation.x,
-                                    latest_relative_transform_.transform.transform.rotation.y,
-                                    latest_relative_transform_.transform.transform.rotation.z);
-                T.block<3,3>(0,0) = q.toRotationMatrix();
+                // Extract the translation vector.
+                Eigen::Vector3d t(
+                    latest_relative_transform_.transform.transform.translation.x,
+                    latest_relative_transform_.transform.transform.translation.y,
+                    latest_relative_transform_.transform.transform.translation.z);
+
+                // Build the quaternion (make sure the order is correct: w, x, y, z).
+                Eigen::Quaterniond q(
+                    latest_relative_transform_.transform.transform.rotation.w,
+                    latest_relative_transform_.transform.transform.rotation.x,
+                    latest_relative_transform_.transform.transform.rotation.y,
+                    latest_relative_transform_.transform.transform.rotation.z);
+
+                // Construct the Sophus::SE3d object.
+                Sophus::SE3d T(q, t);
 
                 //Unflatten matric to extract the covariance
                 Eigen::Matrix4d cov = Eigen::Matrix4d::Zero();
@@ -887,7 +888,7 @@ private:
         }
 
         // Add inter-robot ICP factors.
-        for (size_t i = 0; i + 1 < agv.size(); ++i) {
+        for (size_t i = 0; i < agv.size(); ++i) {
 
             if (agv[i].scan->points.empty() ||
                 uav[i].scan->points.empty()) {
@@ -908,8 +909,7 @@ private:
             double pitch_s = agv[i].pitch;
 
             //Transform to the robots body frame
-            Eigen::Matrix4d T_icp_uav_agv = Eigen::Matrix4d::Zero();
-            T_icp_uav_agv = T_uav_lidar_ * T_icp.cast<double>() * T_agv_lidar_.inverse();
+            Sophus::SE3d T_icp_uav_agv = T_uav_lidar_ * Sophus::SE3d(T_icp.cast<double>()) * T_agv_lidar_.inverse();
 
             ceres::CostFunction* icp_cost = ICPResidual::Create(T_icp_uav_agv, fitness, roll_t, roll_s, pitch_t, pitch_s);
             problem.AddResidualBlock(icp_cost, nullptr,
@@ -937,8 +937,7 @@ private:
                 };
 
                 //Transform to the robots body frame
-                Eigen::Matrix4d T_icp_agv = Eigen::Matrix4d::Zero();
-                T_icp_agv = T_agv_lidar_ * T_icp.cast<double>() * T_agv_lidar_.inverse();
+                Sophus::SE3d T_icp_agv = T_agv_lidar_ * Sophus::SE3d(T_icp.cast<double>()) * T_agv_lidar_.inverse();
 
                 ceres::CostFunction* icp_cost = ICPResidual::Create(T_icp_agv, fitness, 0.0, 0.0, 0.0, 0.0);
                 problem.AddResidualBlock(icp_cost, nullptr,
@@ -971,8 +970,7 @@ private:
                 double pitch_s = uav[i+1].pitch;
 
                 //Transform to the robots body frame
-                Eigen::Matrix4d T_icp_uav = Eigen::Matrix4d::Zero();
-                T_icp_uav = T_uav_lidar_ * T_icp.cast<double>() * T_uav_lidar_.inverse();
+                Sophus::SE3d T_icp_uav = T_uav_lidar_ * Sophus::SE3d(T_icp.cast<double>()) * T_uav_lidar_.inverse();
 
                 ceres::CostFunction* icp_cost = ICPResidual::Create(T_icp_uav, fitness, roll_t, roll_s, pitch_t, pitch_s);
 
@@ -1057,22 +1055,18 @@ private:
     //
 
     struct RelativeTransformResidual {
-    RelativeTransformResidual(const Eigen::Matrix4d& T_opt, const Eigen::Matrix4d& cov, double roll_uav, double pitch_uav)
+    RelativeTransformResidual(const Sophus::SE3d& T_opt, const Eigen::Matrix4d& cov, double roll_uav, double pitch_uav)
         : T_opt_(T_opt), cov_(cov), roll_uav_(roll_uav), pitch_uav_(pitch_uav) {}
 
     template <typename T>
     bool operator()(const T* const agv_state, const T* const uav_state, T* residual) const {
         // Build homogeneous transforms from the state vectors.
-        Eigen::Matrix<T, 4, 4> w_T_s = buildTransformationMatrix(agv_state, 0.0, 0.0);
-        Eigen::Matrix<T, 4, 4> w_T_t = buildTransformationMatrix(uav_state, roll_uav_, pitch_uav_);
+        Sophus::SE3<T> w_T_s = buildTransformationSE3(agv_state, 0.0, 0.0);
+        Sophus::SE3<T> w_T_t = buildTransformationSE3(uav_state, roll_uav_, pitch_uav_);
+        
         // Compute the relative transform from AGV to UAV:
-        Eigen::Matrix<T, 4, 4> T_pred = w_T_t.inverse() * w_T_s;
-
-        Eigen::Matrix<T, 4, 4> T_meas = T_opt_.template cast<T>();
-
-        // Create Sophus SE3 objects from the 4x4 matrices.
-        Sophus::SE3<T> SE3_pred(T_pred);
-        Sophus::SE3<T> SE3_meas(T_meas);
+        Sophus::SE3<T> SE3_pred = w_T_t.inverse() * w_T_s;
+        Sophus::SE3<T> SE3_meas = T_opt_.template cast<T>();
 
         // Compute the error transformation: T_err = T_meas^{-1} * T_pred.
         Sophus::SE3<T> T_err = SE3_meas.inverse() * SE3_pred;
@@ -1102,64 +1096,62 @@ private:
         return true;
     }
 
-    static ceres::CostFunction* Create(const Eigen::Matrix4d& T_opt, const Eigen::Matrix4d& cov, double roll_uav, double pitch_uav) {
+    static ceres::CostFunction* Create(const Sophus::SE3d& T_opt, const Eigen::Matrix4d& cov, double roll_uav, double pitch_uav) {
         return new ceres::AutoDiffCostFunction<RelativeTransformResidual, 4, 4, 4>(
             new RelativeTransformResidual(T_opt, cov, roll_uav, pitch_uav));
     }
 
     private:
-        // Helper: build a 4x4 homogeneous transformation from a state vector [x,y,z,yaw].
         template <typename T>
-        static Eigen::Matrix<T, 4, 4> buildTransformationMatrix(const T* state, double roll, double pitch) {
-            T x = state[0], y = state[1], z = state[2], yaw = state[3];
-            
-            Eigen::Matrix<T, 3, 3> R;
-            R = Eigen::AngleAxis<T>(yaw, Eigen::Matrix<T, 3, 1>::UnitZ()) *
-                Eigen::AngleAxis<T>(T(pitch), Eigen::Matrix<T, 3, 1>::UnitY()) *
-                Eigen::AngleAxis<T>(T(roll), Eigen::Matrix<T, 3, 1>::UnitX());
-
-            Eigen::Matrix<T, 4, 4> Tmat = Eigen::Matrix<T, 4, 4>::Identity();
-            Tmat.template block<3, 3>(0, 0) = R;
-            Tmat(0, 3) = x; Tmat(1, 3) = y; Tmat(2, 3) = z;
-
-            return Tmat;
+        Sophus::SE3<T> buildTransformationSE3(const T* state, double roll, double pitch) const {
+            // Extract translation
+            Eigen::Matrix<T, 3, 1> t;
+            t << state[0], state[1], state[2];
+            // Build rotation from yaw, with fixed roll and pitch
+            Eigen::Matrix<T, 3, 3> R = (Eigen::AngleAxis<T>(state[3], Eigen::Matrix<T, 3, 1>::UnitZ()) *
+                                        Eigen::AngleAxis<T>(T(pitch), Eigen::Matrix<T, 3, 1>::UnitY()) *
+                                        Eigen::AngleAxis<T>(T(roll),  Eigen::Matrix<T, 3, 1>::UnitX())).toRotationMatrix();
+            // Return the Sophus SE3 object
+            return Sophus::SE3<T>(R, t);
         }
 
-        template <typename T>
-        T normalize_angle(const T& angle) const {
-            T normalized_angle = angle;
-            while (normalized_angle > T(M_PI)) normalized_angle -= T(2.0 * M_PI);
-            while (normalized_angle < T(-M_PI)) normalized_angle += T(2.0 * M_PI);
-            return normalized_angle;
-        }
-
-    const Eigen::Matrix4d T_opt_, cov_;
+    const Sophus::SE3d T_opt_;
+    const Eigen::Matrix4d cov_;
     const double roll_uav_;
     const double pitch_uav_;
 
 };
 
 
-  struct PriorResidual {
-    PriorResidual(const Eigen::Vector4d& prior_state, const Eigen::Matrix4d& state_covariance)
-        : prior_state_(prior_state), state_covariance_(state_covariance) {}
+struct PriorResidual {
+    PriorResidual(const Sophus::SE3d& prior_T, const double &roll, const double &pitch, const Eigen::Matrix4d& state_covariance)
+        : prior_T_(prior_T), roll_(roll), pitch_(pitch), state_covariance_(state_covariance) {}
 
     template <typename T>
     bool operator()(const T* const state, T* residual) const {
-        // Combine translation and yaw into a single residual vector
-        Eigen::Matrix<T, 4, 1> delta_state;
-        delta_state << state[0] - T(prior_state_(0)),
-                       state[1] - T(prior_state_(1)),
-                       state[2] - T(prior_state_(2)),
-                       normalize_angle(state[3] - T(prior_state_(3)));
-
         
+        Sophus::SE3<T> SE3_pred = buildTransformationSE3(state, roll_, pitch_);
+        Sophus::SE3<T> T_meas = prior_T_.template cast<T>();
+
+        // Compute the error transformation: T_err = T_meas^{-1} * T_pred.
+        Sophus::SE3<T> T_err = T_meas.inverse() * SE3_pred;
+        
+        // Compute the full 6-vector logarithm (xi = [rho; phi]),
+        // where phi is the rotation vector.
+        Eigen::Matrix<T,6,1> xi = T_err.log();
+
+        // Project the 6-vector error onto the 4-DOF space:
+        // Keep the three translation components and only the z component of the rotation.
+        Eigen::Matrix<T,4,1> error_vec;
+        error_vec.template segment<3>(0) = xi.template segment<3>(0); // translation error
+        error_vec[3] = xi[5];  // use the z-component (yaw) of the rotation error
+
         // Scale by the square root of the inverse covariance matrix
         Eigen::LLT<Eigen::Matrix4d> chol(state_covariance_);
         Eigen::Matrix4d sqrt_inv_covariance = Eigen::Matrix4d(chol.matrixL().transpose()).inverse();
         //Eigen::Matrix4d sqrt_covariance = Eigen::Matrix4d(chol.matrixL());
 
-        Eigen::Matrix<T, 4, 1> weighted_residual = sqrt_inv_covariance.cast<T>() * delta_state;
+        Eigen::Matrix<T, 4, 1> weighted_residual = sqrt_inv_covariance.cast<T>() * error_vec;
 
         // Assign to residual
         residual[0] = weighted_residual[0];
@@ -1167,31 +1159,31 @@ private:
         residual[2] = weighted_residual[2];
         residual[3] = weighted_residual[3];
 
-        // std::cout << "Prior residual: ["
-        //   << residual[0] << ", " << residual[1] << ", " 
-        //   << residual[2] << ", " << residual[3] << "]" 
-        //   << std::endl;
-
         return true;
     }
 
-    static ceres::CostFunction* Create(const Eigen::Vector4d& prior_state, const Eigen::Matrix4d& state_covariance) {
+    static ceres::CostFunction* Create(const Sophus::SE3d& prior_T, const double& roll, const double &pitch, const Eigen::Matrix4d& state_covariance) {
         return new ceres::AutoDiffCostFunction<PriorResidual, 4, 4>(
-            new PriorResidual(prior_state, state_covariance));
+            new PriorResidual(prior_T, roll, pitch, state_covariance));
     }
 
 private:
 
-
     template <typename T>
-    T normalize_angle(const T& angle) const {
-        T normalized_angle = angle;
-        while (normalized_angle > T(M_PI)) normalized_angle -= T(2.0 * M_PI);
-        while (normalized_angle < T(-M_PI)) normalized_angle += T(2.0 * M_PI);
-        return normalized_angle;
+    Sophus::SE3<T> buildTransformationSE3(const T* state, double roll, double pitch) const {
+        // Extract translation
+        Eigen::Matrix<T, 3, 1> t;
+        t << state[0], state[1], state[2];
+        // Build rotation from yaw, with fixed roll and pitch
+        Eigen::Matrix<T, 3, 3> R = (Eigen::AngleAxis<T>(state[3], Eigen::Matrix<T, 3, 1>::UnitZ()) *
+                                    Eigen::AngleAxis<T>(T(pitch), Eigen::Matrix<T, 3, 1>::UnitY()) *
+                                    Eigen::AngleAxis<T>(T(roll),  Eigen::Matrix<T, 3, 1>::UnitX())).toRotationMatrix();
+        // Return the Sophus SE3 object
+        return Sophus::SE3<T>(R, t);
     }
 
-    const Eigen::Vector4d prior_state_;
+    const Sophus::SE3d prior_T_;
+    const double roll_, pitch_;
     const Eigen::Matrix4d state_covariance_;
 };
 
@@ -1199,23 +1191,20 @@ private:
 // Residual to enforce that the relative transform between nodes 
 // (computed from the states) is close to the measured relative transform from scan matching.
 struct ICPResidual {
-    ICPResidual(const Eigen::Matrix4d& T_icp, const double& fitness, double roll_t, double roll_s, double pitch_t, double pitch_s)
+    ICPResidual(const Sophus::SE3d& T_icp, const double& fitness, double roll_t, double roll_s, double pitch_t, double pitch_s)
         : T_icp_(T_icp), fitness_(fitness), roll_t_(roll_t), roll_s_(roll_s), pitch_t_(pitch_t), pitch_s_(pitch_s) {}
 
     template <typename T>
     bool operator()(const T* const state_source, const T* const state_target, T* residual) const {
         // Build homogeneous transforms from state_i and state_j.
         // Here we assume states are 4-vectors: [x,y,z,yaw]. (Roll and pitch are fixed.)
-        Eigen::Matrix<T, 4, 4> w_T_s = buildTransformationMatrix(state_source, roll_s_, pitch_s_);
-        Eigen::Matrix<T, 4, 4> w_T_t = buildTransformationMatrix(state_target, roll_t_, pitch_t_);
+        Sophus::SE3<T> w_T_s = buildTransformationSE3(state_source, roll_s_, pitch_s_);
+        Sophus::SE3<T> w_T_t = buildTransformationSE3(state_target, roll_t_, pitch_t_);
         // Compute the predicted relative transform from node i to node j.
-        Eigen::Matrix<T, 4, 4> T_pred = w_T_t.inverse() * w_T_s;
-
-        Eigen::Matrix<T, 4, 4> T_meas = T_icp_.template cast<T>();
+        Sophus::SE3<T> SE3_pred = w_T_t.inverse() * w_T_s;
 
         // Create Sophus SE3 objects from the 4x4 matrices.
-        Sophus::SE3<T> SE3_pred(T_pred);
-        Sophus::SE3<T> SE3_meas(T_meas);
+        Sophus::SE3<T> SE3_meas = T_icp_.template cast<T>();
 
         // Compute the error transformation: T_err = T_meas^{-1} * T_pred.
         Sophus::SE3<T> T_err = SE3_meas.inverse() * SE3_pred;
@@ -1241,7 +1230,7 @@ struct ICPResidual {
         return true;
     }
 
-    static ceres::CostFunction* Create(const Eigen::Matrix4d& T_icp, 
+    static ceres::CostFunction* Create(const Sophus::SE3d& T_icp, 
                                         const double& fitness,
                                         double roll_t, double roll_s,
                                         double pitch_t, double pitch_s) {
@@ -1251,32 +1240,20 @@ struct ICPResidual {
 
     private:
 
-        // Helper: build a 4x4 homogeneous transformation from a state vector [x,y,z,yaw].
         template <typename T>
-        static Eigen::Matrix<T, 4, 4> buildTransformationMatrix(const T* state, double roll, double pitch) {
-            T x = state[0], y = state[1], z = state[2], yaw = state[3];
-            
-            Eigen::Matrix<T, 3, 3> R;
-            R = Eigen::AngleAxis<T>(yaw, Eigen::Matrix<T, 3, 1>::UnitZ()) *
-                Eigen::AngleAxis<T>(T(pitch), Eigen::Matrix<T, 3, 1>::UnitY()) *
-                Eigen::AngleAxis<T>(T(roll), Eigen::Matrix<T, 3, 1>::UnitX());
-
-            Eigen::Matrix<T, 4, 4> Tmat = Eigen::Matrix<T, 4, 4>::Identity();
-            Tmat.template block<3, 3>(0, 0) = R;
-            Tmat(0, 3) = x; Tmat(1, 3) = y; Tmat(2, 3) = z;
-
-            return Tmat;
-        }
-
-        template <typename T>
-        T normalize_angle(const T& angle) const {
-            T normalized_angle = angle;
-            while (normalized_angle > T(M_PI)) normalized_angle -= T(2.0 * M_PI);
-            while (normalized_angle < T(-M_PI)) normalized_angle += T(2.0 * M_PI);
-            return normalized_angle;
+        Sophus::SE3<T> buildTransformationSE3(const T* state, double roll, double pitch) const {
+            // Extract translation
+            Eigen::Matrix<T, 3, 1> t;
+            t << state[0], state[1], state[2];
+            // Build rotation from yaw, with fixed roll and pitch
+            Eigen::Matrix<T, 3, 3> R = (Eigen::AngleAxis<T>(state[3], Eigen::Matrix<T, 3, 1>::UnitZ()) *
+                                        Eigen::AngleAxis<T>(T(pitch), Eigen::Matrix<T, 3, 1>::UnitY()) *
+                                        Eigen::AngleAxis<T>(T(roll),  Eigen::Matrix<T, 3, 1>::UnitX())).toRotationMatrix();
+            // Return the Sophus SE3 object
+            return Sophus::SE3<T>(R, t);
         }
         
-        const Eigen::Matrix4d T_icp_;
+        const Sophus::SE3d T_icp_;
         const double fitness_;
         const double roll_t_, roll_s_;
         const double pitch_t_, pitch_s_;
@@ -1303,8 +1280,8 @@ struct ICPResidual {
     std::shared_ptr<tf2_ros::TransformListener> tf_listener_uav_;
 
     //Lidar and radar positions
-    Eigen::Matrix4d T_uav_lidar_, T_agv_lidar_;
-    Eigen::Matrix4d T_uav_radar_, T_agv_radar_;
+    Sophus::SE3d T_uav_lidar_, T_agv_lidar_;
+    Sophus::SE3d T_uav_radar_, T_agv_radar_;
 
     //Measurements
     pcl::PointCloud<pcl::PointXYZ>::Ptr uav_cloud_{new pcl::PointCloud<pcl::PointXYZ>};
