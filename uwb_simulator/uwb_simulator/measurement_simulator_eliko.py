@@ -12,10 +12,10 @@ import tf2_ros
 from tf2_ros import TransformException
 from tf2_ros.buffer import Buffer
 from tf2_ros.transform_listener import TransformListener
-from geometry_msgs.msg import TransformStamped, QuaternionStamped
+from geometry_msgs.msg import TransformStamped, QuaternionStamped, PoseWithCovarianceStamped
 from std_msgs.msg import Float32, Float32MultiArray
 from visualization_msgs.msg import Marker, MarkerArray  # Import Marker messages
-from eliko_messages.msg import Distances, DistancesList, TransformStampedWithCovariance
+from eliko_messages.msg import Distances, DistancesList
 import time
 
 
@@ -61,7 +61,7 @@ class MeasurementSimulatorEliko(Node):
 
         self.uav_gt_markers = MarkerArray()
         self.arco_gt_markers = MarkerArray()
-        self.uav_opt_markers = MarkerArray()
+        self.opt_markers = MarkerArray()
 
         self.translation_errors = []
         self.rotation_errors = []
@@ -78,6 +78,7 @@ class MeasurementSimulatorEliko(Node):
         # Publishers for RViz markers
         #apply transform to most recent point
         self.opt_target_marker_pub = self.create_publisher(MarkerArray, 'visualization/opt_target_marker', 1)
+
         #to apply transform globally to all points in source window
         self.global_opt_target_marker_pub = self.create_publisher(MarkerArray, 'visualization/global_opt_target_marker', 1)
 
@@ -89,17 +90,41 @@ class MeasurementSimulatorEliko(Node):
         self.timer_att = self.create_timer(1./self.rate, self.on_timer_att)
         
         self.timer_gt = self.create_timer(1./self.rate, self.on_timer_gt)
-        self.agv_transforms = []  # List to store AGV transforms (w_T_s)
+        self.agv_transforms = self.uav_transforms = []  # List to store AGV transforms (w_T_s)
         self.sliding_window_duration = 5.0  # Sliding window duration in seconds
    
 
         self.optimized_tf_sub = self.create_subscription(
-            TransformStampedWithCovariance,
+            PoseWithCovarianceStamped,
             'eliko_optimization_node/optimized_T',
             self.optimized_tf_cb,
             10)
         self.optimized_tf_sub  # prevent unused variable warning
 
+
+    def pose_msg_to_matrix(self, pose):
+        # Extract translation
+        tx = pose.position.x
+        ty = pose.position.y
+        tz = pose.position.z
+        
+        # Extract quaternion
+        qx = pose.orientation.x
+        qy = pose.orientation.y
+        qz = pose.orientation.z
+        qw = pose.orientation.w
+        
+        transformation_matrix = np.eye(4)
+        # Convert quaternion to a rotation matrix
+        rotation_matrix = R.from_quat([qx, qy, qz, qw]).as_matrix()
+        
+        # Add translation to the rotation matrix
+        transformation_matrix[:3,:3] = rotation_matrix
+        transformation_matrix[0, 3] = tx
+        transformation_matrix[1, 3] = ty
+        transformation_matrix[2, 3] = tz
+        
+        return transformation_matrix
 
 
     def transform_stamped_to_matrix(self, transform_stamped):
@@ -126,7 +151,7 @@ class MeasurementSimulatorEliko(Node):
         
         return transformation_matrix
 
-    def matrix_to_transform_stamped(self, matrix, frame_id="world", child_frame_id="uav_opt", stamp=None):
+    def matrix_to_transform_stamped(self, matrix, frame_id, child_frame_id, stamp=None):
         
         # Create a TransformStamped message
         transform_stamped = TransformStamped()
@@ -207,8 +232,7 @@ class MeasurementSimulatorEliko(Node):
 
     def optimized_tf_cb(self, msg):
 
-        that_ts_msg = msg.transform
-        That_t_s = self.transform_stamped_to_matrix(that_ts_msg)
+        That_t_s = self.pose_msg_to_matrix(msg.pose.pose)
 
         try:
                                          
@@ -222,23 +246,34 @@ class MeasurementSimulatorEliko(Node):
                     'agv_gt',
                     rclpy.time.Time())
                 
+                # Get the AGV transform (w_T_s) --odometry, not gt
                 odom_source = self.tf_buffer.lookup_transform(
-                    'world',
-                    'agv_odom',
+                    'world', 
+                    'agv_odom', 
+                    rclpy.time.Time())
+                
+                # Get the AGV transform (w_T_s) --odometry, not gt
+                odom_target = self.tf_buffer.lookup_transform(
+                    'world', 
+                    'uav_odom', 
                     rclpy.time.Time())
                                 
                 T_w_s = self.transform_stamped_to_matrix(gt_source)
                 T_w_t = self.transform_stamped_to_matrix(gt_target)
                 T_w_s_odom = self.transform_stamped_to_matrix(odom_source)
+                T_w_t_odom = self.transform_stamped_to_matrix(odom_target)
 
                 That_w_t_odom = T_w_s_odom  @ np.linalg.inv(That_t_s) #I am applying the transform to the odometry source, not gt -for visualization
+                That_w_s_odom = T_w_t_odom @ That_t_s
                          
                 detR, dett, rmse_R, rmse_t = self.compute_transformation_errors(T_w_s, #errors are computed wrt gt
                                                                 T_w_t, 
                                                                 That_t_s)
                 
-                opt_target = self.matrix_to_transform_stamped(That_w_t_odom, "world", "uav_opt", that_ts_msg.header.stamp)   
-                self.create_marker(opt_target, self.uav_opt_markers, "world", "uav_opt_marker", [0.0, 0.0, 1.0])
+                opt_target_uav = self.matrix_to_transform_stamped(That_w_t_odom, "world", "uav_opt", msg.header.stamp)   
+                self.create_marker(opt_target_uav, self.opt_markers, "world", "uav_opt_marker", [0.0, 0.0, 1.0])
+                opt_target_agv = self.matrix_to_transform_stamped(That_w_s_odom, "world", "agv_opt", msg.header.stamp)   
+                self.create_marker(opt_target_agv, self.opt_markers, "world", "agv_opt_marker", [0.0, 0.0, 1.0])
                 
                 self.create_marker(gt_target, self.uav_gt_markers, "world", "uav_gt_marker", [0.0, 1.0, 0.0])
                 self.create_marker(gt_source, self.arco_gt_markers, "world", "arco_gt_marker", [1.0, 0.0, 0.0])
@@ -249,7 +284,7 @@ class MeasurementSimulatorEliko(Node):
                 # Publish the MarkerArrays
                 self.gt_source_marker_pub.publish(self.arco_gt_markers)
                 self.gt_target_marker_pub.publish(self.uav_gt_markers)
-                self.opt_target_marker_pub.publish(self.uav_opt_markers)
+                self.opt_target_marker_pub.publish(self.opt_markers)
 
                 #Publish metrics
                 self.error_publisher.publish(metrics)
@@ -268,7 +303,7 @@ class MeasurementSimulatorEliko(Node):
     def global_transform_trajectory(self, That_t_s):
 
         # Compute w_That_t for each w_T_s in the sliding window
-        transformed_points = []
+        transformed_points_agv = []
         for agv_transform in self.agv_transforms:
             w_T_s_odom = self.transform_stamped_to_matrix(agv_transform)
 
@@ -276,19 +311,33 @@ class MeasurementSimulatorEliko(Node):
             w_That_t = w_T_s_odom @ np.linalg.inv(That_t_s)
 
             # Store the result for visualization
-            transformed_points.append({
+            transformed_points_agv.append({
                 'timestamp': agv_transform.header.stamp,
                 'transform': w_That_t
             })
 
-        uav_opt_markers = MarkerArray()
+        # Compute w_That_t for each w_T_s in the sliding window
+        transformed_points_uav = []
+        for uav_transform in self.uav_transforms:
+            w_T_t_odom = self.transform_stamped_to_matrix(uav_transform)
+
+            # Compute w_That_t = w_T_s * np.linalg.inv(t_That_s)
+            w_That_s = w_T_t_odom @ That_t_s
+
+            # Store the result for visualization
+            transformed_points_agv.append({
+                'timestamp': uav_transform.header.stamp,
+                'transform': w_That_s
+            })
+
+        opt_markers = MarkerArray()
         # Publish transformed points as markers
-        for point in transformed_points:
+        for point in transformed_points_agv:
             marker = Marker()
             marker.header.frame_id = "world"
             marker.header.stamp = point['timestamp']
             marker.ns = "transformed_points"
-            marker.id = len(uav_opt_markers.markers)
+            marker.id = len(opt_markers.markers)
             marker.type = Marker.SPHERE
             marker.action = Marker.ADD
 
@@ -304,9 +353,32 @@ class MeasurementSimulatorEliko(Node):
             marker.color.b = 1.0
             marker.color.a = 0.8
 
-            uav_opt_markers.markers.append(marker)
+            opt_markers.markers.append(marker)
+
+        for point in transformed_points_uav:
+            marker = Marker()
+            marker.header.frame_id = "world"
+            marker.header.stamp = point['timestamp']
+            marker.ns = "transformed_points"
+            marker.id = len(opt_markers.markers)
+            marker.type = Marker.SPHERE
+            marker.action = Marker.ADD
+
+            marker.pose.position.x = point['transform'][0][3]
+            marker.pose.position.y = point['transform'][1][3]
+            marker.pose.position.z = point['transform'][2][3]
+            marker.scale.x = 0.05
+            marker.scale.y = 0.05
+            marker.scale.z = 0.05
+
+            marker.color.r = 0.5
+            marker.color.g = 0.25
+            marker.color.b = 1.0
+            marker.color.a = 0.8
+
+            opt_markers.markers.append(marker)
         
-        self.global_opt_target_marker_pub.publish(uav_opt_markers)
+        self.global_opt_target_marker_pub.publish(opt_markers)
                                             
         
     def on_timer_att(self):
@@ -341,14 +413,27 @@ class MeasurementSimulatorEliko(Node):
                 'world', 
                 'agv_odom', 
                 rclpy.time.Time())
+            
+            # Get the AGV transform (w_T_s) --odometry, not gt
+            uav_transform = self.tf_buffer.lookup_transform(
+                'world', 
+                'uav_odom', 
+                rclpy.time.Time())
 
             # Store the transform with a timestamp
             self.agv_transforms.append(agv_transform)
+            self.uav_transforms.append(uav_transform)
 
             # Remove old transforms that are outside the sliding window duration
             self.agv_transforms = [
                 t for t in self.agv_transforms
                 if (rclpy.time.Time.from_msg(agv_transform.header.stamp).nanoseconds - rclpy.time.Time.from_msg(t.header.stamp).nanoseconds) / 1e9 <= self.sliding_window_duration
+            ]
+
+            # Remove old transforms that are outside the sliding window duration
+            self.uav_transforms = [
+                t for t in self.uav_transforms
+                if (rclpy.time.Time.from_msg(uav_transform.header.stamp).nanoseconds - rclpy.time.Time.from_msg(t.header.stamp).nanoseconds) / 1e9 <= self.sliding_window_duration
             ]
 
         except TransformException as ex:

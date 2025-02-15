@@ -15,7 +15,7 @@
 #include "eliko_messages/msg/anchor_coords_list.hpp"
 #include "eliko_messages/msg/tag_coords_list.hpp"
 
-#include "eliko_messages/msg/transform_stamped_with_covariance.hpp"
+#include "geometry_msgs/msg/pose_with_covariance_stamped.hpp"
 
 #include <ceres/ceres.h>
 #include <ceres/rotation.h>
@@ -143,22 +143,22 @@ public:
     agv_odom_sub_ = this->create_subscription<nav_msgs::msg::Odometry>(
     odom_topic_agv, 10, std::bind(&ElikoGlobalOptNode::agv_odom_cb_, this, std::placeholders::_1));
     
-    // //Option 2: get odometry through tf readings -> only transform
-    // odom_tf_agv_s_ = "arco/eliko"; //source "agv_odom"
-    // odom_tf_agv_t_ = "arco/odom"; //target "world"
-    // odom_tf_uav_s_ = "odom"; // "uav_odom"
-    // odom_tf_uav_t_ = "world"; //"world"
+    //Option 2: get odometry through tf readings -> only transform
+    odom_tf_agv_s_ = "agv_odom"; //source "agv_odom"
+    odom_tf_agv_t_ = "world"; //target "world"
+    odom_tf_uav_s_ = "uav_odom"; // "uav_odom"
+    odom_tf_uav_t_ = "world"; //"world"
 
-    // // Set up transform listener for UAV odometry.
-    // tf_buffer_uav_ = std::make_shared<tf2_ros::Buffer>(this->get_clock());
-    // tf_listener_uav_ = std::make_shared<tf2_ros::TransformListener>(*tf_buffer_uav_);
+    // Set up transform listener for UAV odometry.
+    tf_buffer_uav_ = std::make_shared<tf2_ros::Buffer>(this->get_clock());
+    tf_listener_uav_ = std::make_shared<tf2_ros::TransformListener>(*tf_buffer_uav_);
 
-    // // Set up transform listener for AGV odometry.
-    // tf_buffer_agv_ = std::make_shared<tf2_ros::Buffer>(this->get_clock());
-    // tf_listener_agv_ = std::make_shared<tf2_ros::TransformListener>(*tf_buffer_agv_);
+    // Set up transform listener for AGV odometry.
+    tf_buffer_agv_ = std::make_shared<tf2_ros::Buffer>(this->get_clock());
+    tf_listener_agv_ = std::make_shared<tf2_ros::TransformListener>(*tf_buffer_agv_);
     
     // Create publisher/broadcaster for optimized transformation
-    tf_publisher_ = this->create_publisher<eliko_messages::msg::TransformStampedWithCovariance>("eliko_optimization_node/optimized_T", 10);
+    tf_publisher_ = this->create_publisher<geometry_msgs::msg::PoseWithCovarianceStamped>("eliko_optimization_node/optimized_T", 10);
     tf_broadcaster_ = std::make_shared<tf2_ros::TransformBroadcaster>(this);
 
     global_opt_window_s_ = 5.0; //size of the sliding window in seconds
@@ -170,10 +170,6 @@ public:
     global_optimization_timer_ = this->create_wall_timer(
             std::chrono::milliseconds(int(global_opt_rate_s_*1000)), std::bind(&ElikoGlobalOptNode::global_opt_cb_, this));
 
-    // window_opt_timer_ = this->create_wall_timer(
-    //         std::chrono::milliseconds(int(global_opt_window_s_*1000)), std::bind(&ElikoGlobalOptNode::window_opt_cb_, this));
-
-
     anchor_positions_ = {
         {"0x0009D6", {-0.32, 0.3, 0.875}}, {"0x0009E5", {0.32, -0.3, 0.875}},
         {"0x0016FA", {0.32, 0.3, 0.33}}, {"0x0016CF", {-0.32, -0.3, 0.33}}
@@ -183,8 +179,10 @@ public:
         {"0x001155", {-0.24, -0.24, -0.06}}, {"0x001397", {0.24, 0.24, -0.06}}  //{"0x001155", {-0.24, -0.24, -0.06}}, {"0x001397", {0.24, 0.24, -0.06}}
     };
 
-    eliko_frame_id_ = "agv_odom"; //frame of the eliko system-> arco/eliko, for simulation use "agv_gt" for ground truth, "agv_odom" for odometry w/ errors
-    uav_frame_id_ = "uav_opt"; //frame of the uav -> "base_link", for simulation use "uav_opt"
+    agv_odom_frame_id_ = "agv_odom"; //frame of the eliko system-> arco/eliko, for simulation use "agv_gt" for ground truth, "agv_odom" for odometry w/ errors
+    uav_odom_frame_id_ = "uav_odom"; //frame of the UAV system-> uav_gt for ground truth, "uav_odom" for odometry w/ errors
+    uav_opt_frame_id_ = "uav_opt"; 
+    agv_opt_frame_id_ = "agv_opt"; 
 
     //Initial values for state
     init_state_.state = Eigen::Vector4d(0.0, 0.0, 0.0, 0.0);
@@ -321,14 +319,16 @@ private:
         // //Read the transform (if odom topics not available)
         // try {
         //     auto transform_agv = tf_buffer_agv_->lookupTransform(odom_tf_agv_t_, odom_tf_agv_s_, rclcpp::Time(0));
-        //     agv_odom_pos_ = transformMsgToState(transform_agv);
+        //     Sophus::SE3d T_agv_odom = transformSE3FromMsg(transform_agv);
+        //     agv_odom_pos_ = transformSE3ToState(T_agv_odom);
         //     } catch (const tf2::TransformException &ex) {
         //     RCLCPP_WARN(this->get_logger(), "Could not get transform for AGV: %s", ex.what());
         //     }
 
         // try {
         //     auto transform_uav = tf_buffer_uav_->lookupTransform(odom_tf_uav_t_, odom_tf_uav_s_, rclcpp::Time(0));
-        //     uav_odom_pos_ = transformMsgToState(transform_uav);
+        //     Sophus::SE3d T_uav_odom = transformSE3FromMsg(transform_uav);
+        //     uav_odom_pos_ = transformSE3ToState(T_uav_odom);
         //     } catch (const tf2::TransformException &ex) {
         //     RCLCPP_WARN(this->get_logger(), "Could not get transform for UAV: %s", ex.what());
         //     }
@@ -370,7 +370,10 @@ private:
 
             Sophus::SE3d That_ts = build_transformation_SE3(opt_state_.roll, opt_state_.pitch, opt_state_.state);
 
-            publish_transform(That_ts.matrix(), opt_state_.covariance + predicted_motion_covariance, opt_state_.timestamp);
+            publish_transform(That_ts.inverse(), agv_odom_frame_id_, uav_opt_frame_id_, opt_state_.timestamp);
+            publish_transform(That_ts, uav_odom_frame_id_, agv_opt_frame_id_, opt_state_.timestamp);
+
+            publish_pose(That_ts, opt_state_.covariance + predicted_motion_covariance, opt_state_.timestamp, uav_odom_frame_id_, tf_publisher_);
 
         }
 
@@ -384,12 +387,6 @@ private:
         uav_distance_ = agv_distance_ = uav_angle_ = 0.0;
 
     }
-
-    // void window_opt_cb_() {
-        
-    //     init_state_ = opt_state_; 
-
-    // }
 
 
 
@@ -467,43 +464,23 @@ private:
             return smoothed_state;
     }
 
-    void publish_transform(const Eigen::Matrix4d& T, const Eigen::Matrix4d& cov, const rclcpp::Time &current_time) {
-
-
-        geometry_msgs::msg::TransformStamped that_ts_msg;
-        that_ts_msg.header.stamp = current_time;
-
-        // Extract translation
-        that_ts_msg.transform.translation.x = T(0, 3);
-        that_ts_msg.transform.translation.y = T(1, 3);
-        that_ts_msg.transform.translation.z = T(2, 3);
-
-        // Extract rotation (Convert Eigen rotation matrix to quaternion)
-        Eigen::Matrix3d rotation_matrix_that_ts = T.block<3, 3>(0, 0);
-
-        Eigen::Quaterniond q_that_ts(rotation_matrix_that_ts);
-
-        that_ts_msg.transform.rotation.x = q_that_ts.x();
-        that_ts_msg.transform.rotation.y = q_that_ts.y();
-        that_ts_msg.transform.rotation.z = q_that_ts.z();
-        that_ts_msg.transform.rotation.w = q_that_ts.w();
+    void publish_transform(const Sophus::SE3d& T, const std::string &frame_id, const std::string &child_frame_id, const rclcpp::Time &current_time) {
         
-        /*Create the inverse to publish to tf tree*/
         
-        Eigen::Matrix4d That_st = T.inverse();
-
         geometry_msgs::msg::TransformStamped that_st_msg;
-        that_st_msg.header.stamp = that_ts_msg.header.stamp;
-        that_st_msg.header.frame_id = eliko_frame_id_;  // Adjust frame_id as needed
-        that_st_msg.child_frame_id = uav_frame_id_;            // Adjust child_frame_id as needed
+        that_st_msg.header.stamp = current_time;
+        that_st_msg.header.frame_id = frame_id;  // Adjust frame_id as needed
+        that_st_msg.child_frame_id = child_frame_id;            // Adjust child_frame_id as needed
 
         // Extract translation
-        that_st_msg.transform.translation.x = That_st(0, 3);
-        that_st_msg.transform.translation.y = That_st(1, 3);
-        that_st_msg.transform.translation.z = That_st(2, 3);
+        Eigen::Vector3d translation_that_st = T.translation();
+
+        that_st_msg.transform.translation.x = translation_that_st.x();
+        that_st_msg.transform.translation.y = translation_that_st.y();
+        that_st_msg.transform.translation.z = translation_that_st.z();
 
         // Convert Eigen rotation matrix of inverse transform to tf2 Matrix3x3
-        Eigen::Matrix3d rotation_matrix_that_st = That_st.block<3, 3>(0, 0);
+        Eigen::Matrix3d rotation_matrix_that_st = T.rotationMatrix();
 
         Eigen::Quaterniond q_that_st(rotation_matrix_that_st);
 
@@ -512,33 +489,103 @@ private:
         that_st_msg.transform.rotation.z = q_that_st.z();
         that_st_msg.transform.rotation.w = q_that_st.w();
 
-        eliko_messages::msg::TransformStampedWithCovariance that_ts_cov_msg;
-        that_ts_cov_msg.transform = that_ts_msg;
-
-        //Fill in the covariance part
-        that_ts_cov_msg.covariance.layout.dim.resize(2);
-        that_ts_cov_msg.covariance.layout.dim[0].label = "rows";
-        that_ts_cov_msg.covariance.layout.dim[0].size = 4;
-        that_ts_cov_msg.covariance.layout.dim[0].stride = 4 * 4;
-        that_ts_cov_msg.covariance.layout.dim[1].label = "cols";
-        that_ts_cov_msg.covariance.layout.dim[1].size = 4;
-        that_ts_cov_msg.covariance.layout.dim[1].stride = 4;
-        that_ts_cov_msg.covariance.data.resize(4 * 4);
-
-        // Flatten the matrix
-        for (size_t i = 0; i < 4; ++i) {
-            for (size_t j = 0; j < 4; ++j) {
-                that_ts_cov_msg.covariance.data[i * 4 + j] = cov(i, j);
-            }
-        }
-
-        // Publish the estimated transform
-        tf_publisher_->publish(that_ts_cov_msg);
-
         // Broadcast the inverse transform
         tf_broadcaster_->sendTransform(that_st_msg);
     }
 
+
+    void publish_pose(const Sophus::SE3d &T, const Eigen::Matrix4d& cov4, 
+        const rclcpp::Time &current_time, const std::string &frame_id, 
+        const rclcpp::Publisher<geometry_msgs::msg::PoseWithCovarianceStamped>::SharedPtr &pub) {
+
+
+        geometry_msgs::msg::PoseWithCovarianceStamped p_msg;
+        p_msg.header.stamp = current_time;
+        p_msg.header.frame_id = frame_id;
+        
+        // Extract translation and rotation from the Sophus SE3 object.
+        Eigen::Vector3d t = T.translation();
+        p_msg.pose.pose.position.x = t.x();
+        p_msg.pose.pose.position.y = t.y();
+        p_msg.pose.pose.position.z = t.z();
+
+        Eigen::Matrix3d R = T.rotationMatrix();
+        Eigen::Quaterniond q(R);
+        p_msg.pose.pose.orientation.x = q.x();
+        p_msg.pose.pose.orientation.y = q.y();
+        p_msg.pose.pose.orientation.z = q.z();
+        p_msg.pose.pose.orientation.w = q.w();
+
+        // Build a 6x6 covariance matrix.
+        Eigen::Matrix<double, 6, 6> cov6 = Eigen::Matrix<double, 6, 6>::Zero();
+
+        // Copy translation covariance.
+        cov6.block<3, 3>(0, 0) = cov4.block<3, 3>(0, 0);
+
+        // Copy cross-covariance between translation and yaw.
+        cov6.block<3, 1>(0, 5) = cov4.block<3, 1>(0, 3);
+        cov6.block<1, 3>(5, 0) = cov4.block<1, 3>(3, 0);
+
+        // For roll and pitch (which are not estimated), set very small variances.
+        cov6(3, 3) = 1e-6;  // roll
+        cov6(4, 4) = 1e-6;  // pitch
+
+        // Set yaw variance.
+        cov6(5, 5) = cov4(3, 3);
+
+        // (Optionally, if cov4 contains nonzero cross-covariances between translation and yaw,
+        // they are already copied above. The remaining cross terms (between roll/pitch and others)
+        // remain zero.)
+
+        for (size_t i = 0; i < 6; ++i) {
+            for (size_t j = 0; j < 6; ++j) {
+            p_msg.pose.covariance[i * 6 + j] = cov6(i, j);
+            }
+        }
+
+
+        // Publish transform
+        pub->publish(p_msg);
+    }
+
+    // Convert transform matrix from ROS msg to SE3
+    Sophus::SE3d transformSE3FromMsg(const geometry_msgs::msg::TransformStamped& T_msg) {
+        
+        // Extract the translation vector.
+        Eigen::Vector3d t(
+            T_msg.transform.translation.x,
+            T_msg.transform.translation.y,
+            T_msg.transform.translation.z);
+
+        // Build the quaternion (make sure the order is correct: w, x, y, z).
+        Eigen::Quaterniond q(
+            T_msg.transform.rotation.w,
+            T_msg.transform.rotation.x,
+            T_msg.transform.rotation.y,
+            T_msg.transform.rotation.z);
+
+        // Construct the Sophus::SE3d object.
+        Sophus::SE3d T(q, t);
+
+        return T;
+    }
+
+    Eigen::Vector4d transformSE3ToState(const Sophus::SE3d& T) {
+        // Extract translation.
+        Eigen::Vector3d t = T.translation();
+        
+        // Extract rotation matrix.
+        Eigen::Matrix3d R = T.rotationMatrix();
+        
+        // Compute yaw from the rotation matrix.
+        double yaw = std::atan2(R(1,0), R(0,0));
+        
+        // Pack x, y, z and yaw into a 4D state vector.
+        Eigen::Vector4d state;
+        state << t[0], t[1], t[2], yaw;
+        
+        return state;
+    }
 
     Sophus::SE3d build_transformation_SE3(double roll, double pitch, const Eigen::Vector4d& s) {
         Eigen::Vector3d t(s[0], s[1], s[2]);  // Use Vector3d instead of an incorrect Matrix type.
@@ -546,30 +593,6 @@ private:
                              Eigen::AngleAxisd(pitch, Eigen::Vector3d::UnitY()) *
                              Eigen::AngleAxisd(roll,  Eigen::Vector3d::UnitX())).toRotationMatrix();
         return Sophus::SE3d(R, t);
-    }
-
-    // Converts a TransformStamped message to an Eigen::Matrix4d.
-    Eigen::Vector4d transformMsgToState(const geometry_msgs::msg::TransformStamped &msg) {
-
-        double qw = msg.transform.rotation.w;
-        double qx = msg.transform.rotation.x;
-        double qy = msg.transform.rotation.y;
-        double qz = msg.transform.rotation.z;
-
-        // Compute yaw.
-        double siny_cosp = 2.0 * (qw * qz + qx * qy);
-        double cosy_cosp = 1.0 - 2.0 * (qy * qy + qz * qz);
-        double yaw = std::atan2(siny_cosp, cosy_cosp);
-
-        // Assign the position and yaw to a 4D vector.
-        Eigen::Vector4d odom_pos = Eigen::Vector4d(
-            msg.transform.translation.x,
-            msg.transform.translation.y,
-            msg.transform.translation.z,
-            yaw
-        );
-
-        return odom_pos;
     }
 
 
@@ -804,13 +827,13 @@ private:
     rclcpp::Subscription<nav_msgs::msg::Odometry>::SharedPtr agv_odom_sub_;
     
     // Timers
-    rclcpp::TimerBase::SharedPtr global_optimization_timer_, window_opt_timer_;
+    rclcpp::TimerBase::SharedPtr global_optimization_timer_;
 
 
     std::deque<Measurement> global_measurements_;
     
     // Publishers/Broadcasters
-    rclcpp::Publisher<eliko_messages::msg::TransformStampedWithCovariance>::SharedPtr tf_publisher_;
+    rclcpp::Publisher<geometry_msgs::msg::PoseWithCovarianceStamped>::SharedPtr tf_publisher_;
     std::shared_ptr<tf2_ros::TransformBroadcaster> tf_broadcaster_;
 
 
@@ -824,7 +847,7 @@ private:
     std::unordered_map<std::string, Eigen::Vector3d> anchor_positions_;
     std::unordered_map<std::string, Eigen::Vector3d> tag_positions_;
 
-    std::string eliko_frame_id_, uav_frame_id_;
+    std::string agv_odom_frame_id_, uav_odom_frame_id_, uav_opt_frame_id_, agv_opt_frame_id_;
     std::string odom_tf_agv_s_, odom_tf_agv_t_;
     std::string odom_tf_uav_s_, odom_tf_uav_t_;
 
