@@ -23,6 +23,9 @@
   <depend>eliko_messages</depend>
   <depend>ceres</depend>
   <depend>sophus</depend>
+  <depend>small_gicp</depend>
+  <depend>OpenMP</depend>
+
 
   <depend>pcl_ros</depend>
   <depend>pcl_conversions</depend>

@@ -21,9 +21,19 @@
 #include <pcl/point_types.h>
 #include <pcl/filters/voxel_grid.h>
 #include <pcl/registration/icp.h>
+#include <pcl/registration/gicp.h>
+
 #include <pcl/common/transforms.h>
 #include <pcl/features/normal_3d.h>
 #include <pcl/registration/transformation_estimation_point_to_plane.h>
+
+/// @brief Basic point cloud registration example with PCL interfaces
+#include <small_gicp/pcl/pcl_point.hpp>
+#include <small_gicp/pcl/pcl_point_traits.hpp>
+#include <small_gicp/pcl/pcl_registration.hpp>
+#include <small_gicp/util/downsampling_omp.hpp>
+#include <small_gicp/benchmark/read_points.hpp>
+
 
 #include "eliko_messages/msg/distances_list.hpp"
 #include "eliko_messages/msg/anchor_coords_list.hpp"
@@ -48,7 +58,7 @@
 // Include the service header (adjust the package name accordingly)
 #include "uwb_localization/srv/update_point_clouds.hpp"  
 using UpdatePointClouds = uwb_localization::srv::UpdatePointClouds;
-
+using namespace small_gicp;
 
 
 struct State {
@@ -223,7 +233,7 @@ public:
 
     global_opt_window_s_ = 5.0; //size of the sliding window in seconds
     global_opt_rate_s_ = 0.2 * global_opt_window_s_; //rate of the optimization
-    min_keyframes_ = 2.0; //number of nodes to run optimization
+    min_keyframes_ = 3.0; //number of nodes to run optimization
 
     T_uav_lidar_ = build_transformation_SE3(0.0,0.0, Eigen::Vector4d(0.21,0.0,0.25,0.0));
     T_agv_lidar_ = build_transformation_SE3(3.14,0.0, Eigen::Vector4d(0.3,0.0,0.45,0.0));
@@ -247,9 +257,11 @@ public:
     last_uav_vel_initialized_ = false;
     agv_odom_pos_ = Eigen::Vector4d::Zero();
 
-    point_to_plane_ = true;
+    //Set ICP algorithm variant: 2->Generalized ICP, 1->Point to Plane ICP, else -> basic ICP
+    icp_type_ = 2;
+
     relative_pose_available_ = false;
-            
+    global_optimization_ = false;            
 
     RCLCPP_INFO(this->get_logger(), "Eliko Optimization Node initialized.");
   }
@@ -470,25 +482,29 @@ private:
         new_measurements.agv_pitch = 0.0;
         new_measurements.uav_roll = uav_roll_;
         new_measurements.uav_pitch = uav_pitch_;
-        *(new_measurements.agv_scan) = *(downsamplePointCloud(agv_cloud_, 0.05f));
-        *(new_measurements.uav_scan) = *(downsamplePointCloud(uav_cloud_, 0.05f));
+        *(new_measurements.agv_scan) = *(downsamplePointCloud(agv_cloud_, 0.1f));
+        *(new_measurements.uav_scan) = *(downsamplePointCloud(uav_cloud_, 0.1f));
         new_measurements.agv_odom = agv_odom_pos_;
         new_measurements.agv_odom_covariance = agv_odom_covariance_;
         new_measurements.uav_odom = uav_odom_pos_;
         new_measurements.uav_odom_covariance = agv_odom_covariance_ * cov;
 
         local_pose_graph_.measurements.push_back(new_measurements);
-        global_pose_graph_.measurements.push_back(new_measurements);
-
 
         // Create a new AGV node from the current odometry.
         State new_agv;
         new_agv.timestamp = current_time;
-        new_agv.state = agv_odom_pos_;
-        new_agv.covariance = Eigen::Matrix4d::Identity();
+        if(local_pose_graph_.agv_states.size() < min_keyframes_){
+            new_agv.state = new_measurements.agv_odom;
+            new_agv.covariance = new_measurements.agv_odom_covariance;
+        }
+        else{
+
+            new_agv.state = local_pose_graph_.agv_states.back().state;
+            new_agv.covariance = local_pose_graph_.agv_states.back().covariance;
+        }
         
         local_pose_graph_.agv_states.push_back(new_agv);
-        global_pose_graph_.agv_states.push_back(new_agv);
 
         RCLCPP_INFO(this->get_logger(), "Adding new AGV node at timestamp %.2f: [%f, %f, %f, %f]", current_time.seconds(),
                         new_agv.state[0], new_agv.state[1], new_agv.state[2], new_agv.state[3]);
@@ -497,13 +513,18 @@ private:
         // Similarly, create a new UAV node.
         State new_uav;  
         new_uav.timestamp = current_time;
-        //Now that there is a new relative tf, and there as been enough displacement, we can optimize
-        Sophus::SE3d pred_That_uav_w = transformSE3FromPoseMsg(opt_relative_pose_.pose.pose)*(build_transformation_SE3(0.0,0.0,agv_odom_pos_).inverse());
-        new_uav.state = transformSE3ToState(pred_That_uav_w.inverse());
-        new_uav.covariance = Eigen::Matrix4d::Identity();
+        if(local_pose_graph_.uav_states.size() < min_keyframes_){
+            Sophus::SE3d pred_That_uav_w = transformSE3FromPoseMsg(opt_relative_pose_.pose.pose)*(build_transformation_SE3(0.0,0.0,agv_odom_pos_).inverse());
+            new_uav.state = transformSE3ToState(pred_That_uav_w.inverse());
+            new_uav.covariance = new_measurements.uav_odom_covariance;
+        }
+        else{
+
+            new_uav.state = local_pose_graph_.uav_states.back().state;
+            new_uav.covariance = local_pose_graph_.uav_states.back().covariance;
+        }
         
         local_pose_graph_.uav_states.push_back(new_uav);
-        global_pose_graph_.uav_states.push_back(new_uav);
    
         RCLCPP_INFO(this->get_logger(), "Adding new UAV node at timestamp %.2f: [%f, %f, %f, %f]", current_time.seconds(),
                         new_uav.state[0], new_uav.state[1], new_uav.state[2], new_uav.state[3]);
@@ -533,6 +554,13 @@ private:
         // Remove old nodes outside the sliding window in the local graph. There is the same number for uav, agv and transform, as they come in triplets
         while (!local_pose_graph_.agv_states.empty() &&
                (current_time - local_pose_graph_.agv_states.front().timestamp).seconds() > global_opt_window_s_) {
+            
+            //Add these nodes to the global graph
+            global_pose_graph_.agv_states.push_back(local_pose_graph_.agv_states.front());
+            global_pose_graph_.uav_states.push_back(local_pose_graph_.uav_states.front());
+            global_pose_graph_.measurements.push_back(local_pose_graph_.measurements.front());
+
+            //Remove them from the local graph
             local_pose_graph_.agv_states.pop_front();
             local_pose_graph_.uav_states.pop_front();
             local_pose_graph_.measurements.pop_front();
@@ -540,7 +568,14 @@ private:
         }
 
         //Check if we have enough KFs for each robot
-        if(local_pose_graph_.uav_states.size() > min_keyframes_ || local_pose_graph_.agv_states.size() > min_keyframes_){
+        size_t local_graph_nodes = std::min(local_pose_graph_.uav_states.size(), local_pose_graph_.agv_states.size());
+
+        //Update the new relative transform for all the previous nodes in the window
+        for(size_t i = 0; i < local_graph_nodes - 1; ++i){
+            local_pose_graph_.measurements[i].relative_transform = local_pose_graph_.measurements.back().relative_transform;
+        }
+
+        if(local_graph_nodes >= min_keyframes_){
 
             RCLCPP_INFO(this->get_logger(), "Optimizing trajectory of %ld AGV nodes and %ld UAV nodes",
                             local_pose_graph_.agv_states.size(), local_pose_graph_.uav_states.size());
@@ -576,13 +611,6 @@ private:
                 publish_transform(That_wt, current_time, odom_tf_agv_t_, uav_frame_id_);
                 publish_pose(That_wt, uav_node.covariance, current_time, odom_tf_agv_t_, pose_uav_publisher_);
 
-                //Initialize the nodes of the global graph to these values
-                for (size_t i = 0; i < local_pose_graph_.agv_states.size(); ++i) {
-                    size_t idx = global_pose_graph_.agv_states.size() - local_pose_graph_.agv_states.size() + i;
-                    global_pose_graph_.agv_states[idx] = local_pose_graph_.agv_states[i];
-                    global_pose_graph_.uav_states[idx] = local_pose_graph_.uav_states[i];
-                }
-
             }
 
             else{
@@ -592,7 +620,8 @@ private:
         }
         
         //Check if we have enough KFs for global optimization
-        if(global_pose_graph_.uav_states.size() > min_keyframes_*3 || global_pose_graph_.agv_states.size() > min_keyframes_*3){
+        int global_graph_nodes = std::min(global_pose_graph_.uav_states.size(),  global_pose_graph_.agv_states.size());
+        if(global_optimization_ && global_graph_nodes >= min_keyframes_*3){
             
             RCLCPP_INFO(this->get_logger(), "[Eliko global_opt node] Performing global optimization with %ld Keyframes", global_pose_graph_.uav_states.size());
 
@@ -621,14 +650,18 @@ private:
         const pcl::PointCloud<pcl::PointXYZ>::ConstPtr &input_cloud,
         float leaf_size = 0.05f) // default leaf size of 5cm
     {
-        // Create a VoxelGrid filter and set the input cloud.
-        pcl::VoxelGrid<pcl::PointXYZ> voxel_filter;
-        voxel_filter.setInputCloud(input_cloud);
-        voxel_filter.setLeafSize(leaf_size, leaf_size, leaf_size);
+        // // Create a VoxelGrid filter and set the input cloud.
+        // pcl::VoxelGrid<pcl::PointXYZ> voxel_filter;
+        // voxel_filter.setInputCloud(input_cloud);
+        // voxel_filter.setLeafSize(leaf_size, leaf_size, leaf_size);
 
-        // Create a new point cloud to hold the filtered data.
-        pcl::PointCloud<pcl::PointXYZ>::Ptr output_cloud(new pcl::PointCloud<pcl::PointXYZ>);
-        voxel_filter.filter(*output_cloud);
+        // // Create a new point cloud to hold the filtered data.
+        // pcl::PointCloud<pcl::PointXYZ>::Ptr output_cloud(new pcl::PointCloud<pcl::PointXYZ>);
+        // voxel_filter.filter(*output_cloud);
+
+        //Use small_gicp library
+
+        pcl::PointCloud<pcl::PointXYZ>::Ptr output_cloud = voxelgrid_sampling_omp(*input_cloud, leaf_size);
 
         RCLCPP_DEBUG(this->get_logger(), "Pointcloud downsampled to %zu points", output_cloud->points.size());
 
@@ -637,10 +670,44 @@ private:
 
 
     bool run_icp(const pcl::PointCloud<pcl::PointXYZ>::ConstPtr &source_cloud,
-             const pcl::PointCloud<pcl::PointXYZ>::ConstPtr &target_cloud, Eigen::Matrix4f &transformation, double &fitness, const bool &point_to_plane) const {
-               
+             const pcl::PointCloud<pcl::PointXYZ>::ConstPtr &target_cloud, Eigen::Matrix4f &transformation, double &fitness, const int &icp_type) const {
+            
+        if(icp_type == 2) {
+
+            // RegistrationPCL is derived from pcl::Registration and has mostly the same interface as pcl::GeneralizedIterativeClosestPoint.
+            RegistrationPCL<pcl::PointXYZ, pcl::PointXYZ> reg;
+            reg.setNumThreads(4);
+            reg.setCorrespondenceRandomness(20);
+            reg.setMaxCorrespondenceDistance(1.0);
+            reg.setVoxelResolution(1.0);
+
+            // Set input point clouds.
+            reg.setInputTarget(target_cloud);
+            reg.setInputSource(source_cloud);
+
+            // Align point clouds.
+            auto aligned = pcl::make_shared<pcl::PointCloud<pcl::PointXYZ>>();
+            reg.align(*aligned, transformation);
+
+            // // Swap source and target and align again.
+            // // This is useful when you want to re-use preprocessed point clouds for successive registrations (e.g., odometry estimation).
+            // reg.swapSourceAndTarget();
+            // reg.align(*aligned, transformation);
+            
+            if (!reg.hasConverged()) {
+                RCLCPP_WARN(this->get_logger(), "GICP did not converge.");
+                return false;
+            }
+            
+            transformation = reg.getFinalTransformation();
+            fitness = reg.getFitnessScore();
+
+            //RCLCPP_INFO(this->get_logger(), "ICP converged with score: %f", fitness);
+
+            return true;
+        }
         
-        if(point_to_plane){
+        else if(icp_type == 1){
 
             // Compute normals and build PointNormal clouds.
             pcl::PointCloud<pcl::PointNormal>::Ptr source_with_normals = computePointNormalCloud(source_cloud, 0.1f);
@@ -656,21 +723,29 @@ private:
             icp.setInputTarget(target_with_normals);
     
             // Optionally, you can tune ICP parameters (e.g., maximum iterations, convergence criteria, etc.)
-            //icp.setMaximumIterations(50);
-            //icp.setMaxCorrespondenceDistance(0.25);
+            // Set the max correspondence distance to 5cm (e.g., correspondences with higher
+            // distances will be ignored)
+            icp.setMaxCorrespondenceDistance (0.1);
+            // Set the maximum number of iterations (criterion 1)
+            icp.setMaximumIterations (50);
+            // Set the transformation epsilon (criterion 2)
+            icp.setTransformationEpsilon (1e-8);
+            // Set the euclidean distance difference epsilon (criterion 3)
+            icp.setEuclideanFitnessEpsilon (1);
             
             pcl::PointCloud<pcl::PointNormal> aligned_cloud;
             icp.align(aligned_cloud, transformation);
 
             if (!icp.hasConverged()) {
-                //RCLCPP_INFO(this->get_logger(), "ICP converged with score: %f", icp.getFitnessScore());
                 //RCLCPP_WARN(this->get_logger(), "ICP did not converge.");
                 return false;
             }
-       
+                   
             // Get the transformation matrix
             transformation = icp.getFinalTransformation();
             fitness = icp.getFitnessScore();
+
+            //RCLCPP_INFO(this->get_logger(), "ICP converged with score: %f", fitness);
 
             return true;
         }
@@ -681,9 +756,15 @@ private:
             icp.setInputSource(source_cloud);
             icp.setInputTarget(target_cloud);
 
-            // Optionally, you can tune ICP parameters (e.g., maximum iterations, convergence criteria, etc.)
-            //icp.setMaximumIterations(50);
-            //icp.setMaxCorrespondenceDistance(0.25);
+            // Set the max correspondence distance to 5cm (e.g., correspondences with higher
+            // distances will be ignored)
+            icp.setMaxCorrespondenceDistance (0.1);
+            // Set the maximum number of iterations (criterion 1)
+            icp.setMaximumIterations (50);
+            // Set the transformation epsilon (criterion 2)
+            icp.setTransformationEpsilon (1e-8);
+            // Set the euclidean distance difference epsilon (criterion 3)
+            icp.setEuclideanFitnessEpsilon (1);
 
             pcl::PointCloud<pcl::PointXYZ>::Ptr aligned_cloud(new pcl::PointCloud<pcl::PointXYZ>);
             icp.align(*aligned_cloud, transformation);
@@ -693,11 +774,11 @@ private:
                 return false;
             }
 
-            //RCLCPP_INFO(this->get_logger(), "ICP converged with score: %f", icp.getFitnessScore());
-
             // Get the transformation matrix
             transformation = icp.getFinalTransformation();
             fitness = icp.getFitnessScore();
+
+            //RCLCPP_INFO(this->get_logger(), "ICP converged with score: %f", fitness);
 
             return true;
         }
@@ -1061,7 +1142,7 @@ private:
     // In this function we build a Ceres problem that fuses:
     // - A prior on each node and the previous.
     // - Inter-robot UWB factor linking nodes based on relative transform estimation input
-    // - Intra-robot ICP factors linking consecutive nodes.
+    // - Intra-robot ICP and odometry factors linking consecutive nodes.
     // - Inter-robot ICP factors linking nodes from the two robots.
     
     bool run_posegraph_optimization(PoseGraph &graph) {
@@ -1094,12 +1175,8 @@ private:
         for (size_t i = 0; i < num_nodes; ++i) {
             State& agv_node = agv[i];
             State& uav_node = uav[i];
-
-            Sophus::SE3d T;
-            
-            
-            //T = transformSE3FromPoseMsg(opt_relative_pose_.pose.pose); //global transform aligns all nodes in window
-            T = m[i].relative_transform; //use the latest updated for each node
+        
+            Sophus::SE3d T = m[i].relative_transform; //use the latest updated for each node
 
             //Unflatten matric to extract the covariance
             Eigen::Matrix4d cov = Eigen::Matrix4d::Zero();
@@ -1108,6 +1185,9 @@ private:
                     cov(i,j) = opt_relative_pose_.pose.covariance[i * 6 + j];
                 }
             }
+
+            RCLCPP_WARN(this->get_logger(), "Adding UWB residuals for inter-robot pairs index %ld", i);
+
 
             ceres::CostFunction* rel_cost = RelativeTransformResidual::Create(T, cov, m[i].uav_roll, m[i].uav_pitch);
             problem.AddResidualBlock(rel_cost, nullptr, agv_node.state.data(), uav_node.state.data());
@@ -1122,31 +1202,29 @@ private:
                 continue;
             }
 
-            //Get initial solution
-            Sophus::SE3d T_icp_init;
-            
-            //T_icp_init = transformSE3FromPoseMsg(opt_relative_pose_.pose.pose); //global transform aligns all nodes in window
-            T_icp_init = m[i].relative_transform; //use the latest updated for each node
+            RCLCPP_WARN(this->get_logger(), "Computing ICP for inter-robot pairs index %ld", i);
 
-            Eigen::Matrix4f T_icp = T_icp_init.matrix().cast<float>(); //Here, we lose precision
+            //Get initial solution
+            Sophus::SE3d T_icp_init = m[i].relative_transform; //use the latest updated for each node
+
+            Eigen::Matrix4f T_icp = T_icp_init.cast<float>().matrix(); //Here, we lose precision
             double fitness = 0.0;
 
-            if(!run_icp(m[i].agv_scan, m[i].uav_scan, T_icp, fitness, point_to_plane_)){
+            if(!run_icp(m[i].agv_scan, m[i].uav_scan, T_icp, fitness, icp_type_)){
                 continue;
             };
+
 
             double roll_t = m[i].uav_roll;
             double roll_s = m[i].agv_roll;
             double pitch_t = m[i].uav_pitch;
             double pitch_s = m[i].agv_pitch;
 
-            // Convert T_icp to double and re-orthogonalize to avoid Sophus complaining.
-            Eigen::Matrix4d T_icp_d = re_orthogonalize(T_icp.cast<double>());
             
             //Transform to the robots body frame, using the corrected orthogonal rotation matrix
-            Sophus::SE3d T_icp_uav_agv = T_uav_lidar_ * Sophus::SE3d(T_icp_d) * T_agv_lidar_.inverse();
+            Sophus::SE3f T_icp_uav_agv = T_uav_lidar_.cast<float>() * Sophus::SE3f(T_icp) * T_agv_lidar_.inverse().cast<float>();
 
-            //log_transformation_matrix(T_icp_uav_agv.matrix());
+            log_transformation_matrix(T_icp_uav_agv.cast<double>().matrix());
 
             ceres::CostFunction* icp_cost = ICPResidual::Create(T_icp_uav_agv, fitness, roll_t, roll_s, pitch_t, pitch_s);
             problem.AddResidualBlock(icp_cost, nullptr,
@@ -1167,6 +1245,9 @@ private:
                 Sophus::SE3d odom_T_t = build_transformation_SE3(roll_t, pitch_t, m[i+1].agv_odom);
                 Sophus::SE3d odom_T_ts = odom_T_t.inverse()*odom_T_s;
 
+                RCLCPP_WARN(this->get_logger(), "Adding odometry residuals for for AGV pairs %ld and %ld", i, i+1);
+
+
                 ceres::CostFunction* cost_odom_agv = OdometryResidual::Create(odom_T_ts, roll_t, roll_s, pitch_t, pitch_s, m[i].agv_odom_covariance);
                 problem.AddResidualBlock(cost_odom_agv, nullptr, agv[i].state.data(), agv[i+1].state.data());
 
@@ -1177,17 +1258,20 @@ private:
                     continue;
                 }
 
-                //RCLCPP_WARN(this->get_logger(), "Computing ICP for AGV nodes %ld and %ld.", i, i+1);
+                RCLCPP_WARN(this->get_logger(), "Computing ICP for AGV nodes %ld and %ld.", i, i+1);
 
-                Eigen::Matrix4f T_icp = Eigen::Matrix4f::Identity();
+                Eigen::Matrix4f T_icp = odom_T_ts.cast<float>().matrix();
                 double fitness = 0.0;
 
-                if(!run_icp(m[i].agv_scan, m[i+1].agv_scan, T_icp, fitness, point_to_plane_)){
+                if(!run_icp(m[i].agv_scan, m[i+1].agv_scan, T_icp, fitness, icp_type_)){
                     continue;
                 };
 
                 //Transform to the robots body frame
-                Sophus::SE3d T_icp_agv = T_agv_lidar_ * Sophus::SE3d(T_icp.cast<double>()) * T_agv_lidar_.inverse();
+                Sophus::SE3f T_icp_agv = T_agv_lidar_.cast<float>() * Sophus::SE3f(T_icp) * T_agv_lidar_.inverse().cast<float>();
+
+                log_transformation_matrix(T_icp_agv.cast<double>().matrix());
+
 
                 ceres::CostFunction* icp_cost = ICPResidual::Create(T_icp_agv, fitness, roll_t, roll_s, pitch_t, pitch_s);
                 problem.AddResidualBlock(icp_cost, nullptr,
@@ -1208,6 +1292,8 @@ private:
                 Sophus::SE3d odom_T_t = build_transformation_SE3(roll_t, pitch_t, m[i+1].uav_odom);
                 Sophus::SE3d odom_T_ts = odom_T_t.inverse()*odom_T_s;
 
+                RCLCPP_WARN(this->get_logger(), "Adding odometry residuals for for UAV pairs %ld and %ld", i, i+1);
+
                 ceres::CostFunction* cost_odom_uav = OdometryResidual::Create(odom_T_ts, roll_t, roll_s, pitch_t, pitch_s, m[i].uav_odom_covariance);
                 problem.AddResidualBlock(cost_odom_uav, nullptr, uav[i].state.data(), uav[i+1].state.data());
 
@@ -1217,17 +1303,20 @@ private:
                     continue;
                 }
 
-                //RCLCPP_WARN(this->get_logger(), "Computing ICP for UAV nodes %ld and %ld.", i, i+1);
 
-                Eigen::Matrix4f T_icp = Eigen::Matrix4f::Identity();
+                Eigen::Matrix4f T_icp = odom_T_ts.cast<float>().matrix();
                 double fitness = 0.0;
 
-                if(!run_icp(m[i].uav_scan, m[i+1].uav_scan, T_icp, fitness, point_to_plane_)){
+                if(!run_icp(m[i].uav_scan, m[i+1].uav_scan, T_icp, fitness, icp_type_)){
                     continue;
                 };
 
+                RCLCPP_WARN(this->get_logger(), "Computing ICP for UAV nodes %ld and %ld.", i, i+1);
+
                 //Transform to the robots body frame
-                Sophus::SE3d T_icp_uav = T_uav_lidar_ * Sophus::SE3d(T_icp.cast<double>()) * T_uav_lidar_.inverse();
+                Sophus::SE3f T_icp_uav = T_uav_lidar_.cast<float>() * Sophus::SE3f(T_icp) * T_uav_lidar_.inverse().cast<float>();
+
+                log_transformation_matrix(T_icp_uav.cast<double>().matrix());
 
                 ceres::CostFunction* icp_cost = ICPResidual::Create(T_icp_uav, fitness, roll_t, roll_s, pitch_t, pitch_s);
 
@@ -1241,7 +1330,7 @@ private:
         options.linear_solver_type = ceres::DENSE_QR; // ceres::SPARSE_NORMAL_CHOLESKY,  ceres::DENSE_QR
 
         // Logging
-        //options.minimizer_progress_to_stdout = true;
+        options.minimizer_progress_to_stdout = true;
 
         // Solve
         ceres::Solver::Summary summary;
@@ -1258,36 +1347,37 @@ private:
 
             std::vector<std::pair<const double*, const double*>> covariance_blocks;
 
-            for (size_t i = 0; i < uav.size(); ++i) {
+            size_t node_size = std::min(uav.size(), agv.size());
+
+            for (size_t i = 0; i < node_size; ++i) {
                 // Only add if this state was involved in any residual.
                 covariance_blocks.emplace_back(uav[i].state.data(),
                                             uav[i].state.data());
-                }
-            for (size_t i = 0; i < agv.size(); ++i) {
                 covariance_blocks.emplace_back(agv[i].state.data(),
                                             agv[i].state.data());
-            }
-
+                }
 
             if (covariance.Compute(covariance_blocks, &problem)) {
                 
-                for (size_t i = 0; i < uav.size(); ++i) {
-                    Eigen::Matrix4d cov = Eigen::Matrix4d::Zero();
+                for (size_t i = 0; i < node_size; ++i) {
+                    Eigen::Matrix4d cov_uav = Eigen::Matrix4d::Zero();
                     covariance.GetCovarianceBlock(uav[i].state.data(),
-                                                uav[i].state.data(), cov.data());
-                    uav[i].covariance = cov;
-                }
+                                                uav[i].state.data(), cov_uav.data());
+                    uav[i].covariance = cov_uav;
 
-                for (size_t i = 0; i < agv.size(); ++i) {
-                    Eigen::Matrix4d cov = Eigen::Matrix4d::Zero();
+                    Eigen::Matrix4d cov_agv = Eigen::Matrix4d::Zero();
                     covariance.GetCovarianceBlock(agv[i].state.data(),
-                                                agv[i].state.data(), cov.data());
-                    agv[i].covariance = cov;
+                                                agv[i].state.data(), cov_agv.data());
+                    agv[i].covariance = cov_agv;
                 }
                 
                 } else {
                 
                 RCLCPP_WARN(this->get_logger(), "Failed to compute covariance in pose graph optimization.");
+                
+                for (size_t i = 0; i < node_size; ++i) {
+                    agv[i].covariance = uav[i].covariance = Eigen::Matrix4d::Identity();
+                }
                 
                 }
 
@@ -1456,7 +1546,7 @@ private:
 // Residual to enforce that the relative transform between nodes 
 // (computed from the states) is close to the measured relative transform from scan matching.
 struct ICPResidual {
-    ICPResidual(const Sophus::SE3d& T_icp, const double& fitness, double roll_t, double roll_s, double pitch_t, double pitch_s)
+    ICPResidual(const Sophus::SE3f& T_icp, const double& fitness, double roll_t, double roll_s, double pitch_t, double pitch_s)
         : T_icp_(T_icp), fitness_(fitness), roll_t_(roll_t), roll_s_(roll_s), pitch_t_(pitch_t), pitch_s_(pitch_s) {}
 
     template <typename T>
@@ -1495,7 +1585,7 @@ struct ICPResidual {
         return true;
     }
 
-    static ceres::CostFunction* Create(const Sophus::SE3d& T_icp, 
+    static ceres::CostFunction* Create(const Sophus::SE3f& T_icp, 
                                         const double& fitness,
                                         double roll_t, double roll_s,
                                         double pitch_t, double pitch_s) {
@@ -1518,7 +1608,7 @@ struct ICPResidual {
             return Sophus::SE3<T>(R, t);
         }
         
-        const Sophus::SE3d T_icp_;
+        const Sophus::SE3f T_icp_;
         const double fitness_;
         const double roll_t_, roll_s_;
         const double pitch_t_, pitch_s_;
@@ -1557,10 +1647,11 @@ struct ICPResidual {
     //Measurements
     pcl::PointCloud<pcl::PointXYZ>::Ptr uav_cloud_{new pcl::PointCloud<pcl::PointXYZ>};
     pcl::PointCloud<pcl::PointXYZ>::Ptr agv_cloud_{new pcl::PointCloud<pcl::PointXYZ>};
-    bool point_to_plane_;
+    int icp_type_;
     bool relative_pose_available_; 
     geometry_msgs::msg::PoseWithCovarianceStamped latest_relative_pose_, opt_relative_pose_;
     double min_keyframes_;
+    bool global_optimization_;
 
     // For pose graph (multi-robot) optimization:
     PoseGraph local_pose_graph_, global_pose_graph_;
