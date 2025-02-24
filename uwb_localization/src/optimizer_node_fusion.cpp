@@ -54,13 +54,10 @@
 #include <unordered_map>
 #include <chrono>
 
-
 // Include the service header (adjust the package name accordingly)
 #include "uwb_localization/srv/update_point_clouds.hpp"  
 using UpdatePointClouds = uwb_localization::srv::UpdatePointClouds;
 using namespace small_gicp;
-
-
 
 
 struct Constraint3d {
@@ -120,7 +117,7 @@ struct Measurements {
 };
 
 
-class StateManifoldAGV : public ceres::Manifold {
+class StateManifold2D : public ceres::Manifold {
     public:
      // The ambient (parameter) space is 4: [x, y, z, yaw].
      virtual int AmbientSize() const override { return 4; }
@@ -192,7 +189,7 @@ class StateManifoldAGV : public ceres::Manifold {
    };
 
 // Custom manifold for a state in R^3 x S^1.
-class StateManifoldUAV : public ceres::Manifold {
+class StateManifold3D : public ceres::Manifold {
     public:
       // Ambient space dimension is 4.
       virtual int AmbientSize() const override { return 4; }
@@ -638,15 +635,9 @@ private:
         new_agv.timestamp = current_time;
         new_agv.roll = new_measurements.agv_roll;
         new_agv.pitch = new_measurements.agv_pitch;
-        // if(new_id_ < min_keyframes_){
-        //     new_agv.state = new_measurements.agv_odom;
-        //     new_agv.covariance = new_measurements.agv_odom_covariance;
-        // }
-        // else{
 
-            new_agv.state = global_map_[agv_id-1].state;
-            new_agv.covariance = global_map_[agv_id-1].covariance;
-        // }
+        new_agv.state = global_map_[agv_id-1].state;
+        new_agv.covariance = global_map_[agv_id-1].covariance;
         new_agv.robot_id = 0;
         
         global_map_[agv_id] = new_agv;
@@ -662,16 +653,8 @@ private:
         new_uav.roll = new_measurements.uav_roll;
         new_uav.pitch = new_measurements.uav_pitch;
 
-        // if(new_id_ < min_keyframes_ && relative_pose_available_){
-        //     Sophus::SE3d pred_That_uav_w = new_measurements.relative_transform*(build_transformation_SE3(0.0,0.0,agv_odom_pos_).inverse());
-        //     new_uav.state = transformSE3ToState(pred_That_uav_w.inverse());
-        //     new_uav.covariance = new_measurements.uav_odom_covariance;
-        // }
-        // else{
-
-            new_uav.state = global_map_[uav_id - 1].state;
-            new_uav.covariance = global_map_[uav_id-1].covariance;
-        // }
+        new_uav.state = global_map_[uav_id - 1].state;
+        new_uav.covariance = global_map_[uav_id-1].covariance;
 
         new_uav.robot_id = 1;
 
@@ -1394,8 +1377,8 @@ private:
 
         ceres::Problem problem;
 
-        ceres::Manifold* agv_state_manifold = new StateManifoldAGV;
-        ceres::Manifold* uav_state_manifold = new StateManifoldUAV;
+        ceres::Manifold* agv_state_manifold = new StateManifold2D;
+        ceres::Manifold* uav_state_manifold = new StateManifold3D;
 
         //remove the gauge freedom (i.e. the fact that an overall rigid body transform can be added to all poses without changing the relative errors).
         //anchor -freeze- the first node, and freeze the part of the node outside the sliding window
