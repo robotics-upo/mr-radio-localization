@@ -209,8 +209,8 @@ public:
     last_uav_vel_initialized_ = false;
     agv_odom_pos_ = Eigen::Vector4d::Zero();
     agv_last_odom_pos_ = Eigen::Vector4d::Zero();
-    min_traveled_distance_ = 0.1;
-    min_traveled_angle_ = 10.0 * M_PI / 180.0;
+    min_traveled_distance_ = 0.25;
+    min_traveled_angle_ = 25.0 * M_PI / 180.0;
     uav_distance_ = agv_distance_ = uav_angle_ = agv_angle_ = 0.0;
 
     odom_error_distance_ = 2.0;
@@ -244,8 +244,8 @@ private:
         );
 
         // Similarly, compute AGV translation and yaw
-        agv_distance_ += (agv_odom_pos_.head<3>() - agv_last_odom_pos_.head<3>()).norm();
-        agv_angle_ += normalize_angle(agv_odom_pos_[3] - agv_last_odom_pos_[3]); 
+        uav_distance_ += (agv_odom_pos_.head<3>() - agv_last_odom_pos_.head<3>()).norm();
+        uav_angle_ += normalize_angle(agv_odom_pos_[3] - agv_last_odom_pos_[3]); 
 
         // Extract covariance from the odometry message and store it in Eigen::Matrix4d
         uav_odom_covariance_ = Eigen::Matrix4d::Zero();

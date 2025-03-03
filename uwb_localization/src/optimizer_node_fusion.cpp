@@ -78,8 +78,9 @@ struct State {
     Eigen::Vector4d state; // [x,y,z,yaw]
     double roll;
     double pitch;
+    Sophus::SE3d pose; //full pose, with roll and pitch read from imu
     Eigen::Matrix4d covariance;
-    rclcpp::Time timestamp;  // e.g., seconds since epoch
+    rclcpp::Time timestamp; 
     int robot_id; //0 for AGV, 1 for UAV
 
     EIGEN_MAKE_ALIGNED_OPERATOR_NEW
@@ -96,97 +97,21 @@ using MapOfStates =
 struct Measurements {
     rclcpp::Time timestamp;      // The time at which the measurement was taken.
     Sophus::SE3d relative_transform;       // The measured relative transform.
+
+    Sophus::SE3d agv_odom_pose;
+    Sophus::SE3d uav_odom_pose;
     
     Eigen::Matrix4d relative_transform_covariance;
-    Eigen::Vector4d agv_odom; // [x,y,z,yaw]
-    Eigen::Matrix4d agv_odom_covariance;
-    Eigen::Vector4d uav_odom; // [x,y,z,yaw]
-    Eigen::Matrix4d uav_odom_covariance;
+    Eigen::Matrix<double, 6, 6> agv_odom_covariance;
+    Eigen::Matrix<double, 6, 6> uav_odom_covariance;
   
     // Pointer to an associated point cloud (keyframe scan).
     pcl::PointCloud<pcl::PointXYZ>::Ptr agv_scan;
     pcl::PointCloud<pcl::PointXYZ>::Ptr uav_scan;
 
-    double uav_roll;
-    double uav_pitch;
-    double agv_roll;
-    double agv_pitch;
-
      // Constructor to initialize the pointer.
      Measurements() : agv_scan(new pcl::PointCloud<pcl::PointXYZ>), uav_scan(new pcl::PointCloud<pcl::PointXYZ>) {}
 };
-
-
-class StateManifold2D : public ceres::Manifold {
-    public:
-     // The ambient (parameter) space is 4: [x, y, z, yaw].
-     virtual int AmbientSize() const override { return 4; }
-     // The tangent (update) space is 3: we update only x, y, and yaw.
-     virtual int TangentSize() const override { return 3; }
-     
-     // Plus operation: x ⊕ delta
-     // x: [x, y, z, yaw], delta: [dx, dy, dyaw]
-     virtual bool Plus(const double* x, const double* delta, double* x_plus_delta) const override {
-       // Update x and y normally.
-       x_plus_delta[0] = x[0] + delta[0];
-       x_plus_delta[1] = x[1] + delta[1];
-       // Leave z unchanged.
-       x_plus_delta[2] = x[2];
-       // Update yaw and wrap it.
-       double new_yaw = x[3] + delta[2];
-       while (new_yaw > M_PI)  new_yaw -= 2.0 * M_PI;
-       while (new_yaw < -M_PI) new_yaw += 2.0 * M_PI;
-       x_plus_delta[3] = new_yaw;
-       return true;
-     }
-     
-     // PlusJacobian: The Jacobian of Plus with respect to delta, evaluated at delta = 0.
-     // It is a 4x3 matrix (in row-major order) that should look like:
-     // [1, 0, 0;
-     //  0, 1, 0;
-     //  0, 0, 0;
-     //  0, 0, 1]
-     virtual bool PlusJacobian(const double* /*x*/, double* jacobian) const override {
-       // There are 4*3 = 12 entries.
-       for (int i = 0; i < 12; ++i) jacobian[i] = 0.0;
-       jacobian[0]  = 1.0;  // d(x)/d(dx)
-       jacobian[4]  = 1.0;  // d(y)/d(dy)  (row 1, col 1)
-       // Row 2 (z) remains zero.
-       jacobian[11] = 1.0;  // d(yaw)/d(dyaw)  (row 3, col 3)
-       return true;
-     }
-     
-     // Minus: Given two parameter vectors x and y, compute the tangent vector delta
-     // such that x ⊕ delta ≈ y. Since z is not updated, we ignore its difference.
-     virtual bool Minus(const double* y, const double* x, double* y_minus_x) const override {
-       // Difference in x and y.
-       y_minus_x[0] = y[0] - x[0];
-       y_minus_x[1] = y[1] - x[1];
-       // Do not compute a difference for z (the tangent space is 3D).
-       // Compute difference for yaw with wrapping.
-       double dtheta = y[3] - x[3];
-       while (dtheta > M_PI)  dtheta -= 2.0 * M_PI;
-       while (dtheta < -M_PI) dtheta += 2.0 * M_PI;
-       y_minus_x[2] = dtheta;
-       return true;
-     }
-     
-     // MinusJacobian: The Jacobian of Minus with respect to y.
-     // For our 3x4 matrix (3-dimensional output, 4-dimensional input), we have:
-     // [1, 0, 0, 0;
-     //  0, 1, 0, 0;
-     //  0, 0, 0, 1]
-     virtual bool MinusJacobian(const double* /*x*/, double* jacobian) const override {
-       // 3 rows x 4 columns = 12 elements, row-major order.
-       for (int i = 0; i < 12; ++i) jacobian[i] = 0.0;
-       jacobian[0]  = 1.0;  // Row0: d((y-x)_0)/d(y0)
-       // Row0: columns 1,2,3 remain 0.
-       jacobian[5]  = 1.0;  // Row1: d((y-x)_1)/d(y1)
-       // Row1: other entries 0.
-       jacobian[11] = 1.0;  // Row2: d((yaw difference))/d(y3)
-       return true;
-     }
-   };
 
 // Custom manifold for a state in R^3 x S^1.
 class StateManifold3D : public ceres::Manifold {
@@ -275,22 +200,18 @@ public:
     dji_attitude_sub_ = this->create_subscription<geometry_msgs::msg::QuaternionStamped>(
         "/dji_sdk/attitude", qos, std::bind(&FusionOptimizationNode::attitude_cb_, this, std::placeholders::_1));
 
-    // uav_odom_sub_ = this->create_subscription<nav_msgs::msg::Odometry>(
-    // odom_topic_uav, 10, std::bind(&FusionOptimizationNode::uav_odom_cb_, this, std::placeholders::_1));
-
-    // Initialize odometry positions and errors
-    uav_odom_pos_ = Eigen::Vector4d::Zero();
-    uav_last_odom_pos_ = Eigen::Vector4d::Zero();
     last_uav_vel_initialized_ = false;
-    agv_odom_pos_ = Eigen::Vector4d::Zero();
-    agv_last_odom_pos_ = Eigen::Vector4d::Zero();
 
     min_traveled_distance_ = 0.25;
     min_traveled_angle_ = 25.0 * M_PI / 180.0;
-    uav_distance_ = agv_distance_ = uav_angle_ = agv_angle_ = 0.0;
+    uav_translation_ = agv_translation_ = uav_rotation_ = agv_rotation_ = 0.0;
+    uav_translation_3d_ = Eigen::Vector3d::Zero();
 
     agv_odom_sub_ = this->create_subscription<nav_msgs::msg::Odometry>(
     odom_topic_agv, qos, std::bind(&FusionOptimizationNode::agv_odom_cb_, this, std::placeholders::_1));
+
+    // uav_odom_sub_ = this->create_subscription<nav_msgs::msg::Odometry>(
+    //     odom_topic_uav, qos, std::bind(&FusionOptimizationNode::uav_odom_cb_, this, std::placeholders::_1));
 
     uav_vel_sub_ = this->create_subscription<geometry_msgs::msg::Vector3Stamped>(
         vel_topic_uav, qos, std::bind(&FusionOptimizationNode::uav_vel_cb_, this, std::placeholders::_1));
@@ -340,6 +261,7 @@ public:
 
     T_uav_lidar_ = build_transformation_SE3(0.0,0.0, Eigen::Vector4d(0.21,0.0,0.25,0.0));
     T_agv_lidar_ = build_transformation_SE3(3.14,0.0, Eigen::Vector4d(0.3,0.0,0.45,0.0));
+    pointcloud_sigma_ = 0.05;  //5cm for lidar, 10 cm for radar
 
     global_optimization_timer_ = this->create_wall_timer(
             std::chrono::milliseconds(int(global_opt_rate_s_*1000)), std::bind(&FusionOptimizationNode::global_opt_cb_, this));
@@ -367,7 +289,7 @@ public:
 
     //Start node counter
     new_id_ = 0;
-    new_id_offset_ = 1000;
+    new_id_offset_ = 10000;
 
     global_map_[new_id_] = init_state_agv_;
     global_map_[new_id_ + new_id_offset_] = init_state_uav_;
@@ -376,7 +298,7 @@ public:
     moving_average_window_s_ = global_opt_window_s_ / 2.0;
 
     //Set ICP algorithm variant: 2->Generalized ICP, 1->Point to Plane ICP, else -> basic ICP
-    icp_type_ = 0;
+    icp_type_ = 1;
 
     relative_pose_available_ = false;
     global_optimization_ = false;            
@@ -387,34 +309,6 @@ public:
 
 private:
 
-    void uav_odom_cb_(const nav_msgs::msg::Odometry::SharedPtr msg) {
-        
-        // Extract quaternion components.
-        double qx = msg->pose.pose.orientation.x;
-        double qy = msg->pose.pose.orientation.y;
-        double qz = msg->pose.pose.orientation.z;
-        double qw = msg->pose.pose.orientation.w;
-
-        // Compute yaw.
-        double siny_cosp = 2.0 * (qw * qz + qx * qy);
-        double cosy_cosp = 1.0 - 2.0 * (qy * qy + qz * qz);
-        double yaw = std::atan2(siny_cosp, cosy_cosp);
-
-        // Assign the position and yaw to a 4D vector.
-        uav_odom_pos_ = Eigen::Vector4d(
-            msg->pose.pose.position.x,
-            msg->pose.pose.position.y,
-            msg->pose.pose.position.z,
-            yaw
-        );
-
-        // Extract covariance from the odometry message and store it in Eigen::Matrix4d
-        uav_odom_covariance_ = Eigen::Matrix4d::Zero();
-        uav_odom_covariance_(0, 0) = msg->pose.covariance[0];  // x variance
-        uav_odom_covariance_(1, 1) = msg->pose.covariance[7];  // y variance
-        uav_odom_covariance_(2, 2) = msg->pose.covariance[14]; // z variance
-        uav_odom_covariance_(3, 3) = msg->pose.covariance[35]; // yaw variance
-    }
 
     void uav_vel_cb_(const geometry_msgs::msg::Vector3Stamped::SharedPtr msg) {
         
@@ -430,61 +324,62 @@ private:
        rclcpp::Time last_time(last_uav_vel_msg_.header.stamp);
        double dt = (current_time - last_time).seconds();
        
-       // For a basic integration, assume the velocity is constant over dt.
-       Eigen::Vector3d current_vel(msg->vector.x, msg->vector.y, msg->vector.z);
-       // Update your integrated UAV odometry position (only x, y, z)
-       uav_odom_pos_.head<3>() += current_vel * dt;
-       
-       // Optionally, you can update the yaw separately from your attitude callback.
-       uav_odom_pos_[3] = uav_yaw_;
+        // Get current velocity vector.
+        Eigen::Vector3d current_vel(msg->vector.x, msg->vector.y, msg->vector.z);
 
-       // Compute UAV translational distance using only [x, y, z]
-       uav_distance_ += (uav_odom_pos_.head<3>() - uav_last_odom_pos_.head<3>()).norm();
-       // Compute UAV yaw difference and normalize it to [-pi, pi]
-       uav_angle_ += normalize_angle(uav_odom_pos_[3] - uav_last_odom_pos_[3]);
-
-       // Update last_uav_vel_msg_ for the next iteration.
-       last_uav_vel_msg_ = *msg;
-       uav_last_odom_pos_ = uav_odom_pos_;
+        Eigen::Vector3d delta_translation = current_vel * dt;
+        // Integrate to update the translation (only x, y, z).
+        uav_translation_3d_ = uav_last_odom_pose_.translation() + delta_translation;
+        
+        // Update last message time.
+        last_uav_vel_msg_ = *msg;
+        
+        // Refresh the combined UAV odometry.
+        update_uav_odometry();
 
    }
 
     void agv_odom_cb_(const nav_msgs::msg::Odometry::SharedPtr msg) {
         
-        // Extract quaternion components.
-        double qx = msg->pose.pose.orientation.x;
-        double qy = msg->pose.pose.orientation.y;
-        double qz = msg->pose.pose.orientation.z;
-        double qw = msg->pose.pose.orientation.w;
-
-        // Compute yaw.
-        double siny_cosp = 2.0 * (qw * qz + qx * qy);
-        double cosy_cosp = 1.0 - 2.0 * (qy * qy + qz * qz);
-        double yaw = std::atan2(siny_cosp, cosy_cosp);
-
-        // Assign the position and yaw to a 4D vector.
-        agv_odom_pos_ = Eigen::Vector4d(
+        Eigen::Quaterniond q(
+            msg->pose.pose.orientation.w,
+            msg->pose.pose.orientation.x,
+            msg->pose.pose.orientation.y,
+            msg->pose.pose.orientation.z
+        );
+        
+        // Create a 3D translation vector.
+        Eigen::Vector3d t(
             msg->pose.pose.position.x,
             msg->pose.pose.position.y,
-            msg->pose.pose.position.z,
-            yaw
+            msg->pose.pose.position.z
         );
+        
+        agv_odom_pose_ = Sophus::SE3d(q, t);
+        
+        // Update AGV rotational displacement.
+        // Here, we compute the relative rotation via the logarithmic map.
+        // Extract translation and rotation differences.
 
-         // Similarly, compute AGV translation and yaw
-         agv_distance_ += (agv_odom_pos_.head<3>() - agv_last_odom_pos_.head<3>()).norm();
-         agv_angle_ += normalize_angle(agv_odom_pos_[3] - agv_last_odom_pos_[3]); 
+        Eigen::Matrix<double, 6, 1> log = (agv_last_odom_pose_.inverse() * agv_odom_pose_).log();
 
-        // Extract covariance from the odometry message and store it in Eigen::Matrix4d
-        agv_odom_covariance_ = Eigen::Matrix4d::Zero();
-        agv_odom_covariance_(0, 0) = msg->pose.covariance[0];  // x variance
-        agv_odom_covariance_(1, 1) = msg->pose.covariance[7];  // y variance
-        agv_odom_covariance_(2, 2) = msg->pose.covariance[14]; // z variance
-        agv_odom_covariance_(3, 3) = msg->pose.covariance[35]; // yaw variance
+        Eigen::Vector3d delta_translation = log.head<3>(); // first three elements
+        Eigen::Vector3d delta_rotation    = log.tail<3>(); // last three elements
 
-        agv_last_odom_pos_ = agv_odom_pos_;
-
-        //RCLCPP_WARN(this->get_logger(), "Received AGV odometry.");
-
+        agv_translation_+=delta_translation.norm();
+        agv_rotation_+=delta_rotation.norm();
+        
+        // Extract and store the full 6x6 covariance matrix.
+        Eigen::Matrix<double,6,6> cov;
+        for (int i = 0; i < 6; i++) {
+            for (int j = 0; j < 6; j++) {
+                cov(i, j) = msg->pose.covariance[i * 6 + j];
+            }
+        }
+        agv_odom_covariance_ = cov;
+        
+        // Save current pose as the last pose for the next callback.
+        agv_last_odom_pose_ = agv_odom_pose_;
     }
 
 
@@ -588,8 +483,8 @@ private:
         //     RCLCPP_WARN(this->get_logger(), "Could not get transform for UAV: %s", ex.what());
         //     }
 
-        if ((uav_distance_ < min_traveled_distance_ && uav_angle_ < min_traveled_angle_) && (agv_distance_ < min_traveled_distance_ && agv_angle_ < min_traveled_angle_)) {
-            RCLCPP_WARN(this->get_logger(), "[Fusion optimization node] Insufficient movement UAV = [%.2fm %.2fº], AGV= [%.2fm %.2fº]. Skipping optimization.", uav_distance_, uav_angle_ * 180.0/M_PI, agv_distance_, agv_angle_ * 180.0/M_PI);
+        if ((uav_translation_ < min_traveled_distance_ && uav_rotation_ < min_traveled_angle_) && (agv_translation_ < min_traveled_distance_ && agv_rotation_ < min_traveled_angle_)) {
+            RCLCPP_WARN(this->get_logger(), "[Fusion optimization node] Insufficient movement UAV = [%.2fm %.2fº], AGV= [%.2fm %.2fº]. Skipping optimization.", uav_translation_, uav_rotation_ * 180.0/M_PI, agv_translation_, agv_rotation_ * 180.0/M_PI);
             return;
         }
 
@@ -598,16 +493,13 @@ private:
         Measurements new_measurements;
         new_measurements.timestamp = current_time;
 
-        new_measurements.agv_roll = 0.0;
-        new_measurements.agv_pitch = 0.0;
-        new_measurements.uav_roll = uav_roll_;
-        new_measurements.uav_pitch = uav_pitch_;
         *(new_measurements.agv_scan) = *(downsamplePointCloud(agv_cloud_, 0.05f));
         *(new_measurements.uav_scan) = *(downsamplePointCloud(uav_cloud_, 0.05f));
-        new_measurements.agv_odom = agv_odom_pos_;
         new_measurements.agv_odom_covariance = agv_odom_covariance_;
-        new_measurements.uav_odom = uav_odom_pos_;
+        new_measurements.agv_odom_pose = agv_odom_pose_;
+
         new_measurements.uav_odom_covariance = agv_odom_covariance_;
+        new_measurements.uav_odom_pose = uav_odom_pose_;
 
         //Check if there is a new relative position available
         if(relative_pose_available_){
@@ -633,10 +525,14 @@ private:
         State new_agv;
         int agv_id = new_id_;
         new_agv.timestamp = current_time;
-        new_agv.roll = new_measurements.agv_roll;
-        new_agv.pitch = new_measurements.agv_pitch;
+        Eigen::Matrix3d R_agv = new_measurements.agv_odom_pose.rotationMatrix();  // or T.so3().matrix()
+        // Compute Euler angles in ZYX order: [yaw, pitch, roll]
+        Eigen::Vector3d euler_agv = R_agv.eulerAngles(2, 1, 0);
+        new_agv.pitch = euler_agv[1];  // rotation around Y-axis
+        new_agv.roll = euler_agv[2];  // rotation around X-axis
 
         new_agv.state = global_map_[agv_id-1].state;
+        new_agv.pose = build_transformation_SE3(new_agv.roll, new_agv.pitch, new_agv.state);
         new_agv.covariance = global_map_[agv_id-1].covariance;
         new_agv.robot_id = 0;
         
@@ -650,10 +546,14 @@ private:
         State new_uav;  
         int uav_id = new_id_ + new_id_offset_;
         new_uav.timestamp = current_time;
-        new_uav.roll = new_measurements.uav_roll;
-        new_uav.pitch = new_measurements.uav_pitch;
-
+        Eigen::Matrix3d R_uav = new_measurements.uav_odom_pose.rotationMatrix();  // or T.so3().matrix()
+        // Compute Euler angles in ZYX order: [yaw, pitch, roll]
+        Eigen::Vector3d euler_uav = R_uav.eulerAngles(2, 1, 0);
+        new_uav.pitch = euler_uav[1];  // rotation around Y-axis
+        new_uav.roll = euler_uav[2];  // rotation around X-axis
         new_uav.state = global_map_[uav_id - 1].state;
+        new_uav.pose = build_transformation_SE3(new_uav.roll, new_uav.pitch, new_uav.state);
+
         new_uav.covariance = global_map_[uav_id-1].covariance;
 
         new_uav.robot_id = 1;
@@ -670,10 +570,12 @@ private:
             constraint_odom_agv.id_end = agv_id;
             constraint_odom_agv.is_uwb = false;
 
-            Sophus::SE3d odom_T_s_agv = build_transformation_SE3(prev_measurements_.agv_roll, prev_measurements_.agv_pitch, prev_measurements_.agv_odom);
-            Sophus::SE3d odom_T_t_agv = build_transformation_SE3(new_measurements.agv_roll, new_measurements.agv_pitch, new_measurements.agv_odom);
+            Sophus::SE3d odom_T_s_agv = prev_measurements_.agv_odom_pose;
+            Sophus::SE3d odom_T_t_agv = new_measurements.agv_odom_pose;
             constraint_odom_agv.t_T_s = odom_T_t_agv.inverse()*odom_T_s_agv;
-            constraint_odom_agv.covariance = new_measurements.agv_odom_covariance;
+
+            constraint_odom_agv.covariance = computeRelativeOdometryCovariance(new_measurements.agv_odom_pose, prev_measurements_.agv_odom_pose,
+                                                                                new_measurements.agv_odom_covariance, prev_measurements_.agv_odom_covariance);
 
             global_constraints_.push_back(constraint_odom_agv);
 
@@ -695,8 +597,13 @@ private:
                         //Transform to the robots body frame
                         Sophus::SE3d T_icp_agv = T_agv_lidar_ * Sophus::SE3f(T_icp).cast<double>() * T_agv_lidar_.inverse();
                         constraint_icp_agv.t_T_s = T_icp_agv;
-                        log_transformation_matrix(constraint_icp_agv.t_T_s.matrix());
-                        constraint_icp_agv.covariance = Eigen::Matrix4d::Identity() * 0.01;
+                        
+                        //log_transformation_matrix(constraint_icp_agv.t_T_s.matrix());
+
+                        // Compute the ICP covariance from the scan pair.
+                        constraint_icp_agv.covariance = computeICPCovariance(prev_measurements_.agv_scan,
+                            new_measurements.agv_scan, T_icp, pointcloud_sigma_);
+
                         global_constraints_.push_back(constraint_icp_agv);
                     };
             }
@@ -707,10 +614,11 @@ private:
             constraint_odom_uav.id_end = uav_id;
             constraint_odom_uav.is_uwb = false;
 
-            Sophus::SE3d odom_T_s_uav = build_transformation_SE3(prev_measurements_.uav_roll, prev_measurements_.uav_pitch, prev_measurements_.uav_odom);
-            Sophus::SE3d odom_T_t_uav = build_transformation_SE3(new_measurements.uav_roll, new_measurements.uav_pitch, new_measurements.uav_odom);
+            Sophus::SE3d odom_T_s_uav = prev_measurements_.uav_odom_pose;
+            Sophus::SE3d odom_T_t_uav = new_measurements.agv_odom_pose;
             constraint_odom_uav.t_T_s = odom_T_t_uav.inverse()*odom_T_s_uav;
-            constraint_odom_uav.covariance = new_measurements.uav_odom_covariance;
+            constraint_odom_uav.covariance = computeRelativeOdometryCovariance(new_measurements.uav_odom_pose, prev_measurements_.uav_odom_pose,
+                                                                                new_measurements.uav_odom_covariance, prev_measurements_.uav_odom_covariance);
             global_constraints_.push_back(constraint_odom_uav);
 
             //UAV ICP constraints
@@ -730,8 +638,13 @@ private:
                         //Transform to the robots body frame
                         Sophus::SE3d T_icp_uav = T_uav_lidar_ * Sophus::SE3f(T_icp).cast<double>() * T_uav_lidar_.inverse();
                         constraint_icp_uav.t_T_s = T_icp_uav;
-                        log_transformation_matrix(constraint_icp_uav.t_T_s.matrix());
-                        constraint_icp_uav.covariance = Eigen::Matrix4d::Identity() * 0.01;
+                        
+                        //log_transformation_matrix(constraint_icp_uav.t_T_s.matrix());
+
+                        // Compute the ICP covariance from the scan pair.
+                        constraint_icp_uav.covariance = computeICPCovariance(prev_measurements_.uav_scan,
+                            new_measurements.uav_scan, T_icp, pointcloud_sigma_);
+
                         global_constraints_.push_back(constraint_icp_uav);
                     };
         
@@ -761,6 +674,10 @@ private:
                     }
                     constraint.t_T_s = new_measurements.relative_transform;
                     constraint.covariance = new_measurements.relative_transform_covariance;
+                    
+                    //We inflate the covariance, because it is computed under a non-real assumption
+                    double covariance_multiplier = 1.0;
+                    constraint.covariance*=covariance_multiplier;
                 }
             }
 
@@ -787,9 +704,12 @@ private:
 
                         inter_icp_constraint.t_T_s = T_icp_uav_agv;
 
-                        log_transformation_matrix(inter_icp_constraint.t_T_s.matrix());
+                        //log_transformation_matrix(inter_icp_constraint.t_T_s.matrix());
 
-                        inter_icp_constraint.covariance = Eigen::Matrix4d::Identity() * 0.01;
+                        // Compute the ICP covariance from the scan pair.
+                        inter_icp_constraint.covariance = computeICPCovariance(new_measurements.agv_scan,
+                            new_measurements.uav_scan, T_icp, pointcloud_sigma_);
+                        
                         global_constraints_.push_back(inter_icp_constraint);
                     };
         
@@ -834,8 +754,8 @@ private:
                 State& agv_node = global_map_[agv_id];
                 State& uav_node = global_map_[uav_id];
 
-                Sophus::SE3d That_ws = build_transformation_SE3(agv_node.roll, agv_node.pitch, agv_node.state);
-                Sophus::SE3d That_wt = build_transformation_SE3(uav_node.roll, uav_node.pitch, uav_node.state);
+                agv_node.pose = build_transformation_SE3(agv_node.roll, agv_node.pitch, agv_node.state);
+                uav_node.pose = build_transformation_SE3(uav_node.roll, uav_node.pitch, uav_node.state);
 
                 RCLCPP_INFO(this->get_logger(), "AGV Optimized pose:\n"
                             "[%f, %f, %f, %f]", agv_node.state[0], agv_node.state[1],agv_node.state[2], agv_node.state[3]);
@@ -844,11 +764,11 @@ private:
                             "[%f, %f, %f, %f]", uav_node.state[0], uav_node.state[1], uav_node.state[2], uav_node.state[3]);
 
                 //AGV odom frame to be common reference frame
-                publish_transform(That_ws, current_time, odom_tf_agv_t_, eliko_frame_id_);
-                publish_pose(That_ws, agv_node.covariance, current_time, odom_tf_agv_t_, pose_agv_publisher_);
+                publish_transform(agv_node.pose, current_time, odom_tf_agv_t_, eliko_frame_id_);
+                publish_pose(agv_node.pose, agv_node.covariance, current_time, odom_tf_agv_t_, pose_agv_publisher_);
 
-                publish_transform(That_wt, current_time, odom_tf_agv_t_, uav_frame_id_);
-                publish_pose(That_wt, uav_node.covariance, current_time, odom_tf_agv_t_, pose_uav_publisher_);
+                publish_transform(uav_node.pose, current_time, odom_tf_agv_t_, uav_frame_id_);
+                publish_pose(uav_node.pose, uav_node.covariance, current_time, odom_tf_agv_t_, pose_uav_publisher_);
 
             }
 
@@ -859,9 +779,44 @@ private:
         }
 
         //Update odom for next optimization
-        uav_distance_ = agv_distance_ = uav_angle_ = agv_angle_ = 0.0;
+        uav_translation_ = agv_translation_ = uav_rotation_ = agv_rotation_ = 0.0;
 
         prev_measurements_ = new_measurements;
+
+
+        // ---------------- Publish All Optimized Poses ----------------
+        // Create PoseArray messages for AGV and UAV nodes.
+        geometry_msgs::msg::PoseArray global_agv_poses;
+        geometry_msgs::msg::PoseArray global_uav_poses;
+        global_agv_poses.header.stamp = current_time;
+        global_agv_poses.header.frame_id = odom_tf_agv_t_;
+        global_uav_poses.header.stamp = current_time;
+        global_uav_poses.header.frame_id = odom_tf_agv_t_;
+
+        // Iterate over the global map and convert each state's optimized pose.
+        for (const auto &kv : global_map_) {
+            const State &state = kv.second;
+            Sophus::SE3d T = state.pose;
+            geometry_msgs::msg::Pose pose;
+            Eigen::Vector3d t = T.translation();
+            pose.position.x = t.x();
+            pose.position.y = t.y();
+            pose.position.z = t.z();
+            Eigen::Quaterniond q(T.rotationMatrix());
+            pose.orientation.x = q.x();
+            pose.orientation.y = q.y();
+            pose.orientation.z = q.z();
+            pose.orientation.w = q.w();
+
+            if (state.robot_id == 0) {
+                global_agv_poses.poses.push_back(pose);
+            } else if (state.robot_id == 1) {
+                global_uav_poses.poses.push_back(pose);
+            }
+        }
+
+        global_poses_agv_publisher_->publish(global_agv_poses);
+        global_poses_uav_publisher_->publish(global_uav_poses);
     }
 
 
@@ -885,6 +840,128 @@ private:
         RCLCPP_DEBUG(this->get_logger(), "Pointcloud downsampled to %zu points", output_cloud->points.size());
 
         return output_cloud;
+    }
+
+
+    // Helper function to compute the covariance for the relative odometry transform.
+    // state_target: new measurement (target), state_source: previous measurement (source)
+    // cov_target and cov_source are the 4x4 covariance matrices of the corresponding states.
+    Eigen::Matrix4d computeRelativeOdometryCovariance(
+        const Sophus::SE3d &pose_target,
+        const Sophus::SE3d &pose_source,
+        const Eigen::Matrix<double, 6, 6> &cov_target,
+        const Eigen::Matrix<double, 6, 6> &cov_source)
+    {
+        
+        Eigen::Matrix3d R_target = pose_target.rotationMatrix();  // or T.so3().matrix()
+        Eigen::Vector3d t_target = pose_target.translation();
+        Eigen::Vector3d t_source = pose_source.translation();
+        // Compute Euler angles in ZYX order: [yaw, pitch, roll]
+        Eigen::Vector3d euler_target = R_target.eulerAngles(2, 1, 0);
+        // Extract yaw from the target state.
+        double theta_t = euler_target[0];
+
+        double dx = t_source[0] - t_target[0];
+        double dy = t_source[1] - t_target[1];
+
+        // Jacobian with respect to the source (old) state.
+        Eigen::Matrix4d J_s = Eigen::Matrix4d::Zero();
+        J_s(0, 0) = std::cos(theta_t);
+        J_s(0, 1) = std::sin(theta_t);
+        J_s(1, 0) = -std::sin(theta_t);
+        J_s(1, 1) = std::cos(theta_t);
+        J_s(2, 2) = 1.0;
+        J_s(3, 3) = 1.0;
+
+        // Jacobian with respect to the target (new) state.
+        Eigen::Matrix4d J_t = Eigen::Matrix4d::Zero();
+        J_t(0, 0) = -std::cos(theta_t);
+        J_t(0, 1) = -std::sin(theta_t);
+        J_t(1, 0) = std::sin(theta_t);
+        J_t(1, 1) = -std::cos(theta_t);
+        J_t(2, 2) = -1.0;
+        J_t(3, 3) = -1.0;
+        // Derivatives with respect to theta_t:
+        J_t(0, 3) = -(-std::sin(theta_t) * dx + std::cos(theta_t) * dy);
+        J_t(1, 3) = -(-std::cos(theta_t) * dx - std::sin(theta_t) * dy);
+
+
+        //Reduce the covariances to 4x4 -- remove rows and columns 3,4
+        Eigen::Matrix4d cov_source_reduced = reduce_covariance_matrix(cov_source);
+        Eigen::Matrix4d cov_target_reduced = reduce_covariance_matrix(cov_target);
+
+        // Propagate the covariance.
+        Eigen::Matrix4d cov_rel = J_s * cov_source_reduced * J_s.transpose() +
+                                J_t * cov_target_reduced * J_t.transpose();
+        return cov_rel;
+    }
+
+
+
+        // Helper function to approximate the ICP covariance.
+    // 'source' and 'target' are the downsampled point clouds used for ICP.
+    // 'transformation' is the final 4x4 transform from ICP.
+    // sensor_variance is a tuning parameter (e.g., 0.01).
+    Eigen::Matrix4d computeICPCovariance(
+        const pcl::PointCloud<pcl::PointXYZ>::ConstPtr &source,
+        const pcl::PointCloud<pcl::PointXYZ>::ConstPtr &target,
+        const Eigen::Matrix4f &transformation,
+        double sensor_variance = 0.01)
+    {
+        pcl::search::KdTree<pcl::PointXYZ> tree;
+        tree.setInputCloud(target);
+        
+        Eigen::Matrix4d H_total = Eigen::Matrix4d::Zero();
+        int count = 0;
+
+        // Extract an approximate yaw from the transformation.
+        double yaw = std::atan2(transformation(1, 0), transformation(0, 0));
+
+        for (size_t i = 0; i < source->points.size(); ++i)
+        {
+            const pcl::PointXYZ &p = source->points[i];
+            Eigen::Vector4f p_h(p.x, p.y, p.z, 1.0f);
+            Eigen::Vector4f p_trans = transformation * p_h;
+
+            pcl::PointXYZ p_trans_p;
+            p_trans_p.x = p_trans[0];
+            p_trans_p.y = p_trans[1];
+            p_trans_p.z = p_trans[2];
+
+            std::vector<int> indices(1);
+            std::vector<float> sqr_dists(1);
+            if (tree.nearestKSearch(p_trans_p, 1, indices, sqr_dists) > 0)
+            {
+                const pcl::PointXYZ &q = target->points[indices[0]];
+                // Compute the error (not used further here, but could be logged if desired)
+                Eigen::Vector3d e(q.x - p_trans[0], q.y - p_trans[1], q.z - p_trans[2]);
+
+                // Build the Jacobian J_i (3x4) for the point.
+                Eigen::Matrix<double, 3, 4> J = Eigen::Matrix<double, 3, 4>::Zero();
+                // Derivative with respect to translation (first 3 columns): identity.
+                J.block<3, 3>(0, 0) = Eigen::Matrix3d::Identity();
+                // Derivative with respect to yaw (4th column):
+                double dxdtheta = -std::sin(yaw) * p.x - std::cos(yaw) * p.y;
+                double dydtheta =  std::cos(yaw) * p.x - std::sin(yaw) * p.y;
+                J(0, 3) = dxdtheta;
+                J(1, 3) = dydtheta;
+                // For the z component, yaw has no effect (J(2,3)=0).
+
+                H_total += J.transpose() * J;
+                count++;
+            }
+        }
+        if (count > 0)
+        {
+            H_total /= static_cast<double>(count);
+        }
+        else
+        {
+            H_total = Eigen::Matrix4d::Identity();
+        }
+        // Approximate covariance from the (averaged) Hessian.
+        Eigen::Matrix4d cov_icp = sensor_variance * H_total.inverse();
+        return cov_icp;
     }
 
 
@@ -1026,13 +1103,51 @@ private:
     }
 
 
+    // This function updates the combined pose and covariance.
+    void update_uav_odometry() {
+
+        // Construct the full SE(3) transformation.
+        uav_odom_pose_ = Sophus::SE3d(uav_quaternion_, uav_translation_3d_);
+
+        // Update AGV rotational displacement.
+        // Here, we compute the relative rotation via the logarithmic map.
+        Eigen::Matrix<double, 6, 1> log = (uav_last_odom_pose_.inverse() * uav_odom_pose_).log();
+
+        // Extract translation and rotation differences.
+        Eigen::Vector3d delta_translation = log.head<3>(); // first three elements
+        Eigen::Vector3d delta_rot = log.tail<3>(); // last three elements
+        uav_translation_+= delta_translation.norm();
+        uav_rotation_ += delta_rot.norm();
+
+        // Build a 6x6 covariance matrix.
+        // Here, we assume that the covariance in translation and rotation are uncorrelated.
+        // Replace these with your actual uncertainties as needed.
+        uav_odom_covariance_ = Eigen::Matrix<double, 6, 6>::Zero();
+        double pos_variance = 1e-6;  // Example variance for x,y,z (m^2)
+        double rot_variance = 1e-6; // Example variance for roll,pitch,yaw (rad^2)
+        uav_odom_covariance_.block<3,3>(0,0) = pos_variance * Eigen::Matrix3d::Identity();
+        uav_odom_covariance_.block<3,3>(3,3) = rot_variance * Eigen::Matrix3d::Identity();
+
+        uav_last_odom_pose_ = uav_odom_pose_;        
+    }
+
     void attitude_cb_(const geometry_msgs::msg::QuaternionStamped::SharedPtr msg) {
 
-            const auto& q = msg->quaternion;
+            Eigen::Quaterniond q(
+                msg->quaternion.w,
+                msg->quaternion.x,
+                msg->quaternion.y,
+                msg->quaternion.z
+            );
+
+            uav_quaternion_ = q;
+
             // Convert the quaternion to roll, pitch, yaw
-            tf2::Quaternion tf_q(q.x, q.y, q.z, q.w);
+            tf2::Quaternion tf_q(q.x(), q.y(), q.z(), q.w());
             tf2::Matrix3x3 m(tf_q);
             m.getRPY(uav_roll_, uav_pitch_, uav_yaw_);
+            // Refresh the combined UAV odometry.
+            update_uav_odometry();
         }
 
     
@@ -1230,64 +1345,12 @@ private:
         pub->publish(p_msg);
     }
 
-
-    void publishGlobalOptimizedPoses(const std::deque<State> &states, std::deque<Measurements> &measurements, const rclcpp::Time &current_time, const std::string &frame_id, 
-                                    const rclcpp::Publisher<geometry_msgs::msg::PoseArray>::SharedPtr &pub) {
-        // Create a PoseArray message
-        geometry_msgs::msg::PoseArray pose_array_msg;
-        pose_array_msg.header.stamp = current_time;
-        pose_array_msg.header.frame_id = frame_id;  // Use your common reference frame
-      
-        // Loop over each state in your global pose graph (for example, AGV states)
-        for (size_t i = 0; i < states.size(); ++i) {
-          geometry_msgs::msg::Pose pose;
-      
-          Sophus::SE3d T;
-          if (pub == global_poses_uav_publisher_) T = build_transformation_SE3(measurements[i].uav_roll, measurements[i].uav_pitch, states[i].state);
-          else T = build_transformation_SE3(measurements[i].agv_roll, measurements[i].agv_pitch, states[i].state);
-          
-          Eigen::Vector3d t = T.translation();
-          pose.position.x = t.x();
-          pose.position.y = t.y();
-          pose.position.z = t.z();
-      
-          // Convert the rotation matrix into a quaternion.
-          Eigen::Quaterniond q(T.rotationMatrix());
-          pose.orientation.x = q.x();
-          pose.orientation.y = q.y();
-          pose.orientation.z = q.z();
-          pose.orientation.w = q.w();
-      
-          // Append this pose to the PoseArray
-          pose_array_msg.poses.push_back(pose);
-        }
-      
-        // Publish the PoseArray message
-        pub->publish(pose_array_msg);
-      
-        RCLCPP_INFO(this->get_logger(), "Published %zu optimized poses.", pose_array_msg.poses.size());
-
-    }
-
     Sophus::SE3d build_transformation_SE3(double roll, double pitch, const Eigen::Vector4d& s) {
         Eigen::Vector3d t(s[0], s[1], s[2]);  // Use Vector3d instead of an incorrect Matrix type.
         Eigen::Matrix3d R = (Eigen::AngleAxisd(s[3], Eigen::Vector3d::UnitZ()) *
                              Eigen::AngleAxisd(pitch, Eigen::Vector3d::UnitY()) *
                              Eigen::AngleAxisd(roll,  Eigen::Vector3d::UnitX())).toRotationMatrix();
         return Sophus::SE3d(R, t);
-    }
-
-    Eigen::Matrix4d re_orthogonalize(const Eigen::Matrix4d &T){
-        // Re-orthogonalize the rotation part of T_icp_d.
-        Eigen::Matrix3d R = T.block<3,3>(0,0);
-        Eigen::JacobiSVD<Eigen::Matrix3d> svd(R, Eigen::ComputeFullU | Eigen::ComputeFullV);
-        Eigen::Matrix3d R_corrected = svd.matrixU() * svd.matrixV().transpose();
-
-        Eigen::Matrix4d corrected_T = T;
-        // Replace the rotation block with the corrected matrix -> translation remains the same
-        corrected_T.block<3,3>(0,0) = R_corrected;
-
-        return corrected_T;
     }
 
     // Convert Pose from ROS msg to SE3
@@ -1356,6 +1419,21 @@ private:
         return state;
     }
 
+
+    //Reduce a 6x6 covariance matrix to a 4x4 one, removing roll and pitch elements
+    Eigen::Matrix4d reduce_covariance_matrix(const Eigen::Matrix<double, 6, 6> &cov){
+
+        std::vector<int> indices = {0, 1, 2, 5};
+        Eigen::Matrix4d cov_reduced;
+        for (size_t i = 0; i < indices.size(); ++i) {
+            for (size_t j = 0; j < indices.size(); ++j) {
+                cov_reduced(i, j) = cov(indices[i], indices[j]);
+            }
+        }
+        
+        return cov_reduced;
+    }
+
     bool isNodeFixed(const rclcpp::Time &current_time, const int node_id, MapOfStates &map, const double &window_size){
         return (current_time - map[node_id].timestamp).seconds() > window_size;
     }
@@ -1377,16 +1455,15 @@ private:
 
         ceres::Problem problem;
 
-        ceres::Manifold* agv_state_manifold = new StateManifold2D;
-        ceres::Manifold* uav_state_manifold = new StateManifold3D;
+        ceres::Manifold* state_manifold_3d = new StateManifold3D;
 
         //remove the gauge freedom (i.e. the fact that an overall rigid body transform can be added to all poses without changing the relative errors).
         //anchor -freeze- the first node, and freeze the part of the node outside the sliding window
         for (auto& kv : global_map) {
             State& state = kv.second;
-            problem.AddParameterBlock(state.state.data(), 4);
-            if(state.robot_id == 0) problem.SetManifold(state.state.data(), agv_state_manifold);
-            else if(state.robot_id == 1) problem.SetManifold(state.state.data(), uav_state_manifold);
+            problem.AddParameterBlock(state.state.data(), 4); 
+            problem.SetManifold(state.state.data(), state_manifold_3d);
+            //problem.SetManifold(state.state.data(), state_manifold_3d);
             //Fix old nodes
             if (kv.first == 0 || isNodeFixed(current_time, kv.first, global_map, global_opt_window_s_)) {
                 problem.SetParameterBlockConstant(kv.second.state.data());
@@ -1490,7 +1567,7 @@ private:
             // Project the 6-vector error onto the 4-DOF space:
             // Keep the three translation components and only the z component of the rotation.
             Eigen::Matrix<T,4,1> error_vec;
-            error_vec.template segment<3>(0) = xi.template segment<3>(0); // translation error
+            error_vec.template head<3>() = xi.template head<3>();
             error_vec[3] = xi[5];  // use the z-component (yaw) of the rotation error
     
             // Scale by the square root of the inverse covariance matrix
@@ -1562,6 +1639,7 @@ private:
     //Lidar and radar positions
     Sophus::SE3d T_uav_lidar_, T_agv_lidar_;
     Sophus::SE3d T_uav_radar_, T_agv_radar_;
+    double pointcloud_sigma_;
 
     //Measurements
     pcl::PointCloud<pcl::PointXYZ>::Ptr uav_cloud_{new pcl::PointCloud<pcl::PointXYZ>};
@@ -1594,14 +1672,16 @@ private:
     double moving_average_;
     double uav_roll_, uav_pitch_, uav_yaw_;
 
-    Eigen::Vector4d uav_odom_pos_, uav_last_odom_pos_;         // Current UAV odometry position and last used for optimization
-    Eigen::Vector4d agv_odom_pos_, agv_last_odom_pos_;        // Current AGV odometry position and last used for optimization
-    Eigen::Matrix4d uav_odom_covariance_;  // UAV odometry covariance
-    Eigen::Matrix4d agv_odom_covariance_;  // AGV odometry covariance
+    Sophus::SE3d uav_odom_pose_, uav_last_odom_pose_;         // Current UAV odometry position and last used for optimization
+    Sophus::SE3d agv_odom_pose_, agv_last_odom_pose_;        // Current AGV odometry position and last used for optimization
+    Eigen::Matrix<double, 6, 6> uav_odom_covariance_, agv_odom_covariance_ ;  // UAV and AGV odometry covariance
+    Eigen::Vector3d uav_translation_3d_; // Integrated translation
+    Eigen::Quaterniond uav_quaternion_;
+
     geometry_msgs::msg::Vector3Stamped last_uav_vel_msg_;
     bool last_uav_vel_initialized_;
     double min_traveled_distance_, min_traveled_angle_;
-    double uav_distance_, agv_distance_, uav_angle_, agv_angle_;
+    double uav_translation_, agv_translation_, uav_rotation_, agv_rotation_;
 
 };
 int main(int argc, char** argv) {
