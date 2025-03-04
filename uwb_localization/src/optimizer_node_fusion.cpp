@@ -288,10 +288,9 @@ public:
     moving_average_window_s_ = global_opt_window_s_ / 2.0;
 
     //Set ICP algorithm variant: 2->Generalized ICP, 1->Point to Plane ICP, else -> basic ICP
-    icp_type_ = 0;
+    icp_type_ = 1;
 
     relative_pose_available_ = false;
-    global_optimization_ = false;            
 
     RCLCPP_INFO(this->get_logger(), "Eliko Optimization Node initialized.");
   }
@@ -372,8 +371,8 @@ private:
         uav_odom_pose_ = uav_odom_pose_ * delta;
 
         // Optionally, update accumulated metrics.
-        agv_translation_ += linear_vel.norm() * dt;
-        agv_rotation_   += angular_vel.norm() * dt;
+        uav_translation_ += linear_vel.norm() * dt;
+        uav_rotation_   += angular_vel.norm() * dt;
 
         // Build a 6x6 covariance matrix.
         // Here, we assume that the covariance in translation and rotation are uncorrelated.
@@ -530,7 +529,7 @@ private:
         new_measurements.agv_odom_covariance = agv_odom_covariance_;
         new_measurements.agv_odom_pose = agv_odom_pose_;
 
-        new_measurements.uav_odom_covariance = agv_odom_covariance_;
+        new_measurements.uav_odom_covariance = uav_odom_covariance_;
         new_measurements.uav_odom_pose = uav_odom_pose_;
 
         //Check if there is a new relative position available
@@ -621,6 +620,8 @@ private:
                     RCLCPP_WARN(this->get_logger(), "Computing ICP for AGV nodes %d and %d.", new_id_ - 1, new_id_);
 
                     Eigen::Matrix4f T_icp = constraint_odom_agv.t_T_s.cast<float>().matrix();
+                    //Eigen::Matrix4f T_icp = Eigen::Matrix4f::Identity();
+
                     double fitness = 0.0;
         
                     if(run_icp(prev_measurements_.agv_scan, new_measurements.agv_scan, T_icp, fitness, icp_type_)){
@@ -662,6 +663,8 @@ private:
                     RCLCPP_WARN(this->get_logger(), "Computing ICP for UAV nodes %d and %d.", new_id_ - 1, new_id_);
                     
                     Eigen::Matrix4f T_icp = constraint_odom_uav.t_T_s.cast<float>().matrix();
+                    //Eigen::Matrix4f T_icp = Eigen::Matrix4f::Identity();
+
                     double fitness = 0.0;
 
                     if(run_icp(prev_measurements_.uav_scan, new_measurements.uav_scan, T_icp, fitness, icp_type_)){
@@ -1004,9 +1007,9 @@ private:
             // RegistrationPCL is derived from pcl::Registration and has mostly the same interface as pcl::GeneralizedIterativeClosestPoint.
             RegistrationPCL<pcl::PointXYZ, pcl::PointXYZ> reg;
             reg.setNumThreads(4);
-            reg.setCorrespondenceRandomness(20);
-            reg.setMaxCorrespondenceDistance(1.0);
-            reg.setVoxelResolution(1.0);
+            // reg.setCorrespondenceRandomness(20);
+            // reg.setMaxCorrespondenceDistance(1.0);
+            // reg.setVoxelResolution(1.0);
 
             // Set input point clouds.
             reg.setInputSource(source_cloud);
@@ -1603,7 +1606,7 @@ private:
     rclcpp::Subscription<geometry_msgs::msg::PoseWithCovarianceStamped>::SharedPtr optimized_tf_sub_;
 
     // Timers
-    rclcpp::TimerBase::SharedPtr global_optimization_timer_, window_opt_timer_;
+    rclcpp::TimerBase::SharedPtr global_optimization_timer_;
     //Service client for visualization
     rclcpp::Client<uwb_localization::srv::UpdatePointClouds>::SharedPtr pcl_visualizer_client_;
 
@@ -1623,7 +1626,6 @@ private:
     bool relative_pose_available_; 
     geometry_msgs::msg::PoseWithCovarianceStamped latest_relative_pose_;
     double min_keyframes_;
-    bool global_optimization_;
 
     State init_state_uav_, init_state_agv_;
 

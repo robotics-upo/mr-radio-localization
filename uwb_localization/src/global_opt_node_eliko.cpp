@@ -288,8 +288,8 @@ private:
         uav_odom_pose_ = uav_odom_pose_ * delta;
 
         // Optionally, update accumulated metrics.
-        agv_translation_ += linear_vel.norm() * dt;
-        agv_rotation_   += angular_vel.norm() * dt;
+        uav_translation_ += linear_vel.norm() * dt;
+        uav_rotation_   += angular_vel.norm() * dt;
 
         // Build a 6x6 covariance matrix.
         // Here, we assume that the covariance in translation and rotation are uncorrelated.
