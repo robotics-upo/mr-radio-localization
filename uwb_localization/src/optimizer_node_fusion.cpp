@@ -835,15 +835,17 @@ private:
                 State& agv_node = global_map_[agv_id_];
                 State& uav_node = global_map_[uav_id_];
 
+                anchor_node_agv_.pose = build_transformation_SE3(anchor_node_agv_.roll, anchor_node_agv_.pitch, anchor_node_agv_.state);
+                anchor_node_uav_.pose = build_transformation_SE3(anchor_node_uav_.roll, anchor_node_uav_.pitch, anchor_node_uav_.state);
+
                 agv_node.pose = build_transformation_SE3(agv_node.roll, agv_node.pitch, agv_node.state);
                 uav_node.pose = build_transformation_SE3(uav_node.roll, uav_node.pitch, uav_node.state);
 
-                RCLCPP_INFO(this->get_logger(), "AGV Optimized pose:\n"
+                RCLCPP_INFO(this->get_logger(), "AGV Optimized pose (local):\n"
                             "[%f, %f, %f, %f]", agv_node.state[0], agv_node.state[1],agv_node.state[2], agv_node.state[3]);
 
-                RCLCPP_INFO(this->get_logger(), "UAV Optimized pose:\n"
+                RCLCPP_INFO(this->get_logger(), "UAV Optimized pose (local):\n"
                             "[%f, %f, %f, %f]", uav_node.state[0], uav_node.state[1], uav_node.state[2], uav_node.state[3]);
-
 
                 RCLCPP_INFO(this->get_logger(), "Anchor node AGV:\n"
                             "[%f, %f, %f, %f]", anchor_node_agv_.state[0], anchor_node_agv_.state[1], anchor_node_agv_.state[2], anchor_node_agv_.state[3]);
@@ -851,12 +853,22 @@ private:
                 RCLCPP_INFO(this->get_logger(), "Anchor node UAV:\n"
                             "[%f, %f, %f, %f]", anchor_node_uav_.state[0], anchor_node_uav_.state[1], anchor_node_uav_.state[2], anchor_node_uav_.state[3]);
 
-                //AGV odom frame to be common reference frame
-                publish_transform(agv_node.pose, current_time, global_frame_graph_, eliko_frame_id_);
-                publish_pose(agv_node.pose, agv_node.covariance, current_time, global_frame_graph_, pose_agv_publisher_);
 
-                publish_transform(uav_node.pose, current_time, global_frame_graph_, uav_frame_id_);
-                publish_pose(uav_node.pose, uav_node.covariance, current_time, global_frame_graph_, pose_uav_publisher_);
+                Sophus::SE3d global_pose_agv = anchor_node_agv_.pose * agv_node.pose;
+                Sophus::SE3d global_pose_uav = anchor_node_uav_.pose * uav_node.pose;
+
+                RCLCPP_INFO(this->get_logger(), "[Eliko global_opt node] Global pose AGV:");
+                log_transformation_matrix(global_pose_agv.matrix());
+                RCLCPP_INFO(this->get_logger(), "[Eliko global_opt node] Global pose UAV:");
+
+                log_transformation_matrix(global_pose_uav.matrix());
+
+                //AGV odom frame to be common reference frame
+                publish_transform(global_pose_agv, current_time, global_frame_graph_, eliko_frame_id_);
+                publish_pose(global_pose_agv, agv_node.covariance, current_time, global_frame_graph_, pose_agv_publisher_);
+
+                publish_transform(global_pose_uav, current_time, global_frame_graph_, uav_frame_id_);
+                publish_pose(global_pose_uav, uav_node.covariance, current_time, global_frame_graph_, pose_uav_publisher_);
 
             }
 
@@ -1506,7 +1518,7 @@ private:
                 problem.SetParameterBlockConstant(kv.second.state.data());
             }
 
-          }
+        }
 
         //Add the anchor nodes
         problem.AddParameterBlock(anchor_node_uav_.state.data(), 4);
@@ -1619,6 +1631,9 @@ private:
                 for (auto& kv : global_map) {
                     kv.second.covariance = Eigen::Matrix4d::Identity();
                 }
+
+                anchor_node_agv_.covariance = Eigen::Matrix4d::Identity();
+                anchor_node_uav_.covariance = Eigen::Matrix4d::Identity();
             }
 
             return true;
@@ -1780,12 +1795,12 @@ private:
         AnchorResidual(const Sophus::SE3d &T_meas, const Eigen::Matrix4d &cov, 
                         double source_roll, double source_pitch, 
                         double target_roll, double target_pitch,
-                        double rel_roll_uav, double rel_pitch_uav,
-                        double rel_roll_agv, double rel_pitch_agv)
+                        double anchor_roll_uav, double anchor_pitch_uav,
+                        double anchor_roll_agv, double anchor_pitch_agv)
           : T_meas_(T_meas), cov_(cov), source_roll_(source_roll), source_pitch_(source_pitch), 
             target_roll_(target_roll), target_pitch_(target_pitch), 
-            rel_roll_uav_(rel_roll_uav), rel_pitch_uav_(rel_pitch_uav),
-            rel_roll_agv_(rel_roll_agv), rel_pitch_agv_(rel_pitch_agv) {}
+            anchor_roll_uav_(anchor_roll_uav), anchor_pitch_uav_(anchor_pitch_uav),
+            anchor_roll_agv_(anchor_roll_agv), anchor_pitch_agv_(anchor_pitch_agv) {}
       
         template <typename T>
         bool operator()(const T* const source_state, const T* const target_state, const T* const T_anchor_uav, const T* const T_anchor_agv, T* residual) const {
@@ -1795,10 +1810,14 @@ private:
           Sophus::SE3<T> T_t = buildTransformationSE3(target_state, target_roll_, target_pitch_);
 
           // Build the extra transformation from UAV local frame into AGV frame.
-          Sophus::SE3<T> w_T_t = buildTransformationSE3(T_anchor_uav, rel_roll_uav_, rel_pitch_uav_);
-          Sophus::SE3<T> w_T_s = buildTransformationSE3(T_anchor_agv, rel_roll_agv_, rel_pitch_agv_);
+          Sophus::SE3<T> anchor_T_t = buildTransformationSE3(T_anchor_uav, anchor_roll_uav_, anchor_pitch_uav_);
+          Sophus::SE3<T> anchor_T_s = buildTransformationSE3(T_anchor_agv, anchor_roll_agv_, anchor_pitch_agv_);
 
-          Sophus::SE3<T> T_pred = (w_T_t * T_t).inverse() * (w_T_s * T_s);
+          Sophus::SE3<T> w_T_s = anchor_T_s * T_s;
+          Sophus::SE3<T> w_T_t = anchor_T_t * T_t;
+
+          Sophus::SE3<T> T_pred = w_T_t.inverse() * w_T_s;
+
           Sophus::SE3<T> T_err = T_meas_.template cast<T>().inverse() * T_pred;
           Eigen::Matrix<T, 6, 1> xi = T_err.log();
       
@@ -1824,10 +1843,10 @@ private:
         static ceres::CostFunction* Create(const Sophus::SE3d &T_meas, const Eigen::Matrix4d &cov, 
                                             double source_roll, double source_pitch, 
                                             double target_roll, double target_pitch,
-                                            double rel_roll_uav, double rel_pitch_uav,
-                                            double rel_roll_agv, double rel_pitch_agv) {
+                                            double anchor_roll_uav, double anchor_pitch_uav,
+                                            double anchor_roll_agv, double anchor_pitch_agv) {
           return new ceres::AutoDiffCostFunction<AnchorResidual, 4, 4, 4, 4, 4>(
-            new AnchorResidual(T_meas, cov, source_roll, source_pitch, target_roll, target_pitch, rel_roll_uav, rel_pitch_uav, rel_roll_agv, rel_pitch_agv));
+            new AnchorResidual(T_meas, cov, source_roll, source_pitch, target_roll, target_pitch, anchor_roll_uav, anchor_pitch_uav, anchor_roll_agv, anchor_pitch_agv));
         }
       
       private:
@@ -1849,8 +1868,8 @@ private:
         const Eigen::Matrix4d cov_;
         const double source_roll_, source_pitch_;
         const double target_roll_, target_pitch_;
-        const double rel_roll_uav_, rel_pitch_uav_;
-        const double rel_roll_agv_, rel_pitch_agv_;
+        const double anchor_roll_uav_, anchor_pitch_uav_;
+        const double anchor_roll_agv_, anchor_pitch_agv_;
       };
 
     
