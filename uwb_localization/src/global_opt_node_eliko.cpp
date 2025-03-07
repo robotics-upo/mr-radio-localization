@@ -326,7 +326,6 @@ private:
         
         uav_odom_pose_ = Sophus::SE3d(q, t);
 
-
         // If this is the first message, simply store it and return.
         if (!last_uav_odom_initialized_) {
             last_uav_odom_msg_ = *msg;
@@ -344,38 +343,6 @@ private:
 
         uav_translation_+=delta_translation.norm();
         uav_rotation_+=delta_rotation.norm();       
-        
-        //***************Method 2: Use velocities only and compose relative motions *********************//
-
-        // // Compute the time difference between the current and last messages.
-        // rclcpp::Time current_time(msg->header.stamp);
-        // rclcpp::Time last_time(last_uav_odom_msg_.header.stamp);
-        // double dt = (current_time - last_time).seconds();
-    
-        // // Extract linear and angular velocities from the odometry message.
-        // Eigen::Vector3d linear_vel(msg->twist.twist.linear.x,
-        //                            msg->twist.twist.linear.y,
-        //                            msg->twist.twist.linear.z);
-        // Eigen::Vector3d angular_vel(msg->twist.twist.angular.x,
-        //                             msg->twist.twist.angular.y,
-        //                             msg->twist.twist.angular.z);
-    
-        // // Create the 6D twist vector (xi) for SE(3) integration.
-        // // The first three elements represent translation, and the last three represent rotation.
-        // Eigen::Matrix<double, 6, 1> xi;
-        // xi.head<3>() = linear_vel * dt;   // Translational component.
-        // xi.tail<3>() = angular_vel * dt;  // Rotational component.
-    
-        // // Compute the incremental transformation using the exponential map.
-        // Sophus::SE3d delta = Sophus::SE3d::exp(xi);
-    
-        // // Update the current pose by composing with the incremental transformation.
-        // // This performs an integration step: new_pose = old_pose * delta.
-        // uav_odom_pose_ = uav_odom_pose_ * delta;
-    
-        // // Optionally, update accumulated metrics.
-        // uav_translation_ += linear_vel.norm() * dt;
-        // uav_rotation_   += angular_vel.norm() * dt;
     
         //Read covariance
         Eigen::Matrix<double,6,6> cov;
@@ -431,38 +398,6 @@ private:
 
         agv_translation_+=delta_translation.norm();
         agv_rotation_+=delta_rotation.norm();       
-        
-        //***************Method 2: Use velocities only and compose relative motions *********************//
-
-        // // Compute the time difference between the current and last messages.
-        // rclcpp::Time current_time(msg->header.stamp);
-        // rclcpp::Time last_time(last_agv_odom_msg_.header.stamp);
-        // double dt = (current_time - last_time).seconds();
-    
-        // // Extract linear and angular velocities from the odometry message.
-        // Eigen::Vector3d linear_vel(msg->twist.twist.linear.x,
-        //                            msg->twist.twist.linear.y,
-        //                            msg->twist.twist.linear.z);
-        // Eigen::Vector3d angular_vel(msg->twist.twist.angular.x,
-        //                             msg->twist.twist.angular.y,
-        //                             msg->twist.twist.angular.z);
-    
-        // // Create the 6D twist vector (xi) for SE(3) integration.
-        // // The first three elements represent translation, and the last three represent rotation.
-        // Eigen::Matrix<double, 6, 1> xi;
-        // xi.head<3>() = linear_vel * dt;   // Translational component.
-        // xi.tail<3>() = angular_vel * dt;  // Rotational component.
-    
-        // // Compute the incremental transformation using the exponential map.
-        // Sophus::SE3d delta = Sophus::SE3d::exp(xi);
-    
-        // // Update the current pose by composing with the incremental transformation.
-        // // This performs an integration step: new_pose = old_pose * delta.
-        // agv_odom_pose_ = agv_odom_pose_ * delta;
-    
-        // // Optionally, update accumulated metrics.
-        // agv_translation_ += linear_vel.norm() * dt;
-        // agv_rotation_   += angular_vel.norm() * dt;
     
         //Read covariance
         Eigen::Matrix<double,6,6> cov;
