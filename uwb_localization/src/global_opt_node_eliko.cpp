@@ -497,7 +497,8 @@ private:
             // publish_transform(That_ts.inverse(), agv_odom_frame_id_, uav_opt_frame_id_, opt_state_.timestamp);
             // publish_transform(That_ts, uav_odom_frame_id_, agv_opt_frame_id_, opt_state_.timestamp);
             
-            publish_pose(That_ts, opt_state_.covariance + predicted_motion_covariance, opt_state_.timestamp, uav_odom_frame_id_, tf_publisher_);
+            geometry_msgs::msg::PoseWithCovarianceStamped msg = build_pose_msg(That_ts, opt_state_.covariance + predicted_motion_covariance, opt_state_.timestamp, uav_odom_frame_id_);
+            tf_publisher_->publish(msg);
 
         }
 
@@ -613,10 +614,8 @@ private:
     }
 
 
-    void publish_pose(const Sophus::SE3d &T, const Eigen::Matrix4d& cov4, 
-        const rclcpp::Time &current_time, const std::string &frame_id, 
-        const rclcpp::Publisher<geometry_msgs::msg::PoseWithCovarianceStamped>::SharedPtr &pub) {
-
+    geometry_msgs::msg::PoseWithCovarianceStamped build_pose_msg(const Sophus::SE3d &T, const Eigen::Matrix4d& cov4, 
+        const rclcpp::Time &current_time, const std::string &frame_id) {
 
         geometry_msgs::msg::PoseWithCovarianceStamped p_msg;
         p_msg.header.stamp = current_time;
@@ -662,9 +661,7 @@ private:
             }
         }
 
-
-        // Publish transform
-        pub->publish(p_msg);
+        return p_msg;
     }
 
     // Convert transform matrix from ROS msg to SE3

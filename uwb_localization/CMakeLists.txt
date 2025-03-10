@@ -35,11 +35,10 @@ find_package(OpenMP REQUIRED)
 
 rosidl_generate_interfaces(${PROJECT_NAME}
   "srv/UpdatePointClouds.srv"
-  DEPENDENCIES std_msgs sensor_msgs # Add packages that above messages depend on, in this case geometry_msgs for Sphere.msg
+  "msg/PoseWithCovarianceStampedArray.msg"
+  DEPENDENCIES std_msgs sensor_msgs geometry_msgs # Add packages that above messages depend on, in this case geometry_msgs for Sphere.msg
 )
 
-# Export the dependencies so that downstream packages can find the generated files
-ament_export_dependencies(rosidl_default_runtime)
 
 # uncomment the following section in order to fill in
 # further dependencies manually.
