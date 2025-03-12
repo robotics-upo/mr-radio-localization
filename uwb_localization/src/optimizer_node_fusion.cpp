@@ -73,7 +73,6 @@ struct MeasurementConstraint {
     int id_end;
     Sophus::SE3d t_T_s;  // measured relative transform
     Eigen::Matrix<double, 4, 4> covariance;
-    bool is_uwb;
 
     EIGEN_MAKE_ALIGNED_OPERATOR_NEW
 
@@ -85,7 +84,6 @@ using VectorOfConstraints =
 struct State {
     
     rclcpp::Time timestamp; 
-    int robot_id; //0 for AGV, 1 for UAV
     Eigen::Vector4d state; // [x,y,z,yaw]
     double roll;
     double pitch;
@@ -193,14 +191,10 @@ public:
 
     //Option 1: get odometry through topics -> includes covariance
     std::string odom_topic_agv = "/arco/idmind_motors/odom"; //or "/agv/odom"
-    std::string odom_topic_uav = "/odom"; //or "/uav/odom"
-    std::string linear_vel_topic_uav = "/dji_sdk/velocity";
-    std::string angular_vel_topic_uav = "/dji_sdk/angular_velocity_fused";
+    std::string odom_topic_uav = "/uav/odom"; //or "/uav/odom"
 
     rclcpp::SensorDataQoS qos; // Use a QoS profile compatible with sensor data
 
-    last_uav_linear_vel_initialized_ = false;
-    last_uav_angular_vel_initialized_ = false;
     last_agv_odom_initialized_ = false;
     last_uav_odom_initialized_ = false;
 
@@ -211,14 +205,11 @@ public:
     agv_odom_sub_ = this->create_subscription<nav_msgs::msg::Odometry>(
     odom_topic_agv, qos, std::bind(&FusionOptimizationNode::agv_odom_cb_, this, std::placeholders::_1));
 
-    uav_linear_vel_sub_ = this->create_subscription<geometry_msgs::msg::Vector3Stamped>(
-        linear_vel_topic_uav, qos, std::bind(&FusionOptimizationNode::uav_linear_vel_cb_, this, std::placeholders::_1));
-    uav_angular_vel_sub_ = this->create_subscription<geometry_msgs::msg::Vector3Stamped>(
-            angular_vel_topic_uav, qos, std::bind(&FusionOptimizationNode::uav_angular_vel_cb_, this, std::placeholders::_1));
-
+    uav_odom_sub_ = this->create_subscription<nav_msgs::msg::Odometry>(
+        odom_topic_uav, qos, std::bind(&FusionOptimizationNode::uav_odom_cb_, this, std::placeholders::_1));
 
     //Option 2: get odometry through tf readings -> only transform
-    odom_tf_agv_s_ = "arco/eliko"; //source
+    odom_tf_agv_s_ = "arco/base_link"; //source
     odom_tf_agv_t_ = "arco/odom"; //target
     odom_tf_uav_s_ = "odom"; //source
     odom_tf_uav_t_ = "world"; //target
@@ -240,11 +231,11 @@ public:
         std::bind(&FusionOptimizationNode::optimized_tf_cb_, this, std::placeholders::_1));
 
     //Pose publishers
-    pose_uav_publisher_ = this->create_publisher<geometry_msgs::msg::PoseWithCovarianceStamped>("pose_graph_node/uav_pose", 10);
-    pose_agv_publisher_ = this->create_publisher<geometry_msgs::msg::PoseWithCovarianceStamped>("pose_graph_node/agv_pose", 10);
+    anchor_agv_publisher_ = this->create_publisher<geometry_msgs::msg::PoseWithCovarianceStamped>("pose_graph_node/agv_anchor", 10);
+    anchor_uav_publisher_ = this->create_publisher<geometry_msgs::msg::PoseWithCovarianceStamped>("pose_graph_node/uav_anchor", 10);
 
-    global_poses_uav_publisher_ = this->create_publisher<uwb_localization::msg::PoseWithCovarianceStampedArray>("pose_graph_node/global_uav_poses", 10);
-    global_poses_agv_publisher_ = this->create_publisher<uwb_localization::msg::PoseWithCovarianceStampedArray>("pose_graph_node/global_agv_poses", 10);
+    poses_uav_publisher_ = this->create_publisher<uwb_localization::msg::PoseWithCovarianceStampedArray>("pose_graph_node/uav_poses", 10);
+    poses_agv_publisher_ = this->create_publisher<uwb_localization::msg::PoseWithCovarianceStampedArray>("pose_graph_node/agv_poses", 10);
 
     tf_broadcaster_ = std::make_shared<tf2_ros::TransformBroadcaster>(this);
 
@@ -259,17 +250,12 @@ public:
     global_optimization_timer_ = this->create_wall_timer(
             std::chrono::milliseconds(int(global_opt_rate_s_*1000)), std::bind(&FusionOptimizationNode::global_opt_cb_, this));
 
-    
     global_frame_graph_ = "graph_odom";
     eliko_frame_id_ = "agv_opt"; //frame of the eliko system-> arco/eliko, for simulation use "agv_gt" for ground truth, "agv_odom" for odometry w/ errors
     uav_frame_id_ = "uav_opt"; //frame of the uav -> "base_link", for simulation use "uav_opt"
-    
-    agv_starting_id_ = 0;
-    uav_starting_id_ = 10000;
 
     //Start node counter
-    agv_id_ = agv_starting_id_;
-    uav_id_ = uav_starting_id_;
+    agv_id_ = uav_id_ = 0;
 
     graph_initialized_ = false;
     first_optimization_done_ = false;
@@ -286,95 +272,6 @@ public:
 
 private:
 
-
-    void uav_linear_vel_cb_(const geometry_msgs::msg::Vector3Stamped::SharedPtr msg) {
-        
-        // If this is the first message, simply store it and return.
-       if (!last_uav_linear_vel_initialized_) {
-           last_uav_linear_vel_msg_ = *msg;
-           last_uav_linear_vel_initialized_ = true;
-           return;
-       }
-       
-       // Compute the time difference between the current and last velocity messages.
-       rclcpp::Time current_time(msg->header.stamp);
-       rclcpp::Time last_time(last_uav_linear_vel_msg_.header.stamp);
-       double dt = (current_time - last_time).seconds();
-       
-       // Get current velocity vector.
-       Eigen::Vector3d linear_vel(msg->vector.x, msg->vector.y, msg->vector.z);
-       // Get current velocity vector.
-       Eigen::Vector3d angular_vel(0.0, 0.0, 0.0);
-        
-       // Update last message time.
-       last_uav_linear_vel_msg_ = *msg;
-        
-        // Refresh the combined UAV odometry.
-       update_uav_odometry(linear_vel, angular_vel, dt);
-
-   }
-
-   void uav_angular_vel_cb_(const geometry_msgs::msg::Vector3Stamped::SharedPtr msg) {
-        
-        // If this is the first message, simply store it and return.
-        if (!last_uav_angular_vel_initialized_) {
-            last_uav_angular_vel_msg_ = *msg;
-            last_uav_angular_vel_initialized_ = true;
-            return;
-        }
-        
-        // Compute the time difference between the current and last velocity messages.
-        rclcpp::Time current_time(msg->header.stamp);
-        rclcpp::Time last_time(last_uav_angular_vel_msg_.header.stamp);
-        double dt = (current_time - last_time).seconds();
-        
-        // Get current velocity vector.
-        Eigen::Vector3d angular_vel(msg->vector.x, msg->vector.y, msg->vector.z);
-        // Get current velocity vector.
-        Eigen::Vector3d linear_vel(0.0, 0.0, 0.0);
-            
-        // Update last message time.
-        last_uav_angular_vel_msg_ = *msg;
-            
-        // Refresh the combined UAV odometry.
-        update_uav_odometry(linear_vel, angular_vel, dt);
-
-    }
-
-   // This function updates the combined pose and covariance.
-   void update_uav_odometry(const Eigen::Vector3d linear_vel, Eigen::Vector3d angular_vel, const double &dt) {
-
-
-        // Create the 6D twist vector (xi) for SE(3) integration.
-        // The first three elements represent translation, and the last three represent rotation.
-        Eigen::Matrix<double, 6, 1> xi;
-        xi.head<3>() = linear_vel * dt;   // Translational component.
-        xi.tail<3>() = angular_vel * dt;  // Rotational component.
-
-        // Compute the incremental transformation using the exponential map.
-        Sophus::SE3d delta = Sophus::SE3d::exp(xi);
-        
-        // Update the current pose by composing with the incremental transformation.
-        // This performs an integration step: new_pose = old_pose * delta.
-        uav_odom_pose_ = uav_odom_pose_ * delta;
-
-        // Optionally, update accumulated metrics.
-        uav_translation_ += linear_vel.norm() * dt;
-        uav_rotation_   += angular_vel.norm() * dt;
-
-        // Build a 6x6 covariance matrix.
-        // Here, we assume that the covariance in translation and rotation are uncorrelated.
-        // Replace these with your actual uncertainties as needed.
-        uav_odom_covariance_ = Eigen::Matrix<double, 6, 6>::Zero();
-        double pos_variance = 1e-6;  // Example variance for x,y,z (m^2)
-        double rot_variance = 1e-6; // Example variance for roll,pitch,yaw (rad^2)
-        uav_odom_covariance_.block<3,3>(0,0) = pos_variance * Eigen::Matrix3d::Identity();
-        uav_odom_covariance_.block<3,3>(3,3) = rot_variance * Eigen::Matrix3d::Identity();
-
-        // RCLCPP_INFO(this->get_logger(), "Updated UAV odometry");   
-        // log_transformation_matrix(uav_odom_pose_.matrix());
-
-    }
 
     void agv_odom_cb_(const nav_msgs::msg::Odometry::SharedPtr msg) {
         
@@ -430,6 +327,60 @@ private:
         // RCLCPP_INFO(this->get_logger(), "Updated AGV odometry");
         // log_transformation_matrix(agv_odom_pose_.matrix());
     }
+
+    void uav_odom_cb_(const nav_msgs::msg::Odometry::SharedPtr msg) {
+        
+        //******************Method 1: Just extract pose from odom*********************//
+
+        Eigen::Quaterniond q(
+            msg->pose.pose.orientation.w,
+            msg->pose.pose.orientation.x,
+            msg->pose.pose.orientation.y,
+            msg->pose.pose.orientation.z
+        );
+        
+        // Create a 3D translation vector.
+        Eigen::Vector3d t(
+            msg->pose.pose.position.x,
+            msg->pose.pose.position.y,
+            msg->pose.pose.position.z
+        );
+        
+        uav_odom_pose_ = Sophus::SE3d(q, t);
+
+        // If this is the first message, simply store it and return.
+        if (!last_uav_odom_initialized_) {
+            last_uav_odom_msg_ = *msg;
+            last_uav_odom_initialized_ = true;
+            last_uav_odom_pose_ = uav_odom_pose_;
+            return;
+        }
+        
+        // Update displacement, via logarithmic map
+
+        Eigen::Matrix<double, 6, 1> log = (last_uav_odom_pose_.inverse() * uav_odom_pose_).log();
+
+        Eigen::Vector3d delta_translation = log.head<3>(); // first three elements
+        Eigen::Vector3d delta_rotation    = log.tail<3>(); // last three elements
+
+        uav_translation_+=delta_translation.norm();
+        uav_rotation_+=delta_rotation.norm();       
+    
+        //Read covariance
+        Eigen::Matrix<double,6,6> cov;
+        for (int i = 0; i < 6; i++) {
+            for (int j = 0; j < 6; j++) {
+                cov(i, j) = msg->pose.covariance[i * 6 + j];
+            }
+        }
+        uav_odom_covariance_ = cov;
+        
+        last_uav_odom_msg_ = *msg;
+    
+        // RCLCPP_INFO(this->get_logger(), "Updated AGV odometry from velocities");
+        // log_transformation_matrix(agv_odom_pose_.matrix());
+    }
+
 
     void pcl_source_cb_(const sensor_msgs::msg::PointCloud2::SharedPtr msg){
         
@@ -488,9 +439,8 @@ private:
             Eigen::Vector3d euler_agv = R_odom_agv.eulerAngles(2, 1, 0);
             //Initial values for state AGV
             init_state_agv_.timestamp = current_time;
-            init_state_agv_.robot_id = 0;
-            init_state_agv_.state = Eigen::Vector4d(t_odom_agv[0], t_odom_agv[1], t_odom_agv[2], euler_agv[2]);
-            init_state_agv_.roll = euler_agv[0];
+            init_state_agv_.state = Eigen::Vector4d(t_odom_agv[0], t_odom_agv[1], t_odom_agv[2], euler_agv[0]);
+            init_state_agv_.roll = euler_agv[2];
             init_state_agv_.pitch = euler_agv[1];
             init_state_agv_.pose = build_transformation_SE3(init_state_agv_.roll, init_state_agv_.pitch, init_state_agv_.state);
             init_state_agv_.covariance = Eigen::Matrix4d::Identity(); //
@@ -499,11 +449,10 @@ private:
             RCLCPP_INFO(this->get_logger(), "Adding initial AGV node at timestamp %.2f: [%f, %f, %f, %f]", current_time.seconds(),
             init_state_agv_.state[0], init_state_agv_.state[1], init_state_agv_.state[2], init_state_agv_.state[3]);
 
-            global_map_[agv_id_] = init_state_agv_;
+            agv_map_[agv_id_] = init_state_agv_;
 
             //Anchor node for AGV
             anchor_node_agv_.timestamp = current_time;
-            anchor_node_agv_.robot_id = 0;
             anchor_node_agv_.state = init_state_agv_.state;
             anchor_node_agv_.roll = 0.0;
             anchor_node_agv_.pitch = 0.0;
@@ -525,9 +474,8 @@ private:
 
             //Initial values for state UAV
             init_state_uav_.timestamp = current_time;
-            init_state_uav_.robot_id = 1;
-            init_state_uav_.state = Eigen::Vector4d(t_odom_uav[0], t_odom_uav[1], t_odom_uav[2], euler_uav[2]);
-            init_state_uav_.roll = euler_uav[0];
+            init_state_uav_.state = Eigen::Vector4d(t_odom_uav[0], t_odom_uav[1], t_odom_uav[2], euler_uav[0]);
+            init_state_uav_.roll = euler_uav[2];
             init_state_uav_.pitch = euler_uav[1];
             init_state_uav_.pose = build_transformation_SE3(init_state_uav_.roll, init_state_uav_.pitch, init_state_uav_.state);
             init_state_uav_.covariance = Eigen::Matrix4d::Identity(); //
@@ -536,11 +484,10 @@ private:
             RCLCPP_INFO(this->get_logger(), "Adding initial UAV node at timestamp %.2f: [%f, %f, %f, %f]", current_time.seconds(),
             init_state_uav_.state[0], init_state_uav_.state[1], init_state_uav_.state[2], init_state_uav_.state[3]);
 
-            global_map_[uav_id_] = init_state_uav_;
+            uav_map_[uav_id_] = init_state_uav_;
 
             //Create anchor node for UAV
             anchor_node_uav_.timestamp = current_time;
-            anchor_node_uav_.robot_id = 1;
             anchor_node_uav_.state = Eigen::Vector4d(0.0, 0.0, 0.0, 0.0);
             anchor_node_uav_.roll = 0.0;
             anchor_node_uav_.pitch = 0.0;
@@ -595,7 +542,6 @@ private:
             // Create a new AGV node from the current odometry.
             State new_agv;
             new_agv.timestamp = current_time;
-            new_agv.robot_id = 0;
             new_agv.is_anchor = false;
 
             Eigen::Matrix3d R_odom_agv = agv_measurements_.odom_pose.rotationMatrix();  // or T.so3().matrix()
@@ -603,11 +549,11 @@ private:
             Eigen::Vector3d euler_agv = R_odom_agv.eulerAngles(2, 1, 0);
             new_agv.pitch = euler_agv[1];  // rotation around Y-axis
             new_agv.roll = euler_agv[2];  // rotation around X-axis
-            new_agv.state = global_map_[agv_id_ - 1].state;
-            new_agv.pose = global_map_[agv_id_ - 1].pose;
-            new_agv.covariance = global_map_[agv_id_ - 1].covariance;
+            new_agv.state = agv_map_[agv_id_ - 1].state;
+            new_agv.pose = agv_map_[agv_id_ - 1].pose;
+            new_agv.covariance = agv_map_[agv_id_ - 1].covariance;
             
-            global_map_[agv_id_] = new_agv;
+            agv_map_[agv_id_] = new_agv;
 
             RCLCPP_INFO(this->get_logger(), "Adding AGV node %d at timestamp %.2f: [%f, %f, %f, %f]", agv_id_, current_time.seconds(),
                             new_agv.state[0], new_agv.state[1], new_agv.state[2], new_agv.state[3]);
@@ -619,7 +565,6 @@ private:
             MeasurementConstraint constraint_odom_agv;
             constraint_odom_agv.id_begin = agv_id_ - 1;
             constraint_odom_agv.id_end = agv_id_;
-            constraint_odom_agv.is_uwb = false;
 
             Sophus::SE3d odom_T_s_agv = prev_agv_measurements_.odom_pose;
             Sophus::SE3d odom_T_t_agv = agv_measurements_.odom_pose;
@@ -628,7 +573,7 @@ private:
             constraint_odom_agv.covariance = computeRelativeOdometryCovariance(agv_measurements_.odom_pose, prev_agv_measurements_.odom_pose,
                                                                                 agv_measurements_.odom_covariance, prev_agv_measurements_.odom_covariance);
 
-            proprioceptive_constraints_.push_back(constraint_odom_agv);
+            proprioceptive_constraints_agv_.push_back(constraint_odom_agv);
 
             //AGV ICP constraints
 
@@ -646,7 +591,6 @@ private:
                         MeasurementConstraint constraint_icp_agv;
                         constraint_icp_agv.id_begin = agv_id_ - 1;
                         constraint_icp_agv.id_end = agv_id_;
-                        constraint_icp_agv.is_uwb = false;
                         //Transform to the robots body frame
                         Sophus::SE3d T_icp_agv = T_agv_lidar_ * Sophus::SE3f(T_icp).cast<double>() * T_agv_lidar_.inverse();
                         constraint_icp_agv.t_T_s = T_icp_agv;
@@ -657,7 +601,7 @@ private:
                         constraint_icp_agv.covariance = computeICPCovariance(prev_agv_measurements_.scan,
                             agv_measurements_.scan, T_icp, pointcloud_sigma_);
 
-                        proprioceptive_constraints_.push_back(constraint_icp_agv);
+                        extraceptive_constraints_agv_.push_back(constraint_icp_agv);
                     };
             }
 
@@ -679,7 +623,6 @@ private:
             // Similarly, create a new UAV node.
             State new_uav;  
             new_uav.timestamp = current_time;
-            new_uav.robot_id = 1;
             new_uav.is_anchor = false;
 
             Eigen::Matrix3d R_odom_uav = uav_measurements_.odom_pose.rotationMatrix();  // or T.so3().matrix()
@@ -687,11 +630,11 @@ private:
             Eigen::Vector3d euler_uav = R_odom_uav.eulerAngles(2, 1, 0);
             new_uav.pitch = euler_uav[1];  // rotation around Y-axis
             new_uav.roll = euler_uav[2];  // rotation around X-axis
-            new_uav.state = global_map_[uav_id_ - 1].state;
-            new_uav.pose = global_map_[uav_id_ - 1].pose;
-            new_uav.covariance = global_map_[uav_id_ - 1].covariance;
+            new_uav.state = uav_map_[uav_id_ - 1].state;
+            new_uav.pose = uav_map_[uav_id_ - 1].pose;
+            new_uav.covariance = uav_map_[uav_id_ - 1].covariance;
 
-            global_map_[uav_id_] = new_uav;
+            uav_map_[uav_id_] = new_uav;
 
             RCLCPP_INFO(this->get_logger(), "Adding new UAV node %d at timestamp %.2f: [%f, %f, %f, %f]", uav_id_, current_time.seconds(),
                             new_uav.state[0], new_uav.state[1], new_uav.state[2], new_uav.state[3]);
@@ -702,14 +645,13 @@ private:
             MeasurementConstraint constraint_odom_uav;
             constraint_odom_uav.id_begin = uav_id_ - 1;
             constraint_odom_uav.id_end = uav_id_;
-            constraint_odom_uav.is_uwb = false;
 
             Sophus::SE3d odom_T_s_uav = prev_uav_measurements_.odom_pose;
             Sophus::SE3d odom_T_t_uav = uav_measurements_.odom_pose;
             constraint_odom_uav.t_T_s = odom_T_t_uav.inverse()*odom_T_s_uav;
             constraint_odom_uav.covariance = computeRelativeOdometryCovariance(uav_measurements_.odom_pose, prev_uav_measurements_.odom_pose,
                                                                                 uav_measurements_.odom_covariance, prev_uav_measurements_.odom_covariance);
-            proprioceptive_constraints_.push_back(constraint_odom_uav);
+            proprioceptive_constraints_uav_.push_back(constraint_odom_uav);
 
             //UAV ICP constraints
             if (!uav_measurements_.scan->points.empty() &&
@@ -725,7 +667,6 @@ private:
                         MeasurementConstraint constraint_icp_uav;
                         constraint_icp_uav.id_begin = uav_id_ - 1;
                         constraint_icp_uav.id_end = uav_id_;
-                        constraint_icp_uav.is_uwb = false;
                         //Transform to the robots body frame
                         Sophus::SE3d T_icp_uav = T_uav_lidar_ * Sophus::SE3f(T_icp).cast<double>() * T_uav_lidar_.inverse();
                         constraint_icp_uav.t_T_s = T_icp_uav;
@@ -736,7 +677,7 @@ private:
                         constraint_icp_uav.covariance = computeICPCovariance(prev_uav_measurements_.scan,
                             uav_measurements_.scan, T_icp, pointcloud_sigma_);
 
-                        proprioceptive_constraints_.push_back(constraint_icp_uav);
+                        extraceptive_constraints_uav_.push_back(constraint_icp_uav);
                     };
 
             }
@@ -763,30 +704,12 @@ private:
             MeasurementConstraint uwb_constraint;
             uwb_constraint.id_begin = agv_id_; //relates latest UAV and AGV nodes
             uwb_constraint.id_end = uav_id_;
-            uwb_constraint.is_uwb = true;
             uwb_constraint.t_T_s = latest_relative_pose_SE3_;
+            double covariance_multiplier = 1;
             uwb_constraint.covariance = reduce_covariance_matrix(latest_relative_pose_cov_);
+            uwb_constraint.covariance*=covariance_multiplier;
 
-            encounter_constraints_.push_back(uwb_constraint);
-
-
-            //Update other constraints in the window
-            for(auto& constraint : encounter_constraints_){
-                if (constraint.is_uwb){
-                    bool source_fixed = isNodeFixed(current_time, constraint.id_begin, global_map_, global_opt_window_s_);
-                    bool target_fixed = isNodeFixed(current_time, constraint.id_end, global_map_, global_opt_window_s_);
-                    if (source_fixed && target_fixed) {
-                        // Both nodes are fixed; skip adding this constraint.
-                        continue;
-                    }
-                    constraint.t_T_s = uwb_constraint.t_T_s;
-                    constraint.covariance = uwb_constraint.covariance;
-                    
-                    //We inflate the covariance, because it is computed under a non-real assumption
-                    double covariance_multiplier = 1e2;
-                    constraint.covariance*=covariance_multiplier;
-                }
-            }
+            encounter_constraints_uwb_.push_back(uwb_constraint);
 
         }
 
@@ -809,7 +732,6 @@ private:
                     MeasurementConstraint inter_icp_constraint;
                     inter_icp_constraint.id_begin = agv_id_; //same id, relates node i of uav map, and node i of uav map
                     inter_icp_constraint.id_end = uav_id_;
-                    inter_icp_constraint.is_uwb = false;
 
                     //Transform to the robots body frame, using the corrected orthogonal rotation matrix
                     Sophus::SE3d T_icp_uav_agv = T_uav_lidar_ * Sophus::SE3f(T_icp).cast<double>() * T_agv_lidar_.inverse();
@@ -822,7 +744,7 @@ private:
                     inter_icp_constraint.covariance = computeICPCovariance(agv_measurements_.scan,
                         uav_measurements_.scan, T_icp, pointcloud_sigma_);
                     
-                    encounter_constraints_.push_back(inter_icp_constraint);
+                    encounter_constraints_pointcloud_.push_back(inter_icp_constraint);
                 };
 
             // Convert the PCL point cloud to a ROS message
@@ -848,7 +770,7 @@ private:
     
         }
         
-        bool window_initialized = (agv_id_ - agv_starting_id_) >= min_keyframes_ && (uav_id_ - uav_starting_id_) >= min_keyframes_;
+        bool window_initialized = agv_id_ >= min_keyframes_ && uav_id_ >= min_keyframes_;
 
         if(!window_initialized){
             RCLCPP_INFO(this->get_logger(), "Sliding window not yet full!");
@@ -856,7 +778,10 @@ private:
         }
 
         //Update transforms after convergence
-        if(run_posegraph_optimization(current_time, global_map_, proprioceptive_constraints_, encounter_constraints_)){
+        if(run_posegraph_optimization(current_time, agv_map_, uav_map_, 
+                                      proprioceptive_constraints_agv_, extraceptive_constraints_agv_,
+                                      proprioceptive_constraints_uav_, extraceptive_constraints_uav_,
+                                      encounter_constraints_uwb_, encounter_constraints_pointcloud_)){
             
             // ---------------- Publish All Optimized Poses ----------------
             RCLCPP_INFO(this->get_logger(), "Anchor node AGV:\n"
@@ -869,56 +794,62 @@ private:
             anchor_node_uav_.pose = build_transformation_SE3(anchor_node_uav_.roll, anchor_node_uav_.pitch, anchor_node_uav_.state);
 
             // Create PoseWithCovarianceArray messages for AGV and UAV nodes.
-            uwb_localization::msg::PoseWithCovarianceStampedArray global_agv_poses;
-            uwb_localization::msg::PoseWithCovarianceStampedArray global_uav_poses;
+            uwb_localization::msg::PoseWithCovarianceStampedArray agv_poses;
+            uwb_localization::msg::PoseWithCovarianceStampedArray uav_poses;
 
-            global_agv_poses.header.stamp = global_uav_poses.header.stamp = current_time;
-            global_agv_poses.header.frame_id = global_uav_poses.header.frame_id = "";
+            agv_poses.header.stamp = uav_poses.header.stamp = current_time;
+            
+            agv_poses.header.frame_id = odom_tf_agv_t_;
+            uav_poses.header.frame_id = odom_tf_uav_t_;
 
             // Iterate over the global map and convert each state's optimized pose.
-            for (const auto &kv : global_map_) {
+            for (const auto &kv : agv_map_) {
                 
                 const State &state = kv.second;
                 Sophus::SE3d T = build_transformation_SE3(state.roll, state.pitch, state.state);
-                Sophus::SE3d global_pose;
+                geometry_msgs::msg::PoseWithCovarianceStamped pose = build_pose_msg(T, state.covariance, state.timestamp, odom_tf_agv_t_);
 
-                if (state.robot_id == 0) {
+                if(kv.first == agv_id_){
+                    publish_transform(T, current_time, odom_tf_agv_t_, eliko_frame_id_);
+                    RCLCPP_INFO(this->get_logger(), "AGV Optimized pose (local):\n"
+                    "[%f, %f, %f, %f]", state.state[0], state.state[1], state.state[2], state.state[3]);
 
-                    global_pose = anchor_node_agv_.pose * T;
-                    geometry_msgs::msg::PoseWithCovarianceStamped pose = build_pose_msg(global_pose, state.covariance, state.timestamp, global_frame_graph_);
-
-                    if(kv.first == agv_id_){
-                        publish_transform(global_pose, current_time, global_frame_graph_, eliko_frame_id_);
-                        pose_agv_publisher_->publish(pose);
-                        RCLCPP_INFO(this->get_logger(), "AGV Optimized pose (local):\n"
-                        "[%f, %f, %f, %f]", state.state[0], state.state[1], state.state[2], state.state[3]);
-                    }
-
-                    global_agv_poses.array.push_back(pose);
-
-
-                } else if (state.robot_id == 1) {
-
-                    global_pose = anchor_node_uav_.pose * T;
-                    geometry_msgs::msg::PoseWithCovarianceStamped pose = build_pose_msg(global_pose, state.covariance, state.timestamp, global_frame_graph_);
-
-                    if(kv.first == uav_id_){
-                        publish_transform(global_pose, current_time, global_frame_graph_, uav_frame_id_);
-                        pose_uav_publisher_->publish(pose);
-                        RCLCPP_INFO(this->get_logger(), "UAV Optimized pose (local):\n"
-                        "[%f, %f, %f, %f]", state.state[0], state.state[1], state.state[2], state.state[3]);
-                    }
-
-                    global_uav_poses.array.push_back(pose);
-
+                    Sophus::SE3d global_pose = anchor_node_agv_.pose * T;
+                    publish_transform(global_pose, current_time, global_frame_graph_, eliko_frame_id_);
                 }
+
+                agv_poses.array.push_back(pose);
             }
 
+
+            // Iterate over the global map and convert each state's optimized pose.
+            for (const auto &kv : uav_map_) {             
+                const State &state = kv.second;
+                Sophus::SE3d T = build_transformation_SE3(state.roll, state.pitch, state.state);
+                geometry_msgs::msg::PoseWithCovarianceStamped pose = build_pose_msg(T, state.covariance, state.timestamp, odom_tf_uav_t_);
+
+                if(kv.first == uav_id_){
+                    publish_transform(T, current_time, odom_tf_uav_t_, uav_frame_id_);
+                    RCLCPP_INFO(this->get_logger(), "UAV Optimized pose (local):\n"
+                    "[%f, %f, %f, %f]", state.state[0], state.state[1], state.state[2], state.state[3]);
+
+                    Sophus::SE3d global_pose = anchor_node_uav_.pose * T;
+                    publish_transform(global_pose, current_time, global_frame_graph_, uav_frame_id_);
+                }
+
+                uav_poses.array.push_back(pose);
+            }
+
+            geometry_msgs::msg::PoseWithCovarianceStamped anchor_agv = build_pose_msg(anchor_node_agv_.pose, anchor_node_agv_.covariance, anchor_node_agv_.timestamp, global_frame_graph_);
+            geometry_msgs::msg::PoseWithCovarianceStamped anchor_uav = build_pose_msg(anchor_node_uav_.pose, anchor_node_uav_.covariance, anchor_node_uav_.timestamp, global_frame_graph_);
+
+            poses_agv_publisher_->publish(agv_poses);
+            poses_uav_publisher_->publish(uav_poses);
+
+            anchor_agv_publisher_->publish(anchor_agv);
+            anchor_uav_publisher_->publish(anchor_uav);
+            
             first_optimization_done_ = true;
-
-            global_poses_agv_publisher_->publish(global_agv_poses);
-            global_poses_uav_publisher_->publish(global_uav_poses);
-
         }
 
         else{
@@ -1082,9 +1013,16 @@ private:
             // RegistrationPCL is derived from pcl::Registration and has mostly the same interface as pcl::GeneralizedIterativeClosestPoint.
             RegistrationPCL<pcl::PointXYZ, pcl::PointXYZ> reg;
             reg.setNumThreads(4);
-            // reg.setCorrespondenceRandomness(20);
-            // reg.setMaxCorrespondenceDistance(1.0);
-            // reg.setVoxelResolution(1.0);
+            
+            reg.setCorrespondenceRandomness(20);
+            reg.setMaxCorrespondenceDistance(2.5*pointcloud_sigma_);
+            reg.setVoxelResolution(pointcloud_sigma_);
+            // Set the maximum number of iterations (criterion 1)
+            reg.setMaximumIterations (50);
+            // Set the transformation epsilon (criterion 2)
+            reg.setTransformationEpsilon (1e-4);
+            // Set the euclidean distance difference epsilon (criterion 3)
+            reg.setEuclideanFitnessEpsilon (2.5*pointcloud_sigma_);
 
             // Set input point clouds.
             reg.setInputSource(source_cloud);
@@ -1130,13 +1068,13 @@ private:
             // Optionally, you can tune ICP parameters (e.g., maximum iterations, convergence criteria, etc.)
             // Set the max correspondence distance to 5cm (e.g., correspondences with higher
             // distances will be ignored)
-            icp.setMaxCorrespondenceDistance (0.1);
+            icp.setMaxCorrespondenceDistance (2.5*pointcloud_sigma_);
             // Set the maximum number of iterations (criterion 1)
             icp.setMaximumIterations (50);
             // Set the transformation epsilon (criterion 2)
-            icp.setTransformationEpsilon (1e-8);
+            icp.setTransformationEpsilon (1e-4);
             // Set the euclidean distance difference epsilon (criterion 3)
-            icp.setEuclideanFitnessEpsilon (1);
+            icp.setEuclideanFitnessEpsilon (2.5*pointcloud_sigma_);
             
             pcl::PointCloud<pcl::PointNormal> aligned_cloud;
             icp.align(aligned_cloud, transformation);
@@ -1163,13 +1101,13 @@ private:
 
             // Set the max correspondence distance to 5cm (e.g., correspondences with higher
             // distances will be ignored)
-            icp.setMaxCorrespondenceDistance (0.1);
+            icp.setMaxCorrespondenceDistance (2.5*pointcloud_sigma_);
             // Set the maximum number of iterations (criterion 1)
             icp.setMaximumIterations (50);
             // Set the transformation epsilon (criterion 2)
-            icp.setTransformationEpsilon (1e-8);
+            icp.setTransformationEpsilon (1e-4);
             // Set the euclidean distance difference epsilon (criterion 3)
-            icp.setEuclideanFitnessEpsilon (1);
+            icp.setEuclideanFitnessEpsilon (2.5*pointcloud_sigma_);
 
             pcl::PointCloud<pcl::PointXYZ>::Ptr aligned_cloud(new pcl::PointCloud<pcl::PointXYZ>);
             icp.align(*aligned_cloud, transformation);
@@ -1211,14 +1149,6 @@ private:
         return cloud_with_normals;
     }
 
-    
-    // Normalize an angle to the range [-pi, pi]
-    double normalize_angle(double angle) {
-        while (angle > M_PI) angle -= 2.0 * M_PI;
-        while (angle < -M_PI) angle += 2.0 * M_PI;
-        return angle;
-        }
-
 
     //Write to display a 4x4 transformation matrix
     void log_transformation_matrix(const Eigen::Matrix4d &T)   {
@@ -1230,6 +1160,78 @@ private:
             T(2, 0), T(2, 1), T(2, 2), T(2, 3),
             T(3, 0), T(3, 1), T(3, 2), T(3, 3));                 
 
+    }
+
+
+    // Helper function to add measurement (proprioceptive or extraceptive) constraints.
+    bool addMeasurementConstraints(ceres::Problem &problem, 
+        const VectorOfConstraints &constraints,
+        MapOfStates &map, 
+        const rclcpp::Time &current_time, 
+        double window_size,
+        ceres::LossFunction *loss){
+        
+        bool constraint_available = false;
+
+        for (const auto &constraint : constraints) {
+            bool source_fixed = first_optimization_done_ && isNodeFixed(current_time, constraint.id_begin, map, window_size);
+            bool target_fixed = first_optimization_done_ && isNodeFixed(current_time, constraint.id_end, map, window_size);
+            if (source_fixed && target_fixed) continue;
+
+            if(!constraint_available) constraint_available = true;
+
+            State &state_i = map[constraint.id_begin];
+            State &state_j = map[constraint.id_end];
+            ceres::CostFunction *cost = MeasurementResidual::Create(constraint.t_T_s, constraint.covariance, 
+                                            state_i.roll, state_i.pitch, 
+                                            state_j.roll, state_j.pitch);
+            problem.AddResidualBlock(cost, loss, state_i.state.data(), state_j.state.data());
+            RCLCPP_WARN(this->get_logger(), "Adding measurement constraint between nodes %d and %d", 
+            constraint.id_begin, constraint.id_end);
+        }
+
+        return constraint_available;
+    }
+
+
+    // Helper function to add encounter (anchor) constraints.
+    bool addEncounterConstraints(ceres::Problem &problem, 
+        const VectorOfConstraints &constraints,
+        MapOfStates &source_map, MapOfStates &target_map,
+        const rclcpp::Time &current_time, 
+        double window_size,
+        ceres::LossFunction *loss){
+
+        bool constraint_available = false;
+
+        for (const auto &constraint : constraints) {
+            
+            bool source_fixed = first_optimization_done_ && isNodeFixed(current_time, constraint.id_begin, source_map, window_size);
+            bool target_fixed = first_optimization_done_ && isNodeFixed(current_time, constraint.id_end, target_map, window_size);
+            
+            if (source_fixed && target_fixed) continue;
+            
+            if(!constraint_available) constraint_available = true;
+
+            State &state_i = source_map[constraint.id_begin];
+            State &state_j = target_map[constraint.id_end];
+            ceres::CostFunction *cost = AnchorResidual::Create(constraint.t_T_s, constraint.covariance, 
+                                        state_i.roll, state_i.pitch, 
+                                        state_j.roll, state_j.pitch,
+                                        anchor_node_uav_.roll, anchor_node_uav_.pitch,
+                                        anchor_node_agv_.roll, anchor_node_agv_.pitch);
+            problem.AddResidualBlock(cost, loss, state_i.state.data(), state_j.state.data(), 
+                anchor_node_uav_.state.data(), anchor_node_agv_.state.data());
+            // Optionally, add a prior residual for the anchor node.
+            ceres::CostFunction *prior_cost_anchor = PriorResidual::Create(prior_anchor_.pose, 
+                                                    anchor_node_agv_.roll, anchor_node_agv_.pitch, 
+                                                    prior_anchor_.covariance);
+            problem.AddResidualBlock(prior_cost_anchor, nullptr, anchor_node_agv_.state.data());
+            RCLCPP_WARN(this->get_logger(), "Adding encounter constraint between nodes %d and %d", 
+            constraint.id_begin, constraint.id_end);
+        }
+
+        return constraint_available;
     }
 
 
@@ -1430,11 +1432,18 @@ private:
     // - Inter-robot ICP factors linking nodes from the two robots.
     
     bool run_posegraph_optimization(const rclcpp::Time &current_time,
-                                    MapOfStates &global_map, const VectorOfConstraints &proprioceptive_constraints, const VectorOfConstraints &encounter_constraints) {
+                                    MapOfStates &agv_map, MapOfStates &uav_map,
+                                    const VectorOfConstraints &proprioceptive_constraints_agv, const VectorOfConstraints &extraceptive_constraints_agv,
+                                    const VectorOfConstraints &proprioceptive_constraints_uav, const VectorOfConstraints &extraceptive_constraints_uav,
+                                    const VectorOfConstraints &encounter_constraints_uwb, const VectorOfConstraints &encounter_constraints_pointcloud) {
 
         ceres::Problem problem;
 
         ceres::Manifold* state_manifold_3d = new StateManifold3D;
+
+        // Define a robust kernel
+        double huber_threshold = 2.5; // = residuals higher than 2.5 times sigma are outliers
+        ceres::LossFunction* robust_loss = new ceres::HuberLoss(huber_threshold);
 
         //Add the anchor nodes
         problem.AddParameterBlock(anchor_node_uav_.state.data(), 4);
@@ -1445,82 +1454,57 @@ private:
         //remove the gauge freedom (i.e. the fact that an overall rigid body transform can be added to all poses without changing the relative errors).
         //anchor -freeze- the first node, and freeze the part of the node outside the sliding window
 
-        for (auto& kv : global_map) {
+        for (auto& kv : agv_map) {
             State& state = kv.second;
             problem.AddParameterBlock(state.state.data(), 4); 
             problem.SetManifold(state.state.data(), state_manifold_3d);
             // For a starting node: only fix if it has been optimized before AND is outside the window.
-            if (first_optimization_done_ && isNodeFixed(current_time, kv.first, global_map, global_opt_window_s_)) {
+            if (first_optimization_done_ && isNodeFixed(current_time, kv.first, agv_map, global_opt_window_s_)) {
                 problem.SetParameterBlockConstant(state.state.data());
             } else {
-                RCLCPP_WARN(this->get_logger(), "Optimizing for node %d", kv.first);
+                RCLCPP_WARN(this->get_logger(), "Optimizing for AGV node %d", kv.first);
+            }
+   
+        }
+
+        for (auto& kv : uav_map) {
+            State& state = kv.second;
+            problem.AddParameterBlock(state.state.data(), 4); 
+            problem.SetManifold(state.state.data(), state_manifold_3d);
+            // For a starting node: only fix if it has been optimized before AND is outside the window.
+            if (first_optimization_done_ && isNodeFixed(current_time, kv.first, uav_map, global_opt_window_s_)) {
+                problem.SetParameterBlockConstant(state.state.data());
+            } else {
+                RCLCPP_WARN(this->get_logger(), "Optimizing for UAV node %d", kv.first);
             }
    
         }
 
        // For the starting nodes, add the prior residual blocks if they are not yet optimized and fixed.
-        if (!first_optimization_done_ || !isNodeFixed(current_time, agv_starting_id_, global_map, global_opt_window_s_)) {
-            auto first_node_agv = global_map[agv_starting_id_];
+        if (!first_optimization_done_ || !isNodeFixed(current_time, 0, agv_map, global_opt_window_s_)) {
+            auto first_node_agv = agv_map[0];
             ceres::CostFunction* prior_cost_agv = PriorResidual::Create(prior_agv_.pose, first_node_agv.roll, first_node_agv.pitch, prior_agv_.covariance);
             problem.AddResidualBlock(prior_cost_agv, nullptr, first_node_agv.state.data());
         }
 
-        if (!first_optimization_done_ || !isNodeFixed(current_time, uav_starting_id_, global_map, global_opt_window_s_)) {    
-            auto first_node_uav = global_map[uav_starting_id_];
+        if (!first_optimization_done_ || !isNodeFixed(current_time, 0, uav_map, global_opt_window_s_)) {    
+            auto first_node_uav = uav_map[0];
             ceres::CostFunction* prior_cost_uav = PriorResidual::Create(prior_uav_.pose, first_node_uav.roll, first_node_uav.pitch, prior_uav_.covariance);
             problem.AddResidualBlock(prior_cost_uav, nullptr, first_node_uav.state.data());
         }
 
-        /****************Add measurement constraints**********************/
-        for(auto& constraint : proprioceptive_constraints){
+        // Add measurement constraints for each set.
+        bool proprioceptive_constraints_agv_available = addMeasurementConstraints(problem, proprioceptive_constraints_agv, agv_map, current_time, global_opt_window_s_, robust_loss);
+        bool proprioceptive_constraints_uav_available = addMeasurementConstraints(problem, proprioceptive_constraints_uav, uav_map, current_time, global_opt_window_s_, robust_loss);
+        bool extraceptive_constraints_agv_available = addMeasurementConstraints(problem, extraceptive_constraints_agv, agv_map, current_time, global_opt_window_s_, robust_loss);
+        bool extraceptive_constraints_uav_available = addMeasurementConstraints(problem, extraceptive_constraints_uav, uav_map, current_time, global_opt_window_s_, robust_loss);
 
-            bool source_fixed = first_optimization_done_ && isNodeFixed(current_time, constraint.id_begin, global_map, global_opt_window_s_); // your function to check
-            bool target_fixed = first_optimization_done_ && isNodeFixed(current_time, constraint.id_end, global_map, global_opt_window_s_);
-            if (source_fixed && target_fixed) {
-                // Both nodes are fixed; skip adding this constraint.
-                continue;
-            }
-            // Retrieve the states associated with the constraint.
-            State& state_i = global_map[constraint.id_begin];
-            State& state_j = global_map[constraint.id_end];
+        // Add encounter constraints.
+        bool encounter_uwb_available = addEncounterConstraints(problem, encounter_constraints_uwb, agv_map, uav_map, current_time, global_opt_window_s_, robust_loss);
+        bool encounter_pointcloud_available = addEncounterConstraints(problem, encounter_constraints_pointcloud, agv_map, uav_map, current_time, global_opt_window_s_, robust_loss);
+        // (You may want to update a flag if any encounter constraint was added.)
 
-            /****************Add proprioceptive measurement constraints**********************/
-            ceres::CostFunction* rel_cost = MeasurementResidual::Create(constraint.t_T_s, constraint.covariance, state_i.roll, state_i.pitch, state_j.roll, state_j.pitch);
-            problem.AddResidualBlock(rel_cost, nullptr, state_i.state.data(), state_j.state.data()); 
-            RCLCPP_WARN(this->get_logger(), "Adding constraint btw nodes %d and %d", constraint.id_begin, constraint.id_end);
-
-        }
-
-        bool found_encounter = false;
-        for(auto& constraint : encounter_constraints){
-
-            bool source_fixed = first_optimization_done_ && isNodeFixed(current_time, constraint.id_begin, global_map, global_opt_window_s_); // your function to check
-            bool target_fixed = first_optimization_done_ && isNodeFixed(current_time, constraint.id_end, global_map, global_opt_window_s_);
-            if (source_fixed && target_fixed) {
-                // Both nodes are fixed; skip adding this constraint.
-                continue;
-            }
-
-            found_encounter = true;
-
-            // Retrieve the states associated with the constraint.
-            State& state_i = global_map[constraint.id_begin];
-            State& state_j = global_map[constraint.id_end];
-
-            ceres::CostFunction* anchor_cost = AnchorResidual::Create(constraint.t_T_s, constraint.covariance, 
-                state_i.roll, state_i.pitch, state_j.roll, state_j.pitch, 
-                anchor_node_uav_.roll, anchor_node_uav_.pitch, anchor_node_agv_.roll, anchor_node_agv_.pitch);
-
-            problem.AddResidualBlock(anchor_cost, nullptr, state_i.state.data(), state_j.state.data(), anchor_node_uav_.state.data(), anchor_node_agv_.state.data());
-
-            //AGV anchor node has prior
-            ceres::CostFunction* prior_cost_anchor = PriorResidual::Create(prior_anchor_.pose, anchor_node_agv_.roll, anchor_node_agv_.pitch, prior_anchor_.covariance);
-            problem.AddResidualBlock(prior_cost_anchor, nullptr, anchor_node_agv_.state.data());     
-            RCLCPP_WARN(this->get_logger(), "Found encounter btw nodes %d and %d", constraint.id_begin, constraint.id_end);
-
-        }
-
-        if(!found_encounter){
+        if(!encounter_uwb_available && !encounter_pointcloud_available){
             // Freeze the anchor nodes when the constraints available do not involve encounters
             problem.SetParameterBlockConstant(anchor_node_uav_.state.data());
             problem.SetParameterBlockConstant(anchor_node_agv_.state.data());
@@ -1547,7 +1531,12 @@ private:
             ceres::Covariance covariance(cov_options);
 
             std::vector<std::pair<const double*, const double*>> covariance_blocks;
-            for (auto& kv : global_map) {
+            for (auto& kv : agv_map) {
+                // kv.first is the node's unique ID and kv.second is the State.
+                covariance_blocks.emplace_back(kv.second.state.data(), kv.second.state.data());
+            }
+
+            for (auto& kv : uav_map) {
                 // kv.first is the node's unique ID and kv.second is the State.
                 covariance_blocks.emplace_back(kv.second.state.data(), kv.second.state.data());
             }
@@ -1557,7 +1546,13 @@ private:
 
             if (covariance.Compute(covariance_blocks, &problem)) {
                 // Update each node's covariance in the unified map.
-                for (auto& kv : global_map) {
+                for (auto& kv : agv_map) {
+                    Eigen::Matrix4d cov = Eigen::Matrix4d::Zero();
+                    covariance.GetCovarianceBlock(kv.second.state.data(), kv.second.state.data(), cov.data());
+                    kv.second.covariance = cov;
+                }
+
+                for (auto& kv : uav_map) {
                     Eigen::Matrix4d cov = Eigen::Matrix4d::Zero();
                     covariance.GetCovarianceBlock(kv.second.state.data(), kv.second.state.data(), cov.data());
                     kv.second.covariance = cov;
@@ -1574,7 +1569,11 @@ private:
             } else {
                 RCLCPP_WARN(this->get_logger(), "Failed to compute covariances.");
                 // Set default covariances if needed.
-                for (auto& kv : global_map) {
+                for (auto& kv : agv_map) {
+                    kv.second.covariance = Eigen::Matrix4d::Identity();
+                }
+
+                for (auto& kv : uav_map) {
                     kv.second.covariance = Eigen::Matrix4d::Identity();
                 }
 
@@ -1833,8 +1832,8 @@ private:
     rclcpp::Client<uwb_localization::srv::UpdatePointClouds>::SharedPtr pcl_visualizer_client_;
 
     //Pose publishers
-    rclcpp::Publisher<geometry_msgs::msg::PoseWithCovarianceStamped>::SharedPtr pose_uav_publisher_, pose_agv_publisher_;
-    rclcpp::Publisher<uwb_localization::msg::PoseWithCovarianceStampedArray>::SharedPtr global_poses_uav_publisher_, global_poses_agv_publisher_;
+    rclcpp::Publisher<geometry_msgs::msg::PoseWithCovarianceStamped>::SharedPtr anchor_agv_publisher_, anchor_uav_publisher_;
+    rclcpp::Publisher<uwb_localization::msg::PoseWithCovarianceStampedArray>::SharedPtr poses_uav_publisher_, poses_agv_publisher_;
 
     //Lidar and radar positions
     Sophus::SE3d T_uav_lidar_, T_agv_lidar_;
@@ -1855,12 +1854,12 @@ private:
     State anchor_node_uav_, anchor_node_agv_;
     PriorConstraint prior_agv_, prior_uav_, prior_anchor_;
 
-    MapOfStates global_map_;
-    VectorOfConstraints inter_uwb_constraints_;
-    VectorOfConstraints proprioceptive_constraints_, encounter_constraints_;
+    MapOfStates uav_map_, agv_map_;
+    VectorOfConstraints proprioceptive_constraints_uav_, extraceptive_constraints_uav_; 
+    VectorOfConstraints proprioceptive_constraints_agv_, extraceptive_constraints_agv_;
+    VectorOfConstraints encounter_constraints_uwb_, encounter_constraints_pointcloud_;
     Measurements agv_measurements_, prev_agv_measurements_, uav_measurements_, prev_uav_measurements_;
     int uav_id_, agv_id_;
-    int uav_starting_id_, agv_starting_id_;
     bool graph_initialized_, first_optimization_done_;
     // Publishers/Broadcasters
     std::shared_ptr<tf2_ros::TransformBroadcaster> tf_broadcaster_;
@@ -1871,14 +1870,12 @@ private:
 
     double global_opt_window_s_, global_opt_rate_s_;
 
-    Sophus::SE3d uav_odom_pose_;         // Current UAV odometry position and last used for optimization
+    Sophus::SE3d uav_odom_pose_, last_uav_odom_pose_;         // Current UAV odometry position and last used for optimization
     Sophus::SE3d agv_odom_pose_, last_agv_odom_pose_;        // Current AGV odometry position and last used for optimization
     Eigen::Matrix<double, 6, 6> uav_odom_covariance_, agv_odom_covariance_ ;  // UAV and AGV odometry covariance
     Eigen::Quaterniond uav_quaternion_;
 
-    geometry_msgs::msg::Vector3Stamped last_uav_linear_vel_msg_, last_uav_angular_vel_msg_;
     nav_msgs::msg::Odometry last_agv_odom_msg_, last_uav_odom_msg_;
-    bool last_uav_linear_vel_initialized_, last_uav_angular_vel_initialized_;
     bool last_agv_odom_initialized_, last_uav_odom_initialized_;
     
     double min_traveled_distance_, min_traveled_angle_;
