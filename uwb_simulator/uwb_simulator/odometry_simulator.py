@@ -57,14 +57,16 @@ class OdometrySimulator(Node):
         self.publish_rate = self.get_parameter('pub_rate').value
 
         # Initialize odometry to starting poses
-        self.uav_pose = np.array(self.get_parameter('uav_origin').value)
-        self.agv_pose = np.array(self.get_parameter('ground_vehicle_origin').value)
+        self.uav_origin = np.array(self.get_parameter('uav_origin').value)
+        self.agv_origin = np.array(self.get_parameter('ground_vehicle_origin').value)
 
         self.odom_error_position = self.get_parameter('odom_error_position').value
         self.odom_error_angle = self.get_parameter('odom_error_angle').value
 
-        self.uav_odom_pose = self.uav_pose
-        self.agv_odom_pose = self.agv_pose
+        self.uav_pose = self.uav_origin
+        self.agv_pose = self.agv_origin
+        self.uav_odom_pose = np.array([0.0, 0.0, 0.0, 0.0])
+        self.agv_odom_pose = np.array([0.0, 0.0, 0.0, 0.0])
 
         self.linear_velocity_range = self.get_parameter('linear_velocity_range').value
         self.max_linear_acceleration = self.get_parameter('max_linear_acceleration').value
@@ -277,7 +279,8 @@ class OdometrySimulator(Node):
         incremental_angle_uav = abs(w_uav) * dt
         self.traveled_distance_uav += incremental_distance_uav
         self.traveled_angle_uav += np.rad2deg(incremental_angle_uav)
-        self.uav_pose, self.uav_odom_pose = self.integrate_odometry(self.uav_pose, self.uav_odom_pose, v_uav, w_uav, dt, self.traveled_distance_uav, self.traveled_angle_uav, self.holonomic_xy)
+        self.uav_pose = self.integrate_odometry(self.uav_pose, v_uav, w_uav, dt, self.traveled_distance_uav, self.traveled_angle_uav, self.uav_origin, self.holonomic_xy, False)
+        self.uav_odom_pose = self.integrate_odometry(self.uav_pose, v_uav, w_uav, dt, self.traveled_distance_uav, self.traveled_angle_uav, self.uav_origin, self.holonomic_xy, True)
 
         # Update AGV pose - GT and Odometry
         agv_command = self.agv_velocity_commands.pop(0)
@@ -288,17 +291,19 @@ class OdometrySimulator(Node):
         incremental_angle_agv = abs(w_agv) * dt
         self.traveled_distance_agv += incremental_distance_agv
         self.traveled_angle_agv += np.rad2deg(incremental_angle_agv)
-        self.agv_pose, self.agv_odom_pose = self.integrate_odometry(self.agv_pose, self.agv_odom_pose, v_agv, w_agv, dt, self.traveled_distance_agv, self.traveled_angle_agv, self.holonomic_xy)
-
-        self.get_logger().info(f'Traveled distance AGV: {self.traveled_distance_agv:.2f}', throttle_duration_sec=1)
+        self.agv_pose = self.integrate_odometry(self.agv_pose, v_agv, w_agv, dt, self.traveled_distance_agv, self.traveled_angle_agv, self.agv_origin, self.holonomic_xy, False)
+        self.agv_odom_pose = self.integrate_odometry(self.agv_pose, v_agv, w_agv, dt, self.traveled_distance_agv, self.traveled_angle_agv, self.agv_origin, self.holonomic_xy, True)
+        #self.get_logger().info(f'Traveled distance AGV: {self.traveled_distance_agv:.2f}', throttle_duration_sec=1)
+        self.get_logger().info(f'AGV Odom Pose: {self.agv_odom_pose}', throttle_duration_sec=1)
+        self.get_logger().info(f'UAV Odom Pose: {self.uav_odom_pose}', throttle_duration_sec=1)
 
         # Publish transforms (ground truth)
         self.transform_publisher(self.uav_pose, 'world', 'uav_gt')
         self.transform_publisher(self.agv_pose, 'world', 'agv_gt')
 
         # Publish odometry
-        self.transform_publisher(self.uav_odom_pose, 'world', 'uav_odom')
-        self.transform_publisher(self.agv_odom_pose, 'world', 'agv_odom')
+        self.transform_publisher(self.uav_odom_pose + self.uav_origin, 'world', 'uav_odom')
+        self.transform_publisher(self.agv_odom_pose + self.agv_origin, 'world', 'agv_odom')
 
         # Publish odometry messages for UAV and AGV
         self.publish_odometry(
@@ -310,26 +315,14 @@ class OdometrySimulator(Node):
             cumulative_covariance=self.agv_cumulative_covariance
         )
 
-    def integrate_odometry(self, pose_gt, pose_odom, v, w, dt, traveled_distance, traveled_angle, holonomic = True):
+    def integrate_odometry(self, pose, v, w, dt, traveled_distance, traveled_angle, origin, holonomic = True, odom = False):
         """Integrate odometry using simple kinematic equations."""
-        x, y, z, theta = pose_gt
-        xp, yp, zp, thetap = pose_odom    
-        
+        x, y, z, theta = pose
+
         #Systematic error based on total distance traveled (cumulative)
         error_distance_sys = traveled_distance * self.odom_error_position / 100.0
         error_angle_sys = np.deg2rad(traveled_angle * self.odom_error_angle / 100.0)
-        
-        # Error delta based on increments (independent, non-cumulative)
-        delta_distance = np.linalg.norm(v)*dt
-        delta_angle = abs(w) * dt
-
-        error_distance_delta = delta_distance * self.odom_error_position / 100.0
-        error_angle_delta = np.deg2rad(delta_angle * self.odom_error_angle / 100.0)  # Convert to radians
-        
-        # Odometry error
-        error_distance = np.random.normal(error_distance_sys, error_distance_delta)
-        error_angle = np.random.normal(error_angle_sys, error_angle_delta)
-
+    
         if holonomic is True:
             # Independent motion in x, y, and yaw
             dx = v[0] * dt
@@ -347,20 +340,34 @@ class OdometrySimulator(Node):
                 dy = r * (np.cos(theta) - np.cos(theta + w * dt))
         
         dtheta = w * dt
-
-        dxp = dx + error_distance * np.cos(thetap)
-        dyp = dy + error_distance * np.sin(thetap)
-
-        # Apply angular error to odometry (affecting yaw estimation)
-        dthetap = dtheta + error_angle
-
         dz = 0.0
-        dzp = 0.0
 
-        pose_gt = np.array([x + dx, y + dy, z + dz, theta + dtheta])
-        pose_odom = np.array([x + dxp, y + dyp, z + dzp, theta + dthetap])
+        if(odom == True):
 
-        return pose_gt, pose_odom
+            # Error delta based on increments (independent, non-cumulative)
+            delta_distance = np.linalg.norm(v)*dt
+            delta_angle = abs(w) * dt
+
+            error_distance_delta = delta_distance * self.odom_error_position / 100.0
+            error_angle_delta = np.deg2rad(delta_angle * self.odom_error_angle / 100.0)  # Convert to radians
+            
+            # Odometry error
+            error_distance = np.random.normal(error_distance_sys, error_distance_delta)
+            error_angle = np.random.normal(error_angle_sys, error_angle_delta)
+
+            dxp = dx + error_distance * np.cos(theta)
+            dyp = dy + error_distance * np.sin(theta)
+            dzp = 0.0
+            # Apply angular error to odometry (affecting yaw estimation)
+            dthetap = error_angle
+
+            pose = np.array([x + dxp, y + dyp, z + dzp, theta + dthetap]) - origin
+
+        else:
+
+            pose = np.array([x + dx, y + dy, z + dz, theta + dtheta])
+
+        return pose
     
 
     def publish_odometry(self, pose, linear_velocity, angular_velocity, dt, traveled_distance, traveled_angle, frame_id, topic, cumulative_covariance):
@@ -421,7 +428,7 @@ class OdometrySimulator(Node):
         """Plot UAV and AGV trajectories based on velocity commands."""
         uav_positions_gt = [self.uav_pose[:3]]
         agv_positions_gt = [self.agv_pose[:3]]
-        uav_positions_odom = [self.uav_odom_pose[:3]]
+        uav_positions_odom = [self.uav_odom_pose[:3]+self.uav_origin[:3]]
         agv_positions_odom = [self.agv_odom_pose[:3]]
 
         temp_uav_pose = self.uav_pose.copy()
@@ -439,20 +446,22 @@ class OdometrySimulator(Node):
             w_uav = uav_command[2]  # Extract angular velocity
             temp_traveled_distance_uav += np.linalg.norm(v_uav) * dt
             temp_traveled_angle_uav += np.rad2deg(abs(w_uav) * dt)
-            temp_uav_pose, temp_uav_odom_pose = self.integrate_odometry(
-                temp_uav_pose, temp_uav_odom_pose, v_uav, w_uav, dt, temp_traveled_distance_uav, temp_traveled_angle_uav, self.holonomic_xy
-            )
+
+            temp_uav_pose = self.integrate_odometry(temp_uav_pose, v_uav, w_uav, dt, temp_traveled_distance_uav, temp_traveled_angle_uav, self.uav_origin, self.holonomic_xy, False)
+            temp_uav_odom_pose = self.integrate_odometry(temp_uav_pose, v_uav, w_uav, dt, temp_traveled_distance_uav, temp_traveled_angle_uav, self.uav_origin, self.holonomic_xy, True)
+
             uav_positions_gt.append(temp_uav_pose[:3])
-            uav_positions_odom.append(temp_uav_odom_pose[:3])
+            uav_positions_odom.append(temp_uav_odom_pose[:3] + self.uav_origin[:3])
 
         for agv_command in self.agv_velocity_commands:
             v_agv = np.array(agv_command[:2])  # Extract [v_x, v_y]
             w_agv = agv_command[2]  # Extract angular velocity
             temp_traveled_distance_agv += np.linalg.norm(v_agv) * dt
             temp_traveled_angle_agv += np.rad2deg(abs(w_agv) * dt)
-            temp_agv_pose, temp_agv_odom_pose = self.integrate_odometry(
-                temp_agv_pose, temp_agv_odom_pose, v_agv, w_agv, dt, temp_traveled_distance_agv, temp_traveled_angle_agv, self.holonomic_xy
-            )
+
+            temp_agv_pose = self.integrate_odometry(temp_agv_pose, v_agv, w_agv, dt, temp_traveled_distance_agv, temp_traveled_angle_agv, self.agv_origin, self.holonomic_xy, False)
+            temp_agv_odom_pose = self.integrate_odometry(temp_agv_pose, v_agv, w_agv, dt, temp_traveled_distance_agv, temp_traveled_angle_agv, self.agv_origin, self.holonomic_xy, True)
+
             agv_positions_gt.append(temp_agv_pose[:3])
             agv_positions_odom.append(temp_agv_odom_pose[:3])
 

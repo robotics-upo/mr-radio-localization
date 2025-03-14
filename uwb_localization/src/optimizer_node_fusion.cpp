@@ -240,7 +240,7 @@ public:
     tf_broadcaster_ = std::make_shared<tf2_ros::TransformBroadcaster>(this);
 
     global_opt_window_s_ = 5.0; //size of the sliding window in seconds
-    global_opt_rate_s_ = 0.2 * global_opt_window_s_; //rate of the optimization
+    global_opt_rate_s_ = 0.1; //rate of the optimization
     min_keyframes_ = 3.0; //number of nodes to run optimization
 
     T_uav_lidar_ = build_transformation_SE3(0.0,0.0, Eigen::Vector4d(0.21,0.0,0.25,0.0));
@@ -293,7 +293,6 @@ private:
         
         agv_odom_pose_ = Sophus::SE3d(q, t);
 
-
         // If this is the first message, simply store it and return.
         if (!last_agv_odom_initialized_) {
             last_agv_odom_msg_ = *msg;
@@ -312,7 +311,6 @@ private:
         agv_translation_+=delta_translation.norm();
         agv_rotation_+=delta_rotation.norm();       
         
-    
         //Read covariance
         Eigen::Matrix<double,6,6> cov;
         for (int i = 0; i < 6; i++) {
@@ -321,7 +319,7 @@ private:
             }
         }
         agv_odom_covariance_ = cov;
-        
+        last_agv_odom_pose_ = agv_odom_pose_;
         last_agv_odom_msg_ = *msg;
     
         // RCLCPP_INFO(this->get_logger(), "Updated AGV odometry");
@@ -374,7 +372,7 @@ private:
             }
         }
         uav_odom_covariance_ = cov;
-        
+        last_uav_odom_pose_ = uav_odom_pose_;
         last_uav_odom_msg_ = *msg;
     
         // RCLCPP_INFO(this->get_logger(), "Updated AGV odometry from velocities");
