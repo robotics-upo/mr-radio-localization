@@ -249,13 +249,13 @@ class MeasurementSimulatorEliko(Node):
                 # Get the AGV transform (w_T_s) --odometry, not gt
                 odom_source = self.tf_buffer.lookup_transform(
                     'world', 
-                    'agv_odom', 
+                    'agv/base_link', 
                     rclpy.time.Time())
                 
                 # Get the AGV transform (w_T_s) --odometry, not gt
                 odom_target = self.tf_buffer.lookup_transform(
                     'world', 
-                    'uav_odom', 
+                    'uav/base_link', 
                     rclpy.time.Time())
                                 
                 T_w_s = self.transform_stamped_to_matrix(gt_source)
@@ -411,13 +411,13 @@ class MeasurementSimulatorEliko(Node):
             # Get the AGV transform (w_T_s) --odometry, not gt
             agv_transform = self.tf_buffer.lookup_transform(
                 'world', 
-                'agv_odom', 
+                'agv/base_link', 
                 rclpy.time.Time())
             
             # Get the AGV transform (w_T_s) --odometry, not gt
             uav_transform = self.tf_buffer.lookup_transform(
                 'world', 
-                'uav_odom', 
+                'uav/base_link', 
                 rclpy.time.Time())
 
             # Store the transform with a timestamp

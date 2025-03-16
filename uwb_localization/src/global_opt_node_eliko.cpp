@@ -17,6 +17,8 @@
 #include "eliko_messages/msg/anchor_coords_list.hpp"
 #include "eliko_messages/msg/tag_coords_list.hpp"
 
+//#include "uwb_localization/algebraic_initialization.h"
+
 #include "geometry_msgs/msg/pose_with_covariance_stamped.hpp"
 
 #include <ceres/ceres.h>
@@ -30,6 +32,7 @@
 #include <sstream>
 #include <deque>
 #include <Eigen/Dense>
+
 #include <utility>
 #include <unordered_map>
 #include <chrono>
@@ -150,12 +153,6 @@ public:
     uav_odom_sub_ = this->create_subscription<nav_msgs::msg::Odometry>(
         odom_topic_uav, qos, std::bind(&ElikoGlobalOptNode::uav_odom_cb_, this, std::placeholders::_1));
     
-    //Option 2: get odometry through tf readings -> only transform
-    odom_tf_agv_s_ = "agv_odom"; //source "agv_odom"
-    odom_tf_agv_t_ = "world"; //target "world"
-    odom_tf_uav_s_ = "uav_odom"; // "uav_odom"
-    odom_tf_uav_t_ = "world"; //"world"
-    
     // Create publisher/broadcaster for optimized transformation
     tf_publisher_ = this->create_publisher<geometry_msgs::msg::PoseWithCovarianceStamped>("eliko_optimization_node/optimized_T", 10);
     tf_broadcaster_ = std::make_shared<tf2_ros::TransformBroadcaster>(this);
@@ -190,8 +187,10 @@ public:
     anchor_positions_odom_ = last_anchor_positions_odom_ = anchor_positions_;
     tag_positions_odom_ = last_tag_positions_odom_ = tag_positions_;
 
-    agv_odom_frame_id_ = "agv_odom"; //frame of the eliko system-> arco/eliko, for simulation use "agv_gt" for ground truth, "agv_odom" for odometry w/ errors
-    uav_odom_frame_id_ = "uav_odom"; //frame of the UAV system-> uav_gt for ground truth, "uav_odom" for odometry w/ errors
+    agv_odom_frame_id_ = "agv/odom"; //frame of the eliko system-> arco/eliko, for simulation use "agv_gt" for ground truth, "agv_odom" for odometry w/ errors
+    uav_odom_frame_id_ = "uav/odom"; //frame of the UAV system-> uav_gt for ground truth, "uav_odom" for odometry w/ errors
+    agv_body_frame_id_ = "agv/base_link";
+    uav_body_frame_id_ = "uav/base_link";
     uav_opt_frame_id_ = "uav_opt"; 
     agv_opt_frame_id_ = "agv_opt"; 
 
@@ -212,7 +211,6 @@ public:
     min_traveled_distance_ = 0.25;
     min_traveled_angle_ = 25.0 * M_PI / 180.0;
     max_traveled_distance_ = min_traveled_distance_ * 10.0;
-    max_traveled_angle_ = min_traveled_angle_ * 10.0;
     uav_delta_translation_ = agv_delta_translation_ = uav_delta_rotation_ = agv_delta_rotation_ = 0.0;
 
     odom_error_distance_ = 2.0;
@@ -441,8 +439,8 @@ private:
             RCLCPP_INFO(this->get_logger(), "[Eliko global_opt node] Got a minimal subset of %ld measurements:", minimalSubset.size());
             for (size_t i = 0; i < minimalSubset.size(); i++) {
                 const auto &meas = minimalSubset[i];
-                RCLCPP_INFO(this->get_logger(), "Measurement %ld: Tag Position in UAV Odometry Frame = [%.2f, %.2f, %.2f], Anchor Position in AGV Odometry Frame = [%.2f, %.2f, %.2f]",
-                    i,
+                RCLCPP_INFO(this->get_logger(), "Measurement at timestamp %.2f: Tag Position in UAV Odometry Frame = [%.2f, %.2f, %.2f], Anchor Position in AGV Odometry Frame = [%.2f, %.2f, %.2f]",
+                    meas.timestamp.seconds(),
                     meas.tag_odom_pose.x(), meas.tag_odom_pose.y(), meas.tag_odom_pose.z(),
                     meas.anchor_odom_pose.x(), meas.anchor_odom_pose.y(), meas.anchor_odom_pose.z());
             }
@@ -502,10 +500,10 @@ private:
 
             Sophus::SE3d That_ts = build_transformation_SE3(opt_state_.roll, opt_state_.pitch, opt_state_.state);
 
-            publish_transform(That_ts.inverse(), agv_odom_frame_id_, uav_opt_frame_id_, opt_state_.timestamp);
-            publish_transform(That_ts, uav_odom_frame_id_, agv_opt_frame_id_, opt_state_.timestamp);
+            publish_transform(That_ts.inverse(), agv_body_frame_id_, uav_opt_frame_id_, opt_state_.timestamp);
+            publish_transform(That_ts, uav_body_frame_id_, agv_opt_frame_id_, opt_state_.timestamp);
             
-            geometry_msgs::msg::PoseWithCovarianceStamped msg = build_pose_msg(That_ts, opt_state_.covariance + predicted_motion_covariance, opt_state_.timestamp, uav_odom_frame_id_);
+            geometry_msgs::msg::PoseWithCovarianceStamped msg = build_pose_msg(That_ts, opt_state_.covariance + predicted_motion_covariance, opt_state_.timestamp, uav_body_frame_id_);
             tf_publisher_->publish(msg);
 
         }
@@ -751,7 +749,6 @@ private:
         return minimalSubset;
     }
 
-
     // Run the optimization once all measurements are received
     bool run_optimization(const rclcpp::Time &current_time, const Eigen::Matrix4d& motion_covariance) {
 
@@ -786,10 +783,12 @@ private:
             problem.AddResidualBlock(prior_cost, nullptr, opt_state.state.data());
 
             for (const auto& measurement : global_measurements_) {                   
+                
                 //Use positions of anchors and tags in the body frame (no odometry)
                 Eigen::Vector3d anchor_pos = anchor_positions_[measurement.anchor_id];
                 Eigen::Vector3d tag_pos = tag_positions_[measurement.tag_id];
-                //Use positions of anchors and tags in each robot odometry frame
+                
+                // //Use positions of anchors and tags in each robot odometry frame
                 // Eigen::Vector3d anchor_pos = measurement.anchor_odom_pose;
                 // Eigen::Vector3d tag_pos = measurement.tag_odom_pose;
 
@@ -987,9 +986,9 @@ private:
     std::unordered_map<std::string, Eigen::Vector3d> anchor_positions_;
     std::unordered_map<std::string, Eigen::Vector3d> tag_positions_;
 
-    std::string agv_odom_frame_id_, uav_odom_frame_id_, uav_opt_frame_id_, agv_opt_frame_id_;
-    std::string odom_tf_agv_s_, odom_tf_agv_t_;
-    std::string odom_tf_uav_s_, odom_tf_uav_t_;
+    std::string agv_odom_frame_id_, uav_odom_frame_id_;
+    std::string agv_body_frame_id_, uav_body_frame_id_;
+    std::string uav_opt_frame_id_, agv_opt_frame_id_;
 
     State opt_state_;
     State init_state_;
@@ -1006,7 +1005,7 @@ private:
     nav_msgs::msg::Odometry last_agv_odom_msg_, last_uav_odom_msg_;
     bool last_agv_odom_initialized_, last_uav_odom_initialized_;
 
-    double min_traveled_distance_, min_traveled_angle_, max_traveled_distance_, max_traveled_angle_;
+    double min_traveled_distance_, min_traveled_angle_, max_traveled_distance_;
     double uav_delta_translation_, agv_delta_translation_, uav_delta_rotation_, agv_delta_rotation_;
 
     std::unordered_map<std::string, Eigen::Vector3d> anchor_positions_odom_, last_anchor_positions_odom_, tag_positions_odom_, last_tag_positions_odom_;

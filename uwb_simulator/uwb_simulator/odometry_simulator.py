@@ -124,6 +124,10 @@ class OdometrySimulator(Node):
         self.uav_cumulative_covariance = [0.0] * 36  # 6x6 matrix in row-major order
         self.agv_cumulative_covariance = [0.0] * 36  # 6x6 matrix in row-major order
 
+        #create odom frames
+        self.create_odom_frame(self.agv_origin, 'agv/odom')
+        self.create_odom_frame(self.uav_origin, 'uav/odom')
+
         # Create tags in UAV frame
         self.create_tag(tags_location['t1'], 't1')
         self.create_tag(tags_location['t2'], 't2')
@@ -293,6 +297,7 @@ class OdometrySimulator(Node):
         self.traveled_angle_agv += np.rad2deg(incremental_angle_agv)
         self.agv_pose = self.integrate_odometry(self.agv_pose, v_agv, w_agv, dt, self.traveled_distance_agv, self.traveled_angle_agv, self.agv_origin, self.holonomic_xy, False)
         self.agv_odom_pose = self.integrate_odometry(self.agv_pose, v_agv, w_agv, dt, self.traveled_distance_agv, self.traveled_angle_agv, self.agv_origin, self.holonomic_xy, True)
+        
         #self.get_logger().info(f'Traveled distance AGV: {self.traveled_distance_agv:.2f}', throttle_duration_sec=1)
         self.get_logger().info(f'AGV Odom Pose: {self.agv_odom_pose}', throttle_duration_sec=1)
         self.get_logger().info(f'UAV Odom Pose: {self.uav_odom_pose}', throttle_duration_sec=1)
@@ -302,16 +307,16 @@ class OdometrySimulator(Node):
         self.transform_publisher(self.agv_pose, 'world', 'agv_gt')
 
         # Publish odometry
-        self.transform_publisher(self.uav_odom_pose + self.uav_origin, 'world', 'uav_odom')
-        self.transform_publisher(self.agv_odom_pose + self.agv_origin, 'world', 'agv_odom')
+        self.transform_publisher(self.uav_odom_pose, 'uav/odom', 'uav/base_link')
+        self.transform_publisher(self.agv_odom_pose, 'agv/odom', 'agv/base_link')
 
         # Publish odometry messages for UAV and AGV
         self.publish_odometry(
-            self.uav_odom_pose, v_uav, w_uav, dt, self.traveled_distance_uav, self.traveled_angle_uav, 'world', '/uav/odom',
+            self.uav_odom_pose, v_uav, w_uav, dt, self.traveled_distance_uav, self.traveled_angle_uav, 'uav/odom', 'uav/base_link', '/uav/odom',
             cumulative_covariance=self.uav_cumulative_covariance
         )
         self.publish_odometry(
-            self.agv_odom_pose, v_agv, w_agv, dt, self.traveled_distance_agv, self.traveled_angle_agv, 'world', '/agv/odom',
+            self.agv_odom_pose, v_agv, w_agv, dt, self.traveled_distance_agv, self.traveled_angle_agv, 'agv/odom', 'agv/base_link', '/agv/odom',
             cumulative_covariance=self.agv_cumulative_covariance
         )
 
@@ -370,12 +375,12 @@ class OdometrySimulator(Node):
         return pose
     
 
-    def publish_odometry(self, pose, linear_velocity, angular_velocity, dt, traveled_distance, traveled_angle, frame_id, topic, cumulative_covariance):
+    def publish_odometry(self, pose, linear_velocity, angular_velocity, dt, traveled_distance, traveled_angle, frame_id, child_frame_id, topic, cumulative_covariance):
         """Publish an odometry message for the given pose."""
         odom_msg = Odometry()
         odom_msg.header.stamp = self.get_clock().now().to_msg()
         odom_msg.header.frame_id = frame_id
-        odom_msg.child_frame_id = topic
+        odom_msg.child_frame_id = child_frame_id
 
         # Set position and orientation
         odom_msg.pose.pose.position.x = pose[0]
@@ -540,6 +545,21 @@ class OdometrySimulator(Node):
         anchor_transform.transform.rotation.w = 1.0  # No rotation for simplicity
 
         self.tf_static_broadcaster.sendTransform(anchor_transform)
+
+    def create_odom_frame(self, position, label):
+
+        # Tag transform
+        odom_transform = TransformStamped()
+        odom_transform.header.stamp = self.get_clock().now().to_msg()
+        odom_transform.header.frame_id = 'world'
+        odom_transform.child_frame_id = label
+
+        odom_transform.transform.translation.x = position[0]
+        odom_transform.transform.translation.y = position[1]
+        odom_transform.transform.translation.z = position[2]
+        odom_transform.transform.rotation.w = 1.0  # No rotation for simplicity
+
+        self.tf_static_broadcaster.sendTransform(odom_transform)
 
 
     def save_trajectories(self):
