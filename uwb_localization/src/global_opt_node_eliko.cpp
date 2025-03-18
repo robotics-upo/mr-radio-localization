@@ -138,7 +138,7 @@ public:
 
     ElikoGlobalOptNode() : Node("eliko_global_opt_node") {
     
-    std::string odom_topic_agv = "/agv/odom"; //or "/agv/odom" "/arco/idmind_motors/odom"
+    std::string odom_topic_agv = "/arco/idmind_motors/odom"; //or "/agv/odom" "/arco/idmind_motors/odom"
     std::string odom_topic_uav = "/uav/odom"; //or "/uav/odom"
 
     //Subscribe to distances publisher
@@ -159,7 +159,7 @@ public:
 
     global_opt_window_s_ = 5.0; //size of the sliding window in seconds
     global_opt_rate_s_ = 0.1; //rate of the optimization
-    min_measurements_ = 50.0; //min number of measurements for running optimizer
+    min_measurements_ = 25.0; //min number of measurements for running optimizer
     measurement_stdev_ = 0.1; //10 cm measurement noise
     measurement_covariance_ = measurement_stdev_ * measurement_stdev_;
 
@@ -208,8 +208,8 @@ public:
     last_agv_odom_initialized_ = false;
     last_uav_odom_initialized_ = false;
 
-    min_traveled_distance_ = 0.25;
-    min_traveled_angle_ = 25.0 * M_PI / 180.0;
+    min_traveled_distance_ = 0.5;
+    min_traveled_angle_ = 30.0 * M_PI / 180.0;
     max_traveled_distance_ = min_traveled_distance_ * 10.0;
     uav_delta_translation_ = agv_delta_translation_ = uav_delta_rotation_ = agv_delta_rotation_ = 0.0;
 
@@ -430,24 +430,23 @@ private:
             }
         }
 
-        std::vector<Measurement> minimalSubset = selectMinimalSubset(global_measurements_, min_traveled_distance_);
-        if (minimalSubset.size() < 6) {
-            RCLCPP_WARN(this->get_logger(), "[Eliko global_opt node] Not enough distinct positions for minimal subset.");
-        }
+        // std::vector<Measurement> minimalSubset = selectMinimalSubset(global_measurements_, min_traveled_distance_);
+        // if (minimalSubset.size() < 6) {
+        //     RCLCPP_WARN(this->get_logger(), "[Eliko global_opt node] Not enough distinct positions for minimal subset.");
+        // }
 
-        else{
-            RCLCPP_INFO(this->get_logger(), "[Eliko global_opt node] Got a minimal subset of %ld measurements:", minimalSubset.size());
-            for (size_t i = 0; i < minimalSubset.size(); i++) {
-                const auto &meas = minimalSubset[i];
-                RCLCPP_INFO(this->get_logger(), "Measurement at timestamp %.2f: Tag Position in UAV Odometry Frame = [%.2f, %.2f, %.2f], Anchor Position in AGV Odometry Frame = [%.2f, %.2f, %.2f]",
-                    meas.timestamp.seconds(),
-                    meas.tag_odom_pose.x(), meas.tag_odom_pose.y(), meas.tag_odom_pose.z(),
-                    meas.anchor_odom_pose.x(), meas.anchor_odom_pose.y(), meas.anchor_odom_pose.z());
-            }
-        }
+        // else{
+        //     RCLCPP_INFO(this->get_logger(), "[Eliko global_opt node] Got a minimal subset of %ld measurements:", minimalSubset.size());
+        //     for (size_t i = 0; i < minimalSubset.size(); i++) {
+        //         const auto &meas = minimalSubset[i];
+        //         RCLCPP_INFO(this->get_logger(), "Measurement at timestamp %.2f: Tag Position in UAV Odometry Frame = [%.2f, %.2f, %.2f], Anchor Position in AGV Odometry Frame = [%.2f, %.2f, %.2f]",
+        //             meas.timestamp.seconds(),
+        //             meas.tag_odom_pose.x(), meas.tag_odom_pose.y(), meas.tag_odom_pose.z(),
+        //             meas.anchor_odom_pose.x(), meas.anchor_odom_pose.y(), meas.anchor_odom_pose.z());
+        //     }
+        // }
 
         //*****************Perform initial algebraic solution ****************************/
-
 
 
 
@@ -500,8 +499,8 @@ private:
 
             Sophus::SE3d That_ts = build_transformation_SE3(opt_state_.roll, opt_state_.pitch, opt_state_.state);
 
-            publish_transform(That_ts.inverse(), agv_body_frame_id_, uav_opt_frame_id_, opt_state_.timestamp);
-            publish_transform(That_ts, uav_body_frame_id_, agv_opt_frame_id_, opt_state_.timestamp);
+            // publish_transform(That_ts.inverse(), agv_body_frame_id_, uav_opt_frame_id_, opt_state_.timestamp);
+            // publish_transform(That_ts, uav_body_frame_id_, agv_opt_frame_id_, opt_state_.timestamp);
             
             geometry_msgs::msg::PoseWithCovarianceStamped msg = build_pose_msg(That_ts, opt_state_.covariance + predicted_motion_covariance, opt_state_.timestamp, uav_body_frame_id_);
             tf_publisher_->publish(msg);

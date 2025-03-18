@@ -1,5 +1,6 @@
 sensor_msgs/PointCloud2 source_cloud
 sensor_msgs/PointCloud2 target_cloud
+sensor_msgs/PointCloud2 aligned_cloud
 ---
 bool success
 string message
