@@ -138,7 +138,7 @@ public:
 
     ElikoGlobalOptNode() : Node("eliko_global_opt_node") {
     
-    std::string odom_topic_agv = "/arco/idmind_motors/odom"; //or "/agv/odom" "/arco/idmind_motors/odom"
+    std::string odom_topic_agv = "/agv/odom"; //or "/agv/odom" "/arco/idmind_motors/odom"
     std::string odom_topic_uav = "/uav/odom"; //or "/uav/odom"
 
     //Subscribe to distances publisher
@@ -159,12 +159,9 @@ public:
 
     global_opt_window_s_ = 5.0; //size of the sliding window in seconds
     global_opt_rate_s_ = 0.1; //rate of the optimization
-    min_measurements_ = 25.0; //min number of measurements for running optimizer
+    min_measurements_ = 50.0; //min number of measurements for running optimizer
     measurement_stdev_ = 0.1; //10 cm measurement noise
     measurement_covariance_ = measurement_stdev_ * measurement_stdev_;
-
-    global_optimization_timer_ = this->create_wall_timer(
-            std::chrono::milliseconds(int(global_opt_rate_s_*1000)), std::bind(&ElikoGlobalOptNode::global_opt_cb_, this));
 
     anchor_positions_ = {
         {"0x0009D6", {-0.32, 0.3, 0.875}}, {"0x0009E5", {0.32, -0.3, 0.875}},
@@ -210,11 +207,15 @@ public:
 
     min_traveled_distance_ = 0.5;
     min_traveled_angle_ = 30.0 * M_PI / 180.0;
-    max_traveled_distance_ = min_traveled_distance_ * 10.0;
+    max_traveled_distance_ = min_traveled_distance_ * 100.0;
     uav_delta_translation_ = agv_delta_translation_ = uav_delta_rotation_ = agv_delta_rotation_ = 0.0;
+    uav_total_translation_ = agv_total_translation_ = uav_total_rotation_ = agv_total_rotation_ = 0.0;
 
     odom_error_distance_ = 2.0;
     odom_error_angle_ = 2.0;
+
+    global_optimization_timer_ = this->create_wall_timer(
+        std::chrono::milliseconds(int(global_opt_rate_s_*1000)), std::bind(&ElikoGlobalOptNode::global_opt_cb_, this));
     
     RCLCPP_INFO(this->get_logger(), "Eliko Optimization Node initialized.");
   }
@@ -277,7 +278,9 @@ private:
         Eigen::Vector3d delta_rotation    = log.tail<3>(); // last three elements
 
         uav_delta_translation_+=delta_translation.norm();
+        uav_total_translation_+=delta_translation.norm();
         uav_delta_rotation_+=delta_rotation.norm();  
+        uav_total_rotation_+=delta_rotation.norm(); 
             
         //Read covariance
         Eigen::Matrix<double,6,6> cov;
@@ -351,7 +354,8 @@ private:
         
         agv_delta_translation_+= delta_translation.norm();
         agv_delta_rotation_ += delta_rotation.norm();
-
+        agv_total_translation_+=delta_translation.norm();
+        agv_total_rotation_+=delta_rotation.norm();
 
         //Read covariance
         Eigen::Matrix<double,6,6> cov;
@@ -400,7 +404,7 @@ private:
         bool uav_enough_movement = uav_delta_translation_ >= min_traveled_distance_ || uav_delta_rotation_ >= min_traveled_angle_;
         bool agv_enough_movement = agv_delta_translation_ >= min_traveled_distance_ || agv_delta_rotation_ >= min_traveled_angle_;
         if (!uav_enough_movement || !agv_enough_movement) {
-            RCLCPP_WARN(this->get_logger(), "[Eliko global_opt node] Insufficient movement UAV = [%.2fm %.2fº], AGV= [%.2fm %.2fº]. Skipping optimization.", uav_delta_translation_, uav_delta_rotation_ * 180.0/M_PI, agv_delta_translation_, agv_delta_rotation_ * 180.0/M_PI);
+            RCLCPP_WARN_THROTTLE(this->get_logger(), *this->get_clock(), 1000, "[Eliko global_opt node] Insufficient movement UAV = [%.2fm %.2fº], AGV= [%.2fm %.2fº]. Skipping optimization.", uav_delta_translation_, uav_delta_rotation_ * 180.0/M_PI, agv_delta_translation_, agv_delta_rotation_ * 180.0/M_PI);
             return;
         }
 
@@ -476,10 +480,12 @@ private:
 
         // Compute odometry covariance based on distance increments from step to step 
         Eigen::Matrix4d predicted_motion_covariance = Eigen::Matrix4d::Zero();
-        predicted_motion_covariance(0,0) = std::pow((2.0 * odom_error_distance_ / 100.0) * uav_delta_translation_, 2.0);
-        predicted_motion_covariance(1,1) = std::pow((2.0 * odom_error_distance_ / 100.0) * uav_delta_translation_, 2.0);
-        predicted_motion_covariance(2,2) = std::pow((2.0 * odom_error_distance_ / 100.0) * uav_delta_translation_, 2.0);
-        predicted_motion_covariance(3,3) = std::pow(((2.0 * odom_error_angle_ / 100.0) * M_PI / 180.0) * uav_delta_rotation_, 2.0);
+        double predicted_drift_translation = (odom_error_distance_ / 100.0) * (uav_delta_translation_ + agv_delta_translation_);
+        double predicted_drift_rotation = (odom_error_angle_ / 100.0) * (uav_delta_rotation_ + agv_delta_rotation_);
+        predicted_motion_covariance(0,0) = std::pow(predicted_drift_translation, 2.0);
+        predicted_motion_covariance(1,1) = std::pow(predicted_drift_translation, 2.0);
+        predicted_motion_covariance(2,2) = std::pow(predicted_drift_translation, 2.0);
+        predicted_motion_covariance(3,3) = std::pow(predicted_drift_rotation, 2.0);
 
 
         //Update odom for next optimization
@@ -498,11 +504,8 @@ private:
             }
 
             Sophus::SE3d That_ts = build_transformation_SE3(opt_state_.roll, opt_state_.pitch, opt_state_.state);
-
-            // publish_transform(That_ts.inverse(), agv_body_frame_id_, uav_opt_frame_id_, opt_state_.timestamp);
-            // publish_transform(That_ts, uav_body_frame_id_, agv_opt_frame_id_, opt_state_.timestamp);
             
-            geometry_msgs::msg::PoseWithCovarianceStamped msg = build_pose_msg(That_ts, opt_state_.covariance + predicted_motion_covariance, opt_state_.timestamp, uav_body_frame_id_);
+            geometry_msgs::msg::PoseWithCovarianceStamped msg = build_pose_msg(That_ts, opt_state_.covariance + predicted_motion_covariance, opt_state_.timestamp, uav_odom_frame_id_);
             tf_publisher_->publish(msg);
 
         }
@@ -784,12 +787,12 @@ private:
             for (const auto& measurement : global_measurements_) {                   
                 
                 //Use positions of anchors and tags in the body frame (no odometry)
-                Eigen::Vector3d anchor_pos = anchor_positions_[measurement.anchor_id];
-                Eigen::Vector3d tag_pos = tag_positions_[measurement.tag_id];
+                // Eigen::Vector3d anchor_pos = anchor_positions_[measurement.anchor_id];
+                // Eigen::Vector3d tag_pos = tag_positions_[measurement.tag_id];
                 
                 // //Use positions of anchors and tags in each robot odometry frame
-                // Eigen::Vector3d anchor_pos = measurement.anchor_odom_pose;
-                // Eigen::Vector3d tag_pos = measurement.tag_odom_pose;
+                Eigen::Vector3d anchor_pos = measurement.anchor_odom_pose;
+                Eigen::Vector3d tag_pos = measurement.tag_odom_pose;
 
                 ceres::CostFunction* cost_function = UWBResidual::Create(
                     anchor_pos, tag_pos, measurement.distance, opt_state.roll, opt_state.pitch, measurement_stdev_);
@@ -1006,6 +1009,7 @@ private:
 
     double min_traveled_distance_, min_traveled_angle_, max_traveled_distance_;
     double uav_delta_translation_, agv_delta_translation_, uav_delta_rotation_, agv_delta_rotation_;
+    double uav_total_translation_, agv_total_translation_, uav_total_rotation_, agv_total_rotation_;
 
     std::unordered_map<std::string, Eigen::Vector3d> anchor_positions_odom_, last_anchor_positions_odom_, tag_positions_odom_, last_tag_positions_odom_;
     std::unordered_map<std::string, double> anchor_delta_translation_;
