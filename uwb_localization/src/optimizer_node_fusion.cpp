@@ -58,6 +58,8 @@
 #include <utility>
 #include <unordered_map>
 #include <chrono>
+#include <fstream>
+#include <iomanip>
 
 #include "uwb_localization/msg/pose_with_covariance_stamped_array.hpp"  
 
@@ -288,6 +290,77 @@ public:
     RCLCPP_INFO(this->get_logger(), "Eliko Optimization Node initialized.");
   }
 
+    // Returns the AGV pose graph as a vector of PoseWithCovarianceStamped messages.
+    uwb_localization::msg::PoseWithCovarianceStampedArray getAGVPoseGraph(){
+        uwb_localization::msg::PoseWithCovarianceStampedArray poses;
+        poses.header.stamp = this->get_clock()->now();
+        poses.header.frame_id = odom_tf_agv_t_;
+        // Assuming you want to use the AGV map:
+        getPoseGraph(agv_map_, poses);
+        return poses;
+    }
+
+    // Returns the AGV pose graph as a vector of PoseWithCovarianceStamped messages.
+    uwb_localization::msg::PoseWithCovarianceStampedArray getUAVPoseGraph(){
+        uwb_localization::msg::PoseWithCovarianceStampedArray poses;
+        poses.header.stamp = this->get_clock()->now();
+        poses.header.frame_id = odom_tf_uav_t_;
+        // Assuming you want to use the AGV map:
+        getPoseGraph(uav_map_, poses);
+        return poses;
+    }
+
+
+    // Function to write the pose graph to a CSV file.
+    void writePoseGraphToCSV(const uwb_localization::msg::PoseWithCovarianceStampedArray& poseGraph,
+        const std::string &filename)
+    {
+            std::ofstream file(filename);
+            if (!file.is_open()) {
+                // Handle error: unable to open file.
+                return;
+            }
+
+            // Write CSV header.
+            file << "id,timestamp,frame_id,position_x,position_y,position_z,"
+            << "orientation_x,orientation_y,orientation_z,orientation_w";
+            // Write covariance headers: cov_0, cov_1, ..., cov_35.
+            for (int i = 0; i < 36; ++i) {
+                file << ",cov_" << i;
+            }
+            file << "\n";
+
+            int id = 0;
+            for (const auto &poseMsg : poseGraph.array) {
+                // Here we combine seconds and nanoseconds into one timestamp string.
+                // Adjust this formatting as needed.
+                std::stringstream timestampStream;
+                timestampStream << poseMsg.header.stamp.sec << "." << std::setw(9) << std::setfill('0') 
+                << poseMsg.header.stamp.nanosec;
+
+                file << id << ","
+                << timestampStream.str() << ","
+                << poseMsg.header.frame_id << ","
+                << std::fixed << std::setprecision(6)
+                << poseMsg.pose.pose.position.x << ","
+                << poseMsg.pose.pose.position.y << ","
+                << poseMsg.pose.pose.position.z << ","
+                << poseMsg.pose.pose.orientation.x << ","
+                << poseMsg.pose.pose.orientation.y << ","
+                << poseMsg.pose.pose.orientation.z << ","
+                << poseMsg.pose.pose.orientation.w;
+
+                // Write all 36 covariance elements.
+                for (size_t i = 0; i < 36; ++i) {
+                    file << "," << poseMsg.pose.covariance[i];
+                }
+                file << "\n";
+                ++id;
+            }
+            file.close();
+    }
+
+
 
 private:
 
@@ -472,6 +545,21 @@ private:
     }
 
 
+    void getPoseGraph(const MapOfStates &map, uwb_localization::msg::PoseWithCovarianceStampedArray &msg){
+
+        // Iterate over the global map and convert each state's optimized pose.
+        for (const auto &kv : map) {             
+            const State &state = kv.second;
+            Sophus::SE3d T = build_transformation_SE3(state.roll, state.pitch, state.state);
+            geometry_msgs::msg::PoseWithCovarianceStamped pose = build_pose_msg(T, state.covariance, state.timestamp, msg.header.frame_id);
+            msg.array.push_back(pose);
+        }
+
+        return;
+
+    }
+
+
     /**
      * @brief Adds a point cloud constraint (either radar or lidar) by running ICP on the given scans.
      * 
@@ -568,6 +656,9 @@ private:
         rclcpp::Time current_time = this->get_clock()->now();
 
         //********************INITIALIZATIONS*********************** */
+        if(!last_agv_odom_initialized_ || !last_uav_odom_initialized_){
+            return;
+        }
         if(!graph_initialized_){
 
             RCLCPP_INFO(this->get_logger(), "Initializing graph!");
@@ -651,19 +742,19 @@ private:
             //Initialize prior constraints
             
             //AGV local trajectory prior
-            prior_agv_.pose = agv_measurements_.odom_pose;
+            prior_agv_.pose = init_state_agv_.pose;
             prior_agv_.covariance = Eigen::Matrix4d::Identity() * 1e-6;
 
             //Anchor AGV prior
-            prior_anchor_agv_.pose = agv_measurements_.odom_pose;
+            prior_anchor_agv_.pose = Sophus::SE3d(Eigen::Matrix4d::Identity());
             prior_anchor_agv_.covariance = Eigen::Matrix4d::Identity() * 1e-6;
 
             //Anchor UAV prior
-            prior_anchor_uav_.pose = uav_measurements_.odom_pose;
+            prior_anchor_uav_.pose = init_state_uav_.pose;
             prior_anchor_uav_.covariance = Eigen::Matrix4d::Identity();
 
             //UAV local trajectory prior
-            prior_uav_.pose = uav_measurements_.odom_pose;
+            prior_uav_.pose = init_state_uav_.pose;
             prior_uav_.covariance = Eigen::Matrix4d::Identity() * 1e-6;
 
             graph_initialized_ = true;
@@ -980,43 +1071,8 @@ private:
             agv_poses.header.frame_id = odom_tf_agv_t_;
             uav_poses.header.frame_id = odom_tf_uav_t_;
 
-            // Iterate over the global map and convert each state's optimized pose.
-            for (const auto &kv : agv_map_) {
-                
-                const State &state = kv.second;
-                Sophus::SE3d T = build_transformation_SE3(state.roll, state.pitch, state.state);
-                geometry_msgs::msg::PoseWithCovarianceStamped pose = build_pose_msg(T, state.covariance, state.timestamp, odom_tf_agv_t_);
-
-                if(kv.first == agv_id_){
-                    publish_transform(T, current_time, odom_tf_agv_t_, eliko_frame_id_);
-                    RCLCPP_INFO(this->get_logger(), "AGV Optimized pose (local):\n"
-                    "[%f, %f, %f, %f]", state.state[0], state.state[1], state.state[2], state.state[3]);
-
-                    Sophus::SE3d global_pose = anchor_node_agv_.pose * T;
-                    publish_transform(global_pose, current_time, global_frame_graph_, eliko_frame_id_);
-                }
-
-                agv_poses.array.push_back(pose);
-            }
-
-
-            // Iterate over the global map and convert each state's optimized pose.
-            for (const auto &kv : uav_map_) {             
-                const State &state = kv.second;
-                Sophus::SE3d T = build_transformation_SE3(state.roll, state.pitch, state.state);
-                geometry_msgs::msg::PoseWithCovarianceStamped pose = build_pose_msg(T, state.covariance, state.timestamp, odom_tf_uav_t_);
-
-                if(kv.first == uav_id_){
-                    publish_transform(T, current_time, odom_tf_uav_t_, uav_frame_id_);
-                    RCLCPP_INFO(this->get_logger(), "UAV Optimized pose (local):\n"
-                    "[%f, %f, %f, %f]", state.state[0], state.state[1], state.state[2], state.state[3]);
-
-                    Sophus::SE3d global_pose = anchor_node_uav_.pose * T;
-                    publish_transform(global_pose, current_time, global_frame_graph_, uav_frame_id_);
-                }
-
-                uav_poses.array.push_back(pose);
-            }
+            getPoseGraph(agv_map_, agv_poses);
+            getPoseGraph(uav_map_, uav_poses);
 
             geometry_msgs::msg::PoseWithCovarianceStamped anchor_agv = build_pose_msg(anchor_node_agv_.pose, anchor_node_agv_.covariance, anchor_node_agv_.timestamp, global_frame_graph_);
             geometry_msgs::msg::PoseWithCovarianceStamped anchor_uav = build_pose_msg(anchor_node_uav_.pose, anchor_node_uav_.covariance, anchor_node_uav_.timestamp, global_frame_graph_);
@@ -2127,6 +2183,15 @@ int main(int argc, char** argv) {
     auto node = std::make_shared<FusionOptimizationNode>();
     node->set_parameter(rclcpp::Parameter("use_sim_time", true));
     rclcpp::spin(node);
+
+    // After spin, retrieve the pose graph from your node.
+    auto agv_pose_graph = node->getAGVPoseGraph();
+    auto uav_pose_graph = node->getUAVPoseGraph();
+
+    // Write the CSV file
+    node->writePoseGraphToCSV(agv_pose_graph, "agv_pose_graph.csv");
+    node->writePoseGraphToCSV(uav_pose_graph, "uav_pose_graph.csv");
+
     rclcpp::shutdown();
     return 0;
 }

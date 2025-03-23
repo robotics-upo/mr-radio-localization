@@ -201,6 +201,7 @@ public:
     opt_state_ = init_state_;
 
     moving_average_ = true;
+    moving_average_max_samples_ = 10;
 
     last_agv_odom_initialized_ = false;
     last_uav_odom_initialized_ = false;
@@ -480,8 +481,8 @@ private:
 
         // Compute odometry covariance based on distance increments from step to step 
         Eigen::Matrix4d predicted_motion_covariance = Eigen::Matrix4d::Zero();
-        double predicted_drift_translation = (odom_error_distance_ / 100.0) * (uav_delta_translation_ + agv_delta_translation_);
-        double predicted_drift_rotation = (odom_error_angle_ / 100.0) * (uav_delta_rotation_ + agv_delta_rotation_);
+        double predicted_drift_translation = (odom_error_distance_ / 100.0) * (uav_total_translation_ + agv_total_translation_);
+        double predicted_drift_rotation = (odom_error_angle_ / 100.0) * (uav_total_rotation_ + agv_total_rotation_);
         predicted_motion_covariance(0,0) = std::pow(predicted_drift_translation, 2.0);
         predicted_motion_covariance(1,1) = std::pow(predicted_drift_translation, 2.0);
         predicted_motion_covariance(2,2) = std::pow(predicted_drift_translation, 2.0);
@@ -543,7 +544,7 @@ private:
 
             // Remove samples that are too old or if we exceed the window size
             while (!moving_average_states_.empty() &&
-                (sample.timestamp - moving_average_states_.front().timestamp > rclcpp::Duration::from_seconds(global_opt_window_s_))) {
+                moving_average_states_.size() > moving_average_max_samples_) {
                 moving_average_states_.pop_front();
             }
 
@@ -995,6 +996,7 @@ private:
     State opt_state_;
     State init_state_;
     std::deque<State> moving_average_states_;
+    size_t moving_average_max_samples_;
 
     bool moving_average_;
     size_t min_measurements_;

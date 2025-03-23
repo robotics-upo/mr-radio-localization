@@ -12,15 +12,10 @@ import re
 
 def compute_That_w_t(timestamp, target_gt_data_df, target_odom_data_df, t_That_s_data_df, columns_target_gt_data, columns_target_odom_data, columns_t_That_s_data):
     """
-    Computes That_w_t for each row in t_That_s_data_df using the latest available source_gt_data_df.
+    Computes poses of the target wrt source (also world) according to the estimated t_That_s estimation and the target odometry poses
 
-    Parameters:
-        target_gt_data_df (pd.DataFrame): DataFrame with ground truth target data. Must include timestamp column.
-        t_That_s_data_df (pd.DataFrame): DataFrame with optimized That_t_s data. Must include timestamp column.
-
-    Returns:
-        pd.DataFrame: DataFrame containing That_w_t positions (x, y, z).
     """
+
     That_w_t_list = []
 
     # Ensure data is sorted by timestamp
@@ -30,15 +25,15 @@ def compute_That_w_t(timestamp, target_gt_data_df, target_odom_data_df, t_That_s
 
     for _, row in t_That_s_data_df.iterrows():
         # Find the latest source_gt_data_df row with a timestamp <= current t_That_s_data_df timestamp
-        latest_source_idx = target_gt_data_df[target_gt_data_df[timestamp] <= row[timestamp]].index.max()
-        latest_source_odom_idx = target_odom_data_df[target_odom_data_df[timestamp] <= row[timestamp]].index.max()
+        latest_target_idx = target_gt_data_df[target_gt_data_df[timestamp] <= row[timestamp]].index.max()
+        latest_target_odom_idx = target_odom_data_df[target_odom_data_df[timestamp] <= row[timestamp]].index.max()
 
-        if latest_source_idx is not None and latest_source_odom_idx is not None:  # Ensure there's a valid matching source data
+        if latest_target_idx is not None and latest_target_odom_idx is not None:  # Ensure there's a valid matching source data
             # Get the corresponding source and t_That_s data
-            target_row = target_gt_data_df.iloc[latest_source_idx]
-            target_odom_row = target_odom_data_df.iloc[latest_source_odom_idx]
+            target_row = target_gt_data_df.iloc[latest_target_idx]
+            target_odom_row = target_odom_data_df.iloc[latest_target_odom_idx]
 
-            target_row = target_gt_data_df.iloc[latest_source_idx]
+            target_row = target_gt_data_df.iloc[latest_target_idx]
             T_w_t = np.eye(4)
             T_w_t_odom = np.eye(4)
             That_t_s = np.eye(4)
@@ -73,6 +68,83 @@ def compute_That_w_t(timestamp, target_gt_data_df, target_odom_data_df, t_That_s
     
     return That_w_t_df
 
+
+def compute_poses_uav_world(timestamp_col, poses_uav, anchor_target_df, anchor_columns):
+    """
+    For each pose in poses_uav, find the closest anchor transform in anchor_target_df (by timestamp),
+    then apply that anchor transform to the pose to obtain a new pose in the world frame.
+    
+    Parameters:
+        poses_uav (dict): Dictionary of UAV poses. Each entry should have:
+                          - 'timestamp': float (in seconds)
+                          - 'position': np.array of shape (3,)
+                          - 'orientation': np.array of shape (4,) representing a quaternion.
+        anchor_target_df (pd.DataFrame): DataFrame that contains the anchor transform. It is assumed to
+                          have a timestamp column and then columns for the translation and quaternion.
+        timestamp_col (str): The name of the timestamp column in anchor_target_df.
+        anchor_columns (list): List of column names for the anchor transform.
+                          For example:
+                          [timestamp_col, "anchor_x", "anchor_y", "anchor_z",
+                           "anchor_q0", "anchor_q1", "anchor_q2", "anchor_q3"]
+    
+    Returns:
+        dict: A new dictionary (poses_uav_world) with the same keys as poses_uav. For each key the value is a dict
+              containing:
+                - 'timestamp': original timestamp,
+                - 'position': new position in world frame (np.array, shape (3,)),
+                - 'orientation': new quaternion in world frame (np.array, shape (4,)),
+                - 'yaw': yaw angle extracted from the new rotation.
+    """
+    poses_uav_world = {}
+    
+    # Sort the anchor DataFrame and reset its index
+    sorted_anchor_df = anchor_target_df.sort_values(timestamp_col).reset_index(drop=True)
+    sorted_anchor_df[timestamp_col] -= sorted_anchor_df[timestamp_col][0]
+
+    
+    for key, pose in poses_uav.items():
+        if (pose['timestamp'] is None or 
+            pose['position'] is None or 
+            pose['orientation'] is None):
+            continue  # skip invalid entries
+        
+        # Find the candidate rows with anchor timestamps <= current pose timestamp
+        candidate_df = sorted_anchor_df[sorted_anchor_df[timestamp_col] <= pose['timestamp']]
+        if candidate_df.empty:
+            continue  # no anchor available for this pose
+        
+        # Get the row with the largest timestamp that is <= pose['timestamp']
+        latest_anchor_idx = candidate_df.index[-1]
+        anchor_row = sorted_anchor_df.loc[latest_anchor_idx]
+        
+        # Construct the anchor transform T_anchor (4x4 matrix)
+        T_anchor = np.eye(4)
+        # Translation: assumed stored in columns 1-3 of anchor_columns.
+        T_anchor[:3, 3] = anchor_row[[anchor_columns[1], anchor_columns[2], anchor_columns[3]]].values  
+        # Quaternion: assumed stored in columns 4-7 of anchor_columns.
+        quat_anchor = anchor_row[[anchor_columns[4], anchor_columns[5], anchor_columns[6], anchor_columns[7]]].values
+        T_anchor[:3, :3] = R.from_quat(quat_anchor).as_matrix()
+        
+        # Convert the current UAV pose into a transform T_pose.
+        T_pose = np.eye(4)
+        T_pose[:3, 3] = pose['position']
+        T_pose[:3, :3] = R.from_quat(pose['orientation']).as_matrix()
+        
+        # Apply the anchor transform: T_world = T_anchor * T_pose.
+        T_world = T_anchor @ T_pose
+        
+        new_translation = T_world[:3, 3]
+        new_quat = R.from_matrix(T_world[:3, :3]).as_quat()
+        new_yaw = R.from_matrix(T_world[:3, :3]).as_euler('zyx', degrees=False)[0]
+        
+        poses_uav_world[key] = {
+            'timestamp': pose['timestamp'],
+            'position': new_translation,
+            'orientation': new_quat,
+            'yaw': new_yaw
+        }
+    
+    return poses_uav_world
 
 def quaternion_to_euler_angles(q):
     # Quaternion to Euler angles conversion
@@ -173,7 +245,7 @@ def plot_pose_temporal_evolution(path, df_ref, df_experiment, df_covariance, df_
     std_y = np.sqrt(np.array(merged_cov_df[cols_covariance[2]])) + np.sqrt(np.array(merged_cov_df[cols_covariance_odom[2]])) # Covariance_y
     std_z = np.sqrt(np.array(merged_cov_df[cols_covariance[3]])) + np.sqrt(np.array(merged_cov_df[cols_covariance_odom[3]])) # Covariance_z
 
-
+    #Convert the odom target frame to world frame used gt odometry offset
     theta_target = target_odom_origin[3]
     # Convert the entire column of odom x and y using the rotation
     target_odom_x = target_odom_origin[0] + np.cos(theta_target) * np.array(df_odom[cols_odom[1]]) - np.sin(theta_target) * np.array(df_odom[cols_odom[2]])
@@ -382,26 +454,10 @@ def plot_metrics(path, df_metrics, cols_metrics, t0, title):
     plt.savefig(path + '/metrics.png', bbox_inches='tight')
 
     plt.show()
-
-def get_columns_with_prefix(path, prefix):
     
-    try:
-        # Read only the header (first row) to get the column names
-        df_header = pd.read_csv(path, nrows=0)
-
-    except FileNotFoundError:
-            print(f"Error: File '{path}' not found.")
-    except pd.errors.EmptyDataError:
-        print(f"Error: File '{path}' is empty.")
-    except pd.errors.ParserError:
-        print(f"Error: Unable to parse file '{path}'. Make sure it's a valid CSV file.")
-    except ValueError as ve:
-        print(f"Error: {ve}")
-
-    return [col for col in df_header.columns if col.startswith(prefix)]
 
 
-def plot_experiment_data(path_experiment_data, path_figs, sim = "True"):
+def plot_experiment_data(path_experiment_data, path_folder, sim = "True"):
 
     
     print("Simulation set to: " + sim)
@@ -488,41 +544,59 @@ def plot_experiment_data(path_experiment_data, path_figs, sim = "True"):
     covariance_z = '/eliko_optimization_node/optimized_T/pose/covariance[14]'
     covariance_yaw = '/eliko_optimization_node/optimized_T/pose/covariance[35]'
 
+    ## Get target anchor
 
-    pose_graph_agv_columns = get_columns_with_prefix(path_experiment_data, "/pose_graph_node/agv_poses")
-    pose_graph_uav_columns = get_columns_with_prefix(path_experiment_data, "/pose_graph_node/uav_poses")
+    anchor_target_x_data = "/pose_graph_node/uav_anchor/pose/pose/position/x"
+    anchor_target_y_data = "/pose_graph_node/uav_anchor/pose/pose/position/y"
+    anchor_target_z_data = "/pose_graph_node/uav_anchor/pose/pose/position/z"
+    anchor_target_q0_data = "/pose_graph_node/uav_anchor/pose/pose/orientation/x"
+    anchor_target_q1_data = "/pose_graph_node/uav_anchor/pose/pose/orientation/y"
+    anchor_target_q2_data = "/pose_graph_node/uav_anchor/pose/pose/orientation/z"
+    anchor_target_q3_data = "/pose_graph_node/uav_anchor/pose/pose/orientation/w"
 
-    pose_graph_agv_cols = [time_data_setpoint] + pose_graph_agv_columns
-    pose_graph_uav_cols = [time_data_setpoint] + pose_graph_uav_columns
+    pose_graph_agv_cols = ["id", "timestamp", "position_x", "position_y", "position_z", "orientation_x", "orientation_y", "orientation_z", "orientation_w"]
+    pose_graph_uav_cols = ["id", "timestamp", "position_x", "position_y", "position_z", "orientation_x", "orientation_y", "orientation_z", "orientation_w"]
 
-    # Assume you have read the CSV into a DataFrame:
-    pose_graph_agv_df = read_pandas_df(path_experiment_data, pose_graph_agv_cols, timestamp_col=time_data_setpoint, max_timestamp=max_timestamp, dropna = False)
-    print("AGV DataFrame shape without dropna:", pose_graph_agv_df.shape)
-    pose_graph_uav_df = read_pandas_df(path_experiment_data, pose_graph_uav_cols, timestamp_col=time_data_setpoint, max_timestamp=max_timestamp, dropna = False)
-    print("UAV DataFrame shape without dropna:", pose_graph_uav_df.shape)
+    anchor_target_uav_cols = [time_data_setpoint, anchor_target_x_data, anchor_target_y_data, anchor_target_z_data, anchor_target_q0_data, anchor_target_q1_data, anchor_target_q2_data, anchor_target_q3_data]
 
-    last_non_nan_agv = pose_graph_agv_df.apply(lambda col: col.dropna().iloc[-1] if not col.dropna().empty else np.nan)
-    poses_agv = extract_poses_from_series(last_non_nan_agv, "/pose_graph_node/agv_poses")
-    print("Extracted AGV poses:")
-    for idx, pose in sorted(poses_agv.items()):
-        print(f"Pose index {idx}:")
-        print("  Position:", pose['position'])
-        print("  Orientation:", pose['orientation'])
-        print("  Timestamp:", pose['timestamp'])
+    # Instead of reading from the original bag CSV, read the CSVs written by the optimization node.
+    agv_csv_path = path_folder + "/agv_pose_graph.csv"
+    uav_csv_path = path_folder + "/uav_pose_graph.csv"
+
+    pose_graph_agv_df = read_pandas_df(agv_csv_path, pose_graph_agv_cols, timestamp_col="timestamp", max_timestamp=max_timestamp)
+    pose_graph_uav_df = read_pandas_df(uav_csv_path, pose_graph_uav_cols, timestamp_col="timestamp", max_timestamp=max_timestamp)
+
+    print("AGV pose graph shape:", pose_graph_agv_df.shape)
+    print("UAV pose graph shape:", pose_graph_uav_df.shape)
+
+    poses_agv = load_pose_graph(pose_graph_agv_df, pose_graph_agv_cols)
+    poses_uav = load_pose_graph(pose_graph_uav_df, pose_graph_uav_cols)
+
+    # print("Extracted AGV poses:")
+    # for idx, pose in sorted(poses_agv.items()):
+    #     print(f"Pose index {idx}:")
+    #     print("  Position:", pose['position'])
+    #     print("  Orientation:", pose['orientation'])
+    #     print("  Timestamp:", pose['timestamp'])
 
 
-    last_non_nan_uav = pose_graph_uav_df.apply(lambda col: col.dropna().iloc[-1] if not col.dropna().empty else np.nan)
-    poses_uav = extract_poses_from_series(last_non_nan_uav, "/pose_graph_node/uav_poses")
-    print("Extracted AGV poses:")
-    for idx, pose in sorted(poses_uav.items()):
-        print(f"Pose index {idx}:")
-        print("  Position:", pose['position'])
-        print("  Orientation:", pose['orientation'])
-        print("  Timestamp:", pose['timestamp'])
+    # print("Extracted AGV poses:")
+    # for idx, pose in sorted(poses_uav.items()):
+    #     print(f"Pose index {idx}:")
+    #     print("  Position:", pose['position'])
+    #     print("  Orientation:", pose['orientation'])
+    #     print("  Timestamp:", pose['timestamp'])
 
-    plot_posegraph_temporal(poses_agv)
-    plot_posegraph_temporal(poses_uav)
-    plot_posegraphs_3d(poses_agv, poses_uav)
+    anchor_target_df = read_pandas_df(path_experiment_data, anchor_target_uav_cols, timestamp_col=time_data_setpoint, max_timestamp=max_timestamp)
+
+    poses_uav_world = compute_poses_uav_world(time_data_setpoint, poses_uav, anchor_target_df, anchor_target_uav_cols)
+    # print("Transformed UAV poses with anchor:")
+    # for idx, pose in sorted(poses_uav_world.items()):
+    #     print(f"Pose index {idx}:")
+    #     print("  Position:", pose['position'])
+    #     print("  Orientation:", pose['orientation'])
+    #     print("  Timestamp:", pose['timestamp'])
+
 
     columns_covariance = [time_data_setpoint, covariance_x, covariance_y, covariance_z, covariance_yaw]
     covariance_data_df = read_pandas_df(path_experiment_data, columns_covariance, 
@@ -613,7 +687,7 @@ def plot_experiment_data(path_experiment_data, path_figs, sim = "True"):
         
         columns_w_That_t_data = [time_data_setpoint, "x", "y", "z", "qx", "qy", "qz", "qw", "yaw"]
 
-        plot_3d_scatter(path_figs, source_gt_data_df, source_odom_data_df, 
+        plot_3d_scatter(path_folder, source_gt_data_df, source_odom_data_df, 
                         target_gt_data_df, target_odom_data_df, w_That_t_data_df, 
                         columns_source_gt_data, columns_source_odom_data, columns_target_gt_data, 
                         columns_target_odom_data, columns_w_That_t_data, source_odom_origin, target_odom_origin)
@@ -621,7 +695,7 @@ def plot_experiment_data(path_experiment_data, path_figs, sim = "True"):
         t0 = target_gt_data_df[columns_target_gt_data[0]].iloc[0]
         
         # #Plot position vs time
-        plot_pose_temporal_evolution(path_figs, target_gt_data_df, w_That_t_data_df, 
+        plot_pose_temporal_evolution(path_folder, target_gt_data_df, w_That_t_data_df, 
                                      covariance_data_df, covariance_odom_data_df, target_odom_data_df, columns_target_gt_data, 
                                      columns_w_That_t_data, columns_covariance, columns_odom_covariance, columns_target_odom_data, 
                                      t0, source_odom_origin, target_odom_origin)
@@ -649,17 +723,84 @@ def plot_experiment_data(path_experiment_data, path_figs, sim = "True"):
         rpy_attitude_gt_data_df = rpy_attitude_gt_data_df[rpy_attitude_cols]
         rpy_attitude_odom_data_df = rpy_attitude_odom_data_df[rpy_attitude_cols]
 
-        plot_attitude_temporal_evolution(path_figs, rpy_attitude_gt_data_df, rpy_attitude_opt_data_df, 
+        plot_attitude_temporal_evolution(path_folder, rpy_attitude_gt_data_df, rpy_attitude_opt_data_df, 
                                          covariance_data_df, covariance_odom_data_df, rpy_attitude_odom_data_df, 
                                          rpy_attitude_cols, columns_covariance, columns_odom_covariance, t0, source_odom_origin, target_odom_origin)
 
         #plot metrics
-        plot_metrics(path_figs, metrics_df_data, columns_metrics, t0, "Relative transform errors")
-        plot_metrics(path_figs, metrics_traj_df_data, columns_traj_metrics, t0, "Overall trajectory errors")
+        plot_metrics(path_folder, metrics_df_data, columns_metrics, t0, "Relative transform errors")
+        plot_metrics(path_folder, metrics_traj_df_data, columns_traj_metrics, t0, "Overall trajectory errors")
 
-    plot_transform(path_figs, t_That_s_data_df, covariance_data_df, columns_t_That_s_data, columns_covariance, t0)
+    plot_transform(path_folder, t_That_s_data_df, covariance_data_df, columns_t_That_s_data, columns_covariance, t0)
 
-def plot_posegraphs_3d(poses_agv, poses_uav):
+    plot_posegraph_temporal(poses_agv, source_gt_data_df, columns_source_gt_data)
+    plot_posegraph_temporal(poses_uav_world, target_gt_data_df, columns_target_gt_data)
+
+    plot_posegraphs_3d(poses_agv, poses_uav_world, source_gt_data_df, target_gt_data_df, columns_source_gt_data, columns_target_gt_data)
+
+    rmse_agv_pos, rmse_agv_yaw = compute_rmse(poses_agv, source_gt_data_df, pose_graph_agv_cols, columns_source_gt_data)
+    rmse_uav_pos, rmse_uav_yaw = compute_rmse(poses_uav_world, target_gt_data_df, pose_graph_uav_cols, columns_target_gt_data)
+    print(f'RMSE AGV ----> Translation: {rmse_agv_pos} m, Rotation: {np.rad2deg(rmse_agv_yaw)} º')
+    print(f'RMSE UAV ----> Translation: {rmse_uav_pos} m, Rotation: {np.rad2deg(rmse_uav_yaw)} º')
+
+
+
+def graph_dict_to_df(pose_graph):
+    """
+    Converts a pose graph dictionary into a DataFrame with separate columns.
+    The dictionary is assumed to have keys: 'timestamp', 'position' (a 3-element array),
+    'orientation' (a 4-element array), and 'yaw'.
+    """
+    data = []
+    for key, pose in pose_graph.items():
+        data.append({
+            'timestamp': pose['timestamp'],
+            'position_x': pose['position'][0],
+            'position_y': pose['position'][1],
+            'position_z': pose['position'][2],
+            'orientation_yaw': pose['yaw']
+        })
+    df = pd.DataFrame(data)
+    df = df.sort_values('timestamp').reset_index(drop=True)
+    return df
+
+
+def compute_rmse(pose_graph, gt_df, pose_graph_cols, gt_cols):
+
+    pose_graph_df = graph_dict_to_df(pose_graph)
+
+    #Substract initial timestamp so both start from 0
+    pose_graph_df[pose_graph_cols[1]] -= pose_graph_df[pose_graph_cols[1]].iloc[0]
+    gt_df[gt_cols[0]] = gt_df[gt_cols[0]] - gt_df[gt_cols[0]].iloc[0]
+
+    # Merge the two DataFrames based on nearest timestamp.
+    merged = pd.merge_asof(pose_graph_df, gt_df, left_on=pose_graph_cols[1], right_on=gt_cols[0], direction="nearest")
+
+    csv_filename = 'abertos_rejuags.csv'
+    merged.to_csv(csv_filename, index=False)
+    print(f"Merged DataFrame exported to {csv_filename}")
+
+    gt_yaw = []
+    for i in range(len(merged)):
+        quat = [merged[gt_cols[4]].iloc[i], merged[gt_cols[5]].iloc[i],
+                merged[gt_cols[6]].iloc[i], merged[gt_cols[7]].iloc[i]]
+        yaw_val = R.from_quat(quat).as_euler('zyx', degrees=False)[0]
+        gt_yaw.append(yaw_val)
+    gt_yaw = np.array(gt_yaw)
+
+    error_x = merged[gt_cols[1]] - merged[pose_graph_cols[2]]
+    error_y = merged[gt_cols[2]] - merged[pose_graph_cols[3]]
+    error_z = merged[gt_cols[3]] - merged[pose_graph_cols[4]]
+ 
+    rmse_pos = np.sqrt(np.mean(np.square(error_x) + np.square(error_y) + np.square(error_z)))
+
+    error_yaw = gt_yaw - merged['orientation_yaw']
+    error_yaw = np.arctan2(np.sin(error_yaw), np.cos(error_yaw))
+    rmse_yaw = np.sqrt(np.mean(np.square(error_yaw)))
+
+    return rmse_pos, rmse_yaw
+
+def plot_posegraphs_3d(poses_agv, poses_uav, gt_agv = None, gt_uav = None, cols_gt_agv = None, cols_gt_uav = None):
     """
     Plots the 3D trajectories for both AGV and UAV.
 
@@ -709,6 +850,12 @@ def plot_posegraphs_3d(poses_agv, poses_uav):
     ax.plot(uav_positions[:, 0], uav_positions[:, 1], uav_positions[:, 2],
             '-o', color='blue', label='UAV Trajectory')
     
+    if gt_agv is not None and cols_gt_agv is not None:
+        ax.plot(gt_agv[cols_gt_agv[1]], gt_agv[cols_gt_agv[2]], gt_agv[cols_gt_agv[3]], c='r', label='GT source', linewidth=2)
+
+    if gt_uav is not None and cols_gt_uav is not None:
+        ax.plot(gt_uav[cols_gt_uav[1]], gt_uav[cols_gt_uav[2]], gt_uav[cols_gt_uav[3]], c='b', label='GT target', linewidth=2)
+
     ax.set_xlabel("X (m)")
     ax.set_ylabel("Y (m)")
     ax.set_zlabel("Z (m)")
@@ -717,7 +864,7 @@ def plot_posegraphs_3d(poses_agv, poses_uav):
     plt.tight_layout()
     plt.show()
 
-def plot_posegraph_temporal(poses):
+def plot_posegraph_temporal(poses, gt = None, cols_gt = None):
     """
     Plots the temporal evolution of x, y, z, and yaw given a dictionary of poses.
     
@@ -761,118 +908,79 @@ def plot_posegraph_temporal(poses):
     ys = data[:, 2]
     zs = data[:, 3]
     yaws = data[:, 4]
-    
+
+    gt[cols_gt[0]] = gt[cols_gt[0]] - gt[cols_gt[0]].iloc[0]
+
+
     # Plot each variable vs. time
     fig, axs = plt.subplots(4, 1, figsize=(10, 12), sharex=True)
     axs[0].plot(timestamps, xs, marker='o', linestyle='-')
     axs[0].set_ylabel('X (m)')
     axs[0].grid()
+
     axs[1].plot(timestamps, ys, marker='o', linestyle='-')
     axs[1].set_ylabel('Y (m)')
     axs[1].grid()
+
     axs[2].plot(timestamps, zs, marker='o', linestyle='-')
     axs[2].set_ylabel('Z (m)')
     axs[2].grid()
+
+
     axs[3].plot(timestamps, yaws, marker='o', linestyle='-')
     axs[3].set_ylabel('Yaw (rad)')
     axs[3].grid()
+
     axs[3].set_xlabel('Time (s)')
+
+    if gt is not None and cols_gt is not None:
+        axs[0].plot(np.array(gt[cols_gt[0]]), np.array(gt[cols_gt[1]]), c='r', label = 'target gt')
+        axs[1].plot(np.array(gt[cols_gt[0]]), np.array(gt[cols_gt[2]]), c='r', label = 'target gt')
+        axs[2].plot(np.array(gt[cols_gt[0]]), np.array(gt[cols_gt[3]]), c='r', label = 'target gt')
+            # Compute ground truth yaw from quaternion data.
+        gt_yaw = []
+        for i in range(len(gt)):
+            quat = [gt[cols_gt[4]].iloc[i], gt[cols_gt[5]].iloc[i],
+                    gt[cols_gt[6]].iloc[i], gt[cols_gt[7]].iloc[i]]
+            yaw_val = R.from_quat(quat).as_euler('zyx', degrees=False)[0]
+            gt_yaw.append(yaw_val)
+        gt_yaw = np.array(gt_yaw)
+        axs[3].plot(np.array(gt[cols_gt[0]]), gt_yaw, c='r', label = 'target gt')
     
     plt.suptitle("Temporal Evolution of Pose (x, y, z, yaw)")
     plt.show()
 
-def extract_poses_from_series(s, prefix):
+def load_pose_graph(df, cols):
     """
-    Extracts pose information (position, orientation, and timestamp)
-    from a pandas Series `s` where column names follow a naming convention
-    that includes an array index. The timestamp is assumed to be stored in two
-    parts: sec and nanosec.
-
-    Parameters:
-        s (pd.Series): A pandas Series where keys are column names.
-        prefix (str): The prefix used in the CSV for the pose graph, for example,
-                      "/pose_graph_node/global_agv_poses"
-
+    Reads a CSV file of pose graph data and returns a dictionary of poses.
+    
+    The CSV is assumed to have columns:
+      - id, timestamp, frame_id,
+      - position_x, position_y, position_z,
+      - orientation_x, orientation_y, orientation_z, orientation_w,
+      - (optionally covariance columns, which we ignore here)
+      
     Returns:
-        dict: A dictionary where each key is an array index (int) and each value is a
-              dictionary with keys:
-                - 'position': a numpy array of shape (3,) or None
-                - 'orientation': a numpy array of shape (4,) or None
-                - 'timestamp': a float (sec + nanosec * 1e-9) or None
+        dict: Keys are pose indices (int), and each value is a dict with keys:
+              'timestamp' (float),
+              'position' (np.array of shape (3,)),
+              'orientation' (np.array of shape (4,)),
+              'yaw' (float, computed from the quaternion).
     """
     poses = {}
-    # Patterns for position and orientation.
-    pos_pattern = re.compile(rf"{re.escape(prefix)}/array\[(\d+)\]/pose/pose/position/(x|y|z)")
-    ori_pattern = re.compile(rf"{re.escape(prefix)}/array\[(\d+)\]/pose/pose/orientation/(x|y|z|w)")
-    # Patterns for timestamp: sec and nanosec.
-    stamp_sec_pattern = re.compile(rf"{re.escape(prefix)}/array\[(\d+)\]/header/stamp/sec")
-    stamp_nsec_pattern = re.compile(rf"{re.escape(prefix)}/array\[(\d+)\]/header/stamp/nanosec")
-    
-    for col, value in s.items():
-        # Check for position
-        pos_match = pos_pattern.match(col)
-        if pos_match:
-            idx = int(pos_match.group(1))
-            axis = pos_match.group(2)
-            if idx not in poses:
-                poses[idx] = {'position': {}, 'orientation': {}, 'timestamp': {}}
-            poses[idx]['position'][axis] = value
-            continue
-
-        # Check for orientation
-        ori_match = ori_pattern.match(col)
-        if ori_match:
-            idx = int(ori_match.group(1))
-            axis = ori_match.group(2)
-            if idx not in poses:
-                poses[idx] = {'position': {}, 'orientation': {}, 'timestamp': {}}
-            poses[idx]['orientation'][axis] = value
-            continue
-
-        # Check for timestamp seconds.
-        stamp_sec_match = stamp_sec_pattern.match(col)
-        if stamp_sec_match:
-            idx = int(stamp_sec_match.group(1))
-            if idx not in poses:
-                poses[idx] = {'position': {}, 'orientation': {}, 'timestamp': {}}
-            poses[idx]['timestamp']['sec'] = value
-            continue
-
-        # Check for timestamp nanoseconds.
-        stamp_nsec_match = stamp_nsec_pattern.match(col)
-        if stamp_nsec_match:
-            idx = int(stamp_nsec_match.group(1))
-            if idx not in poses:
-                poses[idx] = {'position': {}, 'orientation': {}, 'timestamp': {}}
-            poses[idx]['timestamp']['nanosec'] = value
-            continue
-
-    # Post-process each pose entry:
-    for idx in poses:
-        # Process position: require x, y, z.
-        pos = poses[idx]['position']
-        if all(k in pos for k in ['x', 'y', 'z']):
-            poses[idx]['position'] = np.array([pos['x'], pos['y'], pos['z']])
-        else:
-            poses[idx]['position'] = None
-
-        # Process orientation: require x, y, z, w.
-        ori = poses[idx]['orientation']
-        if all(k in ori for k in ['x', 'y', 'z', 'w']):
-            poses[idx]['orientation'] = np.array([ori['x'], ori['y'], ori['z'], ori['w']])
-        else:
-            poses[idx]['orientation'] = None
-
-        # Process timestamp: combine seconds and nanoseconds if available.
-        ts = poses[idx]['timestamp']
-        if isinstance(ts, dict) and 'sec' in ts and 'nanosec' in ts:
-            try:
-                poses[idx]['timestamp'] = ts['sec'] + ts['nanosec'] * 1e-9
-            except Exception as e:
-                poses[idx]['timestamp'] = None
-        else:
-            poses[idx]['timestamp'] = None
-
+    for _, row in df.iterrows():
+        idx = int(row[cols[0]])
+        timestamp = row[cols[1]]
+        position = np.array([row[cols[2]], row[cols[3]], row[cols[4]]])
+        orientation = np.array([row[cols[5]], row[cols[6]], row[cols[7]], row[cols[8]]])
+        # Compute yaw using a 'zyx' Euler conversion; the first element is yaw.
+        yaw = R.from_quat(orientation).as_euler('zyx', degrees=False)[0]
+        poses[idx] = {
+            'timestamp': timestamp,
+            'position': position,
+            'orientation': orientation,
+            'yaw': yaw
+        }
     return poses
 
 
