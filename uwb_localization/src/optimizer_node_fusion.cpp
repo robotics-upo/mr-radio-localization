@@ -197,7 +197,7 @@ public:
     FusionOptimizationNode() : Node("fusion_optimization_node") {
 
     //Option 1: get odometry through topics -> includes covariance
-    std::string odom_topic_agv = "/agv/odom"; //or "/agv/odom"
+    std::string odom_topic_agv = "/agv/odom"; //or "/agv/odom" or "/arco/idmind_motors/odom"
     std::string odom_topic_uav = "/uav/odom"; //or "/uav/odom"
 
     rclcpp::SensorDataQoS qos; // Use a QoS profile compatible with sensor data
@@ -268,6 +268,8 @@ public:
     T_agv_radar_ = build_transformation_SE3(0.0,0.0, Eigen::Vector4d(0.45,0.05,0.65,0.0));
     pointcloud_lidar_sigma_ = 0.05;  //5cm for lidar, 10 cm for radar
     pointcloud_radar_sigma_ = 0.1;
+    using_radar_ = true;
+    using_lidar_ = false;
 
     global_optimization_timer_ = this->create_wall_timer(
             std::chrono::milliseconds(int(global_opt_rate_s_*1000)), std::bind(&FusionOptimizationNode::global_opt_cb_, this));
@@ -830,25 +832,25 @@ private:
 
             proprioceptive_constraints_agv_.push_back(constraint_odom_agv);
 
-            // //AGV Lidar ICP constraints
-            // if (!agv_measurements_.lidar_scan->points.empty() &&
-            //     !prev_agv_measurements_.lidar_scan->points.empty()) {
+            //AGV Lidar ICP constraints
+            if (using_lidar_ && !agv_measurements_.lidar_scan->points.empty() &&
+                !prev_agv_measurements_.lidar_scan->points.empty()) {
 
-            //         RCLCPP_WARN(this->get_logger(), "Computing Lidar ICP for AGV nodes %d and %d.", agv_id_ - 1, agv_id_);
+                    RCLCPP_WARN(this->get_logger(), "Computing Lidar ICP for AGV nodes %d and %d.", agv_id_ - 1, agv_id_);
 
-            //         Eigen::Matrix4f T_icp = constraint_odom_agv.t_T_s.cast<float>().matrix();
+                    Eigen::Matrix4f T_icp = constraint_odom_agv.t_T_s.cast<float>().matrix();
 
-            //         if(!addPointCloudConstraint(prev_agv_measurements_.lidar_scan, agv_measurements_.lidar_scan,
-            //             T_agv_lidar_, T_agv_lidar_, pointcloud_lidar_sigma_, icp_type_lidar_, 
-            //             agv_id_ - 1, agv_id_, 
-            //             extraceptive_constraints_agv_, false, &T_icp)){
-            //                 RCLCPP_WARN(this->get_logger(), "Failed to add constraint");
-            //             }
-            // }
+                    if(!addPointCloudConstraint(prev_agv_measurements_.lidar_scan, agv_measurements_.lidar_scan,
+                        T_agv_lidar_, T_agv_lidar_, pointcloud_lidar_sigma_, icp_type_lidar_, 
+                        agv_id_ - 1, agv_id_, 
+                        extraceptive_constraints_agv_, false, &T_icp)){
+                            RCLCPP_WARN(this->get_logger(), "Failed to add constraint");
+                        }
+            }
 
             //AGV Radar ICP constraints
 
-            if (!agv_measurements_.radar_scan->points.empty() &&
+            if (using_radar_ && !agv_measurements_.radar_scan->points.empty() &&
                 !prev_agv_measurements_.radar_scan->points.empty()) {
 
                     RCLCPP_WARN(this->get_logger(), "Computing Radar ICP for AGV nodes %d and %d", agv_id_ - 1, agv_id_);
@@ -922,27 +924,27 @@ private:
                                                                                 uav_measurements_.odom_covariance, prev_uav_measurements_.odom_covariance);
             proprioceptive_constraints_uav_.push_back(constraint_odom_uav);
 
-            // //UAV Lidar ICP constraints
-            // if (!uav_measurements_.lidar_scan->points.empty() &&
-            //     !prev_uav_measurements_.lidar_scan->points.empty()) {
+            //UAV Lidar ICP constraints
+            if (using_lidar_ && !uav_measurements_.lidar_scan->points.empty() &&
+                !prev_uav_measurements_.lidar_scan->points.empty()) {
 
-            //         RCLCPP_WARN(this->get_logger(), "Computing Lidar ICP for UAV nodes %d and %d.", uav_id_ - 1, uav_id_);
+                    RCLCPP_WARN(this->get_logger(), "Computing Lidar ICP for UAV nodes %d and %d.", uav_id_ - 1, uav_id_);
                     
-            //         Eigen::Matrix4f T_icp = constraint_odom_uav.t_T_s.cast<float>().matrix();
-            //         //Eigen::Matrix4f T_icp = Eigen::Matrix4f::Identity();
+                    Eigen::Matrix4f T_icp = constraint_odom_uav.t_T_s.cast<float>().matrix();
+                    //Eigen::Matrix4f T_icp = Eigen::Matrix4f::Identity();
 
-            //         if(!addPointCloudConstraint(prev_uav_measurements_.lidar_scan, uav_measurements_.lidar_scan,
-            //             T_uav_lidar_, T_uav_lidar_, pointcloud_lidar_sigma_, icp_type_lidar_, 
-            //             uav_id_ - 1, uav_id_, 
-            //             extraceptive_constraints_uav_, false, &T_icp)){
-            //                 RCLCPP_WARN(this->get_logger(), "Failed to add constraint");
-            //             }
+                    if(!addPointCloudConstraint(prev_uav_measurements_.lidar_scan, uav_measurements_.lidar_scan,
+                        T_uav_lidar_, T_uav_lidar_, pointcloud_lidar_sigma_, icp_type_lidar_, 
+                        uav_id_ - 1, uav_id_, 
+                        extraceptive_constraints_uav_, false, &T_icp)){
+                            RCLCPP_WARN(this->get_logger(), "Failed to add constraint");
+                        }
 
-            // }
+            }
 
 
             //UAV Radar ICP constraints
-            if (!uav_measurements_.radar_scan->points.empty() &&
+            if (using_radar_ && !uav_measurements_.radar_scan->points.empty() &&
                 !prev_uav_measurements_.radar_scan->points.empty()) {
 
                     RCLCPP_WARN(this->get_logger(), "Computing Radar ICP for UAV nodes %d and %d.", uav_id_ - 1, uav_id_);
@@ -981,47 +983,46 @@ private:
             }
 
             double covariance_multiplier = 1.0;
-            
-            // MeasurementConstraint uwb_constraint;
-            // uwb_constraint.id_begin = agv_id_; //relates latest UAV and AGV nodes
-            // uwb_constraint.id_end = uav_id_;
-            // uwb_constraint.t_T_s = latest_relative_pose_SE3_;
-            // uwb_constraint.covariance = reduce_covariance_matrix(latest_relative_pose_cov_);
-            // uwb_constraint.covariance*=covariance_multiplier;
-            // encounter_constraints_uwb_.push_back(uwb_constraint);
 
-            //The UWB measurement serves as a prior for the UAV anchor node
-            prior_anchor_uav_.pose = latest_relative_pose_SE3_.inverse();
-            prior_anchor_uav_.covariance = reduce_covariance_matrix(latest_relative_pose_cov_);
-            prior_anchor_uav_.covariance*=covariance_multiplier;
+            Sophus::SE3d w_That_target = latest_relative_pose_SE3_.inverse() * uav_measurements_.odom_pose;
+            Sophus::SE3d w_That_source = agv_measurements_.odom_pose;
+            Sophus::SE3d That_t_s = w_That_target.inverse() * w_That_source;
+            
+            MeasurementConstraint uwb_constraint;
+            uwb_constraint.id_begin = agv_id_; //relates latest UAV and AGV nodes
+            uwb_constraint.id_end = uav_id_;
+            uwb_constraint.t_T_s = That_t_s;
+            uwb_constraint.covariance = reduce_covariance_matrix(latest_relative_pose_cov_);
+            uwb_constraint.covariance*=covariance_multiplier;
+            encounter_constraints_uwb_.push_back(uwb_constraint);
 
         }
 
         // //********************Inter-robot LIDAR ICP constraints***********************//
 
-        // if (!uav_measurements_.lidar_scan->points.empty() &&
-        //     !agv_measurements_.lidar_scan->points.empty()) {
+        if (using_lidar_ && !uav_measurements_.lidar_scan->points.empty() &&
+            !agv_measurements_.lidar_scan->points.empty()) {
                 
-        //         Eigen::Matrix4f T_icp = Eigen::Matrix4f::Identity();
-        //         if(uwb_transform_available_) {
-        //             Sophus::SE3d w_That_target = latest_relative_pose_SE3_.inverse() * uav_measurements_.odom_pose;
-        //             Sophus::SE3d w_That_source = agv_measurements_.odom_pose;
-        //             Sophus::SE3d That_icp = w_That_target.inverse() * w_That_source;
-        //             //T_icp = latest_relative_pose_SE3_.cast<float>().matrix();
-        //              T_icp = That_icp.cast<float>().matrix();
-        //          }
+                Eigen::Matrix4f T_icp = Eigen::Matrix4f::Identity();
+                if(uwb_transform_available_) {
+                    Sophus::SE3d w_That_target = latest_relative_pose_SE3_.inverse() * uav_measurements_.odom_pose;
+                    Sophus::SE3d w_That_source = agv_measurements_.odom_pose;
+                    Sophus::SE3d That_icp = w_That_target.inverse() * w_That_source;
+                    //T_icp = latest_relative_pose_SE3_.cast<float>().matrix();
+                     T_icp = That_icp.cast<float>().matrix();
+                 }
 
-        //         if(!addPointCloudConstraint(agv_measurements_.lidar_scan, uav_measurements_.lidar_scan,
-        //             T_agv_lidar_, T_uav_lidar_, pointcloud_lidar_sigma_, icp_type_lidar_, 
-        //             agv_id_, uav_id_, 
-        //             encounter_constraints_pointcloud_, false, &T_icp)){
-        //                 RCLCPP_WARN(this->get_logger(), "Failed to add constraint");
-        //             }
-        // }
+                if(!addPointCloudConstraint(agv_measurements_.lidar_scan, uav_measurements_.lidar_scan,
+                    T_agv_lidar_, T_uav_lidar_, pointcloud_lidar_sigma_, icp_type_lidar_, 
+                    agv_id_, uav_id_, 
+                    encounter_constraints_pointcloud_, false, &T_icp)){
+                        RCLCPP_WARN(this->get_logger(), "Failed to add constraint");
+                    }
+        }
 
-        // //********************Inter-robot RADAR ICP constraints***********************//
+        //*********************Inter-robot RADAR ICP constraints***********************//
 
-        if (!uav_measurements_.radar_scan->points.empty() &&
+        if (using_radar_ && !uav_measurements_.radar_scan->points.empty() &&
             !agv_measurements_.radar_scan->points.empty()) {
                 
                 Eigen::Matrix4f T_icp = Eigen::Matrix4f::Identity();
@@ -1689,7 +1690,7 @@ private:
     }
 
     bool isNodeFixedKF(const int current_node_id, const int node_id, const double &max_keyframes){
-        return (current_node_id - node_id > max_keyframes);
+        return (current_node_id - node_id > max_keyframes || current_node_id < min_keyframes_);
     }
 
     bool isRelativeTransformAvailable(const rclcpp::Time &current_time, const rclcpp::Time &latest_relative_time, const double threshold){
@@ -1773,7 +1774,7 @@ private:
         bool extraceptive_constraints_uav_available = addMeasurementConstraints(problem, extraceptive_constraints_uav, uav_map, uav_id_, max_keyframes_, robust_loss);
 
         // Add encounter constraints.
-        bool encounter_uwb_available = uwb_transform_available_ || addEncounterConstraints(problem, encounter_constraints_uwb, agv_map, uav_map, agv_id_, uav_id_, max_keyframes_, robust_loss);
+        bool encounter_uwb_available = addEncounterConstraints(problem, encounter_constraints_uwb, agv_map, uav_map, agv_id_, uav_id_, max_keyframes_, robust_loss);
         bool encounter_pointcloud_available = addEncounterConstraints(problem, encounter_constraints_pointcloud, agv_map, uav_map, agv_id_, uav_id_, max_keyframes_, robust_loss);
 
         if(!encounter_uwb_available && !encounter_pointcloud_available){
@@ -1786,13 +1787,6 @@ private:
             ceres::CostFunction *prior_cost_anchor = PriorResidual::Create(prior_anchor_agv_.pose, 
                 anchor_node_agv_.roll, anchor_node_agv_.pitch, prior_anchor_agv_.covariance);
             problem.AddResidualBlock(prior_cost_anchor, nullptr, anchor_node_agv_.state.data());
-
-            //Add prior for UAV anchor (ONLY IF we have valid UWB odometry-aligning data)
-            if(uwb_transform_available_){
-                ceres::CostFunction *prior_cost_anchor = PriorResidual::Create(prior_anchor_uav_.pose, 
-                anchor_node_uav_.roll, anchor_node_uav_.pitch, prior_anchor_uav_.covariance);
-                problem.AddResidualBlock(prior_cost_anchor, robust_loss, anchor_node_uav_.state.data());
-            }
         }
         
         // Configure solver options
@@ -2149,6 +2143,7 @@ private:
     Measurements agv_measurements_, prev_agv_measurements_, uav_measurements_, prev_uav_measurements_;
     int uav_id_, agv_id_;
     bool graph_initialized_;
+    bool using_radar_, using_lidar_;
     // Publishers/Broadcasters
     std::shared_ptr<tf2_ros::TransformBroadcaster> tf_broadcaster_;
 
