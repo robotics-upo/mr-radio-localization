@@ -122,9 +122,17 @@ struct Measurements {
      Measurements() : lidar_scan(new pcl::PointCloud<pcl::PointXYZ>), radar_scan(new pcl::PointCloud<pcl::PointXYZ>) {}
 };
 
+
 // Custom manifold for a state in R^3 x S^1.
 class StateManifold3D : public ceres::Manifold {
     public:
+
+      // A pointer to the flag maintained by the node.
+      bool* pitch_ok_ptr_;
+
+      // Constructor takes a pointer to the flag.
+      explicit StateManifold3D(bool* pitch_ok_ptr) : pitch_ok_ptr_(pitch_ok_ptr) {}
+
       // Ambient space dimension is 4.
       virtual int AmbientSize() const override { return 4; }
       // Tangent space dimension is also 4.
@@ -134,10 +142,13 @@ class StateManifold3D : public ceres::Manifold {
       virtual bool Plus(const double* x,
                         const double* delta,
                         double* x_plus_delta) const override {
+
+        bool pitch_ok = *pitch_ok_ptr_;
+        double scale = 1e-6;
         // Translation is standard addition.
         x_plus_delta[0] = x[0] + delta[0];
         x_plus_delta[1] = x[1] + delta[1];
-        x_plus_delta[2] = x[2] + delta[2];
+        x_plus_delta[2] = pitch_ok ? (x[2] + delta[2]) : (x[2] + scale * delta[2]);
         // For yaw, perform addition with wrapping to [-pi, pi].
         double new_yaw = x[3] + delta[3];
         while(new_yaw > M_PI)  new_yaw -= 2.0 * M_PI;
@@ -148,13 +159,16 @@ class StateManifold3D : public ceres::Manifold {
     
       // The Jacobian of Plus with respect to delta at delta = 0 is the identity.
       virtual bool PlusJacobian(const double* /*x*/, double* jacobian) const override {
+
+        bool pitch_ok = *pitch_ok_ptr_;
+        double scale = 1e-6;
         // Fill a 4x4 identity matrix (row-major ordering).
         for (int i = 0; i < 16; ++i) {
           jacobian[i] = 0.0;
         }
         jacobian[0]  = 1.0;
         jacobian[5]  = 1.0;
-        jacobian[10] = 1.0;
+        jacobian[10] = pitch_ok ? 1.0 : scale * 1.0;
         jacobian[15] = 1.0;
         return true;
       }
@@ -163,10 +177,13 @@ class StateManifold3D : public ceres::Manifold {
       virtual bool Minus(const double* y,
                          const double* x,
                          double* y_minus_x) const override {
+
+        bool pitch_ok = *pitch_ok_ptr_;
+        double scale = 1e-6;
         // For translation, simple subtraction.
         y_minus_x[0] = y[0] - x[0];
         y_minus_x[1] = y[1] - x[1];
-        y_minus_x[2] = y[2] - x[2];
+        y_minus_x[2] = pitch_ok ? (y[2] - x[2]) : (y[2] - scale*x[2]);
         // For yaw, compute the difference and wrap it.
         double dtheta = y[3] - x[3];
         while (dtheta > M_PI)  dtheta -= 2.0 * M_PI;
@@ -177,12 +194,16 @@ class StateManifold3D : public ceres::Manifold {
     
       // The Jacobian of Minus with respect to y at y = x is the identity.
       virtual bool MinusJacobian(const double* /*x*/, double* jacobian) const override {
+
+        bool pitch_ok = *pitch_ok_ptr_;
+        double scale = 1e-6;
+
         for (int i = 0; i < 16; ++i) {
           jacobian[i] = 0.0;
         }
         jacobian[0]  = 1.0;
         jacobian[5]  = 1.0;
-        jacobian[10] = 1.0;
+        jacobian[10] = pitch_ok ? 1.0 : scale * 1.0;
         jacobian[15] = 1.0;
         return true;
       }
@@ -197,7 +218,7 @@ public:
     FusionOptimizationNode() : Node("fusion_optimization_node") {
 
     //Option 1: get odometry through topics -> includes covariance
-    std::string odom_topic_agv = "/agv/odom"; //or "/agv/odom" or "/arco/idmind_motors/odom"
+    std::string odom_topic_agv = "/arco/idmind_motors/odom"; //or "/agv/odom" or "/arco/idmind_motors/odom"
     std::string odom_topic_uav = "/uav/odom"; //or "/uav/odom"
 
     rclcpp::SensorDataQoS qos; // Use a QoS profile compatible with sensor data
@@ -385,7 +406,7 @@ private:
         );
         
         agv_odom_pose_ = Sophus::SE3d(q, t);
-
+        
         // If this is the first message, simply store it and return.
         if (!last_agv_odom_initialized_) {
             last_agv_odom_msg_ = *msg;
@@ -1021,25 +1042,25 @@ private:
 
         //*********************Inter-robot RADAR ICP constraints***********************//
 
-        if (using_radar_ && !uav_measurements_.radar_scan->points.empty() &&
-            !agv_measurements_.radar_scan->points.empty()) {
+        // if (using_radar_ && !uav_measurements_.radar_scan->points.empty() &&
+        //     !agv_measurements_.radar_scan->points.empty()) {
                 
-                Eigen::Matrix4f T_icp = Eigen::Matrix4f::Identity();
-                if(uwb_transform_available_) {
-                    Sophus::SE3d w_That_target = latest_relative_pose_SE3_.inverse() * uav_measurements_.odom_pose;
-                    Sophus::SE3d w_That_source = agv_measurements_.odom_pose;
-                    Sophus::SE3d That_icp = w_That_target.inverse() * w_That_source;
-                    //T_icp = latest_relative_pose_SE3_.cast<float>().matrix();
-                    T_icp = That_icp.cast<float>().matrix();
-                }
+        //         Eigen::Matrix4f T_icp = Eigen::Matrix4f::Identity();
+        //         if(uwb_transform_available_) {
+        //             Sophus::SE3d w_That_target = latest_relative_pose_SE3_.inverse() * uav_measurements_.odom_pose;
+        //             Sophus::SE3d w_That_source = agv_measurements_.odom_pose;
+        //             Sophus::SE3d That_icp = w_That_target.inverse() * w_That_source;
+        //             //T_icp = latest_relative_pose_SE3_.cast<float>().matrix();
+        //             T_icp = That_icp.cast<float>().matrix();
+        //         }
 
-                if(!addPointCloudConstraint(agv_measurements_.radar_scan, uav_measurements_.radar_scan,
-                    T_agv_radar_, T_uav_radar_, pointcloud_radar_sigma_, icp_type_radar_, 
-                    agv_id_, uav_id_, 
-                    encounter_constraints_pointcloud_, false, &T_icp)){
-                        RCLCPP_WARN(this->get_logger(), "Failed to add constraint");
-                    }
-        }
+        //         if(!addPointCloudConstraint(agv_measurements_.radar_scan, uav_measurements_.radar_scan,
+        //             T_agv_radar_, T_uav_radar_, pointcloud_radar_sigma_, icp_type_radar_, 
+        //             agv_id_, uav_id_, 
+        //             encounter_constraints_pointcloud_, false, &T_icp)){
+        //                 RCLCPP_WARN(this->get_logger(), "Failed to add constraint");
+        //             }
+        // }
         
         if(!(agv_id_ >= min_keyframes_ || uav_id_ >= min_keyframes_)){
             RCLCPP_INFO(this->get_logger(), "Sliding window not yet full!");
@@ -1713,8 +1734,12 @@ private:
                                     const VectorOfConstraints &encounter_constraints_uwb, const VectorOfConstraints &encounter_constraints_pointcloud) {
 
         ceres::Problem problem;
+        
+        bool* ptrFalse = new bool(false);
+        bool* ptrTrue = new bool(true);
 
-        ceres::Manifold* state_manifold_3d = new StateManifold3D;
+        ceres::Manifold* state_manifold_2d = new StateManifold3D(ptrFalse);
+        ceres::Manifold* state_manifold_3d = new StateManifold3D(ptrTrue);
 
         // Define a robust kernel
         double huber_threshold = 2.5; // = residuals higher than 2.5 times sigma are outliers
@@ -1724,21 +1749,28 @@ private:
         problem.AddParameterBlock(anchor_node_uav_.state.data(), 4);
         problem.AddParameterBlock(anchor_node_agv_.state.data(), 4);
         problem.SetManifold(anchor_node_uav_.state.data(), state_manifold_3d);
-        problem.SetManifold(anchor_node_agv_.state.data(), state_manifold_3d);
+        problem.SetManifold(anchor_node_agv_.state.data(), state_manifold_2d);
 
         //remove the gauge freedom (i.e. the fact that an overall rigid body transform can be added to all poses without changing the relative errors).
         //anchor -freeze- the first node, and freeze the part of the node outside the sliding window
 
-        for (auto& kv : agv_map) {
-            State& state = kv.second;
-            problem.AddParameterBlock(state.state.data(), 4); 
-            problem.SetManifold(state.state.data(), state_manifold_3d);
-            if (isNodeFixedKF(agv_id_, kv.first, max_keyframes_)) {
-                problem.SetParameterBlockConstant(state.state.data());
+        for (auto it = agv_map.begin(); it != agv_map.end(); ++it) {
+            State& state = it->second;
+            problem.AddParameterBlock(state.state.data(), 4);  
+            // For the first node, there is no previous measurement.
+            if (it == agv_map.begin()) {
+                // You could choose to allow full 3D update or restrict it.
+                problem.SetManifold(state.state.data(), state_manifold_2d);
             } else {
-                RCLCPP_DEBUG(this->get_logger(), "Optimizing for AGV node %d", kv.first);
-            }
-   
+                // Compare the pitch difference between the current state and the previous one.
+                auto prev_it = std::prev(it);
+                double pitch_diff = std::abs(state.pitch - prev_it->second.pitch);
+                // If the pitch difference is greater than 15 degrees (in radians), allow full update.
+                if (pitch_diff > 15.0 * M_PI / 180.0) problem.SetManifold(state.state.data(), state_manifold_3d);
+                else problem.SetManifold(state.state.data(), state_manifold_2d);
+            }            
+            if (isNodeFixedKF(agv_id_, it->first, max_keyframes_)) problem.SetParameterBlockConstant(state.state.data());
+            else RCLCPP_DEBUG(this->get_logger(), "Optimizing for AGV node %d", it->first);
         }
 
         for (auto& kv : uav_map) {
