@@ -230,17 +230,17 @@ public:
     std::string pcl_topic_radar_agv = "/arco/radar/PointCloudDetection";
     std::string pcl_topic_radar_uav = "/drone/radar/PointCloudDetection";
 
-    pcl_source_lidar_sub_ = this->create_subscription<sensor_msgs::msg::PointCloud2>(
-                pcl_topic_lidar_agv, qos, std::bind(&FusionOptimizationNode::pcl_source_lidar_cb_, this, std::placeholders::_1));
+    pcl_agv_lidar_sub_ = this->create_subscription<sensor_msgs::msg::PointCloud2>(
+                pcl_topic_lidar_agv, qos, std::bind(&FusionOptimizationNode::pcl_agv_lidar_cb_, this, std::placeholders::_1));
 
-    pcl_target_lidar_sub_ = this->create_subscription<sensor_msgs::msg::PointCloud2>(
-                pcl_topic_lidar_uav, qos, std::bind(&FusionOptimizationNode::pcl_target_lidar_cb_, this, std::placeholders::_1));
+    pcl_uav__lidar_sub_ = this->create_subscription<sensor_msgs::msg::PointCloud2>(
+                pcl_topic_lidar_uav, qos, std::bind(&FusionOptimizationNode::pcl_uav__lidar_cb_, this, std::placeholders::_1));
 
-    pcl_source_radar_sub_ = this->create_subscription<sensor_msgs::msg::PointCloud2>(
-                    pcl_topic_radar_agv, qos, std::bind(&FusionOptimizationNode::pcl_source_radar_cb_, this, std::placeholders::_1));
+    pcl_agv_radar_sub_ = this->create_subscription<sensor_msgs::msg::PointCloud2>(
+                    pcl_topic_radar_agv, qos, std::bind(&FusionOptimizationNode::pcl_agv_radar_cb_, this, std::placeholders::_1));
     
-    pcl_target_radar_sub_ = this->create_subscription<sensor_msgs::msg::PointCloud2>(
-                    pcl_topic_radar_uav, qos, std::bind(&FusionOptimizationNode::pcl_target_radar_cb_, this, std::placeholders::_1));
+    pcl_uav__radar_sub_ = this->create_subscription<sensor_msgs::msg::PointCloud2>(
+                    pcl_topic_radar_uav, qos, std::bind(&FusionOptimizationNode::pcl_uav__radar_cb_, this, std::placeholders::_1));
 
     pcl_visualizer_client_ = this->create_client<uwb_localization::srv::UpdatePointClouds>("eliko_optimization_node/pcl_visualizer_service");
 
@@ -270,6 +270,9 @@ public:
     pointcloud_radar_sigma_ = 0.1;
     using_radar_ = true;
     using_lidar_ = false;
+    //Set ICP algorithm variant: 2->Generalized ICP, 1->Point to Plane ICP, else -> basic ICP
+    icp_type_lidar_ = 1;
+    icp_type_radar_ = 2;
 
     global_optimization_timer_ = this->create_wall_timer(
             std::chrono::milliseconds(int(global_opt_rate_s_*1000)), std::bind(&FusionOptimizationNode::global_opt_cb_, this));
@@ -282,10 +285,6 @@ public:
     agv_id_ = uav_id_ = 0;
 
     graph_initialized_ = false;
-
-    //Set ICP algorithm variant: 2->Generalized ICP, 1->Point to Plane ICP, else -> basic ICP
-    icp_type_lidar_ = 1;
-    icp_type_radar_ = 2;
 
     uwb_transform_available_ = false;
 
@@ -475,7 +474,7 @@ private:
 
     /********************LIDAR Pointcloud callbacks ****************************/
 
-    void pcl_source_lidar_cb_(const sensor_msgs::msg::PointCloud2::SharedPtr msg){
+    void pcl_agv_lidar_cb_(const sensor_msgs::msg::PointCloud2::SharedPtr msg){
         
         if (!msg->data.empty()) {  // Ensure the incoming message has data
             pcl::fromROSMsg(*msg, *agv_lidar_cloud_);
@@ -488,7 +487,7 @@ private:
             return;
     }
 
-    void pcl_target_lidar_cb_(const sensor_msgs::msg::PointCloud2::SharedPtr msg){
+    void pcl_uav__lidar_cb_(const sensor_msgs::msg::PointCloud2::SharedPtr msg){
 
         if (!msg->data.empty()) {  // Ensure the incoming message has data
             pcl::fromROSMsg(*msg, *uav_lidar_cloud_);
@@ -504,7 +503,7 @@ private:
 
     /********************RADAR Pointcloud callbacks ****************************/
 
-    void pcl_source_radar_cb_(const sensor_msgs::msg::PointCloud2::SharedPtr msg){
+    void pcl_agv_radar_cb_(const sensor_msgs::msg::PointCloud2::SharedPtr msg){
         
         if (!msg->data.empty()) {  // Ensure the incoming message has data
             pcl::fromROSMsg(*msg, *agv_radar_cloud_);
@@ -517,7 +516,7 @@ private:
             return;
     }
 
-    void pcl_target_radar_cb_(const sensor_msgs::msg::PointCloud2::SharedPtr msg){
+    void pcl_uav__radar_cb_(const sensor_msgs::msg::PointCloud2::SharedPtr msg){
 
         if (!msg->data.empty()) {  // Ensure the incoming message has data
             pcl::fromROSMsg(*msg, *uav_radar_cloud_);
@@ -2102,8 +2101,8 @@ private:
     rclcpp::Subscription<nav_msgs::msg::Odometry>::SharedPtr uav_odom_sub_, agv_odom_sub_;
     rclcpp::Subscription<geometry_msgs::msg::Vector3Stamped>::SharedPtr uav_linear_vel_sub_, uav_angular_vel_sub_;
 
-    rclcpp::Subscription<sensor_msgs::msg::PointCloud2>::SharedPtr pcl_source_lidar_sub_, pcl_target_lidar_sub_;
-    rclcpp::Subscription<sensor_msgs::msg::PointCloud2>::SharedPtr pcl_source_radar_sub_, pcl_target_radar_sub_;
+    rclcpp::Subscription<sensor_msgs::msg::PointCloud2>::SharedPtr pcl_agv_lidar_sub_, pcl_uav__lidar_sub_;
+    rclcpp::Subscription<sensor_msgs::msg::PointCloud2>::SharedPtr pcl_agv_radar_sub_, pcl_uav__radar_sub_;
     rclcpp::Subscription<geometry_msgs::msg::PoseWithCovarianceStamped>::SharedPtr optimized_tf_sub_;
 
     // Timers

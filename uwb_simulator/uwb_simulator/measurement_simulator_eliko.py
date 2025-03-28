@@ -117,18 +117,18 @@ class MeasurementSimulatorEliko(Node):
 
         try:
             # Look up ground truth and odom transforms
-            gt_target = self.tf_buffer.lookup_transform('world', 'uav_gt', rclpy.time.Time())
+            gt_uav = self.tf_buffer.lookup_transform('world', 'uav_gt', rclpy.time.Time())
 
             # odometry pose uav
-            odom_target = self.tf_buffer.lookup_transform('uav/odom','uav/base_link',rclpy.time.Time())
-            odom_target_source = self.tf_buffer.lookup_transform('uav/odom', 'agv/odom', rclpy.time.Time())
+            odom_uav = self.tf_buffer.lookup_transform('uav/odom','uav/base_link',rclpy.time.Time())
+            odom_uav_agv = self.tf_buffer.lookup_transform('uav/odom', 'agv/odom', rclpy.time.Time())
         except TransformException as ex:
             self.get_logger().info(f'Initial metrics: Could not lookup transforms: {ex}')
             return False
 
-        T_w_t = self.transform_stamped_to_matrix(gt_target)
-        T_odom_target = self.transform_stamped_to_matrix(odom_target)
-        T_odom_t_s = self.transform_stamped_to_matrix(odom_target_source)
+        T_w_t = self.transform_stamped_to_matrix(gt_uav)
+        T_odom_target = self.transform_stamped_to_matrix(odom_uav)
+        T_odom_t_s = self.transform_stamped_to_matrix(odom_uav_agv)
 
         # # Log the transformation matrices
         # self.get_logger().info("T_w_t (world to uav_gt):\n" + np.array2string(T_w_t, precision=3))
@@ -292,21 +292,21 @@ class MeasurementSimulatorEliko(Node):
 
         try:
                                          
-                gt_target = self.tf_buffer.lookup_transform('world','uav_gt',rclpy.time.Time())
+                gt_uav = self.tf_buffer.lookup_transform('world','uav_gt',rclpy.time.Time())
                                
-                gt_source = self.tf_buffer.lookup_transform('world','agv_gt',rclpy.time.Time())
+                gt_agv = self.tf_buffer.lookup_transform('world','agv_gt',rclpy.time.Time())
 
                 # odometry pose agv 
-                odom_source = self.tf_buffer.lookup_transform('agv/odom','agv/base_link',rclpy.time.Time())
+                odom_agv = self.tf_buffer.lookup_transform('agv/odom','agv/base_link',rclpy.time.Time())
                 # odometry pose uav
-                odom_target = self.tf_buffer.lookup_transform('uav/odom','uav/base_link',rclpy.time.Time())
+                odom_uav = self.tf_buffer.lookup_transform('uav/odom','uav/base_link',rclpy.time.Time())
                 # odometry frames transform
-                odom_target_source = self.tf_buffer.lookup_transform('uav/odom','agv/odom',rclpy.time.Time())
+                odom_uav_agv = self.tf_buffer.lookup_transform('uav/odom','agv/odom',rclpy.time.Time())
                                 
-                T_w_t = self.transform_stamped_to_matrix(gt_target)
-                T_odom_source = self.transform_stamped_to_matrix(odom_source)
-                T_odom_target = self.transform_stamped_to_matrix(odom_target)
-                T_odom_t_s = self.transform_stamped_to_matrix(odom_target_source)
+                T_w_t = self.transform_stamped_to_matrix(gt_uav)
+                T_odom_source = self.transform_stamped_to_matrix(odom_agv)
+                T_odom_target = self.transform_stamped_to_matrix(odom_uav)
+                T_odom_t_s = self.transform_stamped_to_matrix(odom_uav_agv)
 
                 That_w_t = np.linalg.inv(That_odom_t_s) @ T_odom_target
                 That_w_s = T_odom_source
@@ -334,8 +334,8 @@ class MeasurementSimulatorEliko(Node):
                 opt_target_agv = self.matrix_to_transform_stamped(That_w_s, "world", "agv_opt", msg.header.stamp)   
                 self.create_marker(opt_target_agv, self.opt_markers, "world", "agv_opt_marker", [0.0, 0.0, 1.0])
                 
-                self.create_marker(gt_target, self.uav_gt_markers, "world", "uav_gt_marker", [0.0, 1.0, 0.0])
-                self.create_marker(gt_source, self.arco_gt_markers, "world", "arco_gt_marker", [1.0, 0.0, 0.0])
+                self.create_marker(gt_uav, self.uav_gt_markers, "world", "uav_gt_marker", [0.0, 1.0, 0.0])
+                self.create_marker(gt_agv, self.arco_gt_markers, "world", "arco_gt_marker", [1.0, 0.0, 0.0])
 
                 # Publish the MarkerArrays
                 self.gt_source_marker_pub.publish(self.arco_gt_markers)
