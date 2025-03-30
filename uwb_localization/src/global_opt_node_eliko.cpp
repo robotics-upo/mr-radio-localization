@@ -216,7 +216,7 @@ public:
 
     min_traveled_distance_ = 0.5;
     min_traveled_angle_ = 30.0 * M_PI / 180.0;
-    max_traveled_distance_ = min_traveled_distance_ * 100.0;
+    max_traveled_distance_ = min_traveled_distance_ * 10.0;
     uav_delta_translation_ = agv_delta_translation_ = uav_delta_rotation_ = agv_delta_rotation_ = 0.0;
     uav_total_translation_ = agv_total_translation_ = uav_total_rotation_ = agv_total_rotation_ = 0.0;
 
@@ -470,11 +470,13 @@ private:
             double tag_disp = latest.tag_cumulative_distance - oldest.tag_cumulative_distance;
             double anchor_disp = latest.anchor_cumulative_distance - oldest.anchor_cumulative_distance;
 
-            // RCLCPP_INFO(this->get_logger(), "Tag displacement = [%.2f], Anchor displacement = [%.2f]",
-            //             tag_disp, anchor_disp);
-
+            if(tag_disp < max_traveled_distance_ / 5.0 && anchor_disp < max_traveled_distance_ / 5.0){
+                RCLCPP_INFO_THROTTLE(this->get_logger(), *this->get_clock(), 1000, "Insufficient displacement in window. Tag displacement = [%.2f], Anchor displacement = [%.2f]",
+                tag_disp, anchor_disp);
+                return;
+            }
             // Prune the oldest measurement if the displacement exceeds the threshold.
-            if (tag_disp > max_traveled_distance_ || anchor_disp > max_traveled_distance_) {
+            else if (tag_disp > max_traveled_distance_ || anchor_disp > max_traveled_distance_) {
                 global_measurements_.pop_front();
             } else {
                 break;
@@ -826,8 +828,8 @@ private:
 
             //Initial conditions
             State opt_state = opt_state_;
-            opt_state.roll = uav_roll_;
-            opt_state.pitch = uav_pitch_;
+            opt_state.roll = 0.0;
+            opt_state.pitch = 0.0;
   
             //Update the timestamp
             opt_state.timestamp = current_time;
@@ -844,17 +846,19 @@ private:
             double huber_threshold = 2.5; // = residuals higher than 2.5 times sigma are outliers
             ceres::LossFunction* robust_loss = new ceres::HuberLoss(huber_threshold);
 
-            Eigen::Matrix4d prior_covariance = opt_state_.covariance + motion_covariance;
-            Sophus::SE3d prior_T = build_transformation_SE3(opt_state_.roll, opt_state_.pitch, opt_state_.state);
-            // Add the prior residual with the full covariance
-            ceres::CostFunction* prior_cost = PriorResidual::Create(prior_T, opt_state.roll, opt_state.pitch, prior_covariance);
-            problem.AddResidualBlock(prior_cost, robust_loss, opt_state.state.data());
-
-
             if(agv_anchor_available_ && uav_anchor_available_){
                 Sophus::SE3d prior_anchor_T = uav_anchor_pose_.inverse() * agv_anchor_pose_;
                 ceres::CostFunction* prior_anchor_cost = PriorResidual::Create(prior_anchor_T, opt_state.roll, opt_state.pitch, uav_anchor_covariance_);
                 problem.AddResidualBlock(prior_anchor_cost, robust_loss, opt_state.state.data());
+            }
+
+            else{
+
+                Eigen::Matrix4d prior_covariance = opt_state_.covariance + motion_covariance;
+                Sophus::SE3d prior_T = build_transformation_SE3(opt_state_.roll, opt_state_.pitch, opt_state_.state);
+                // Add the prior residual with the full covariance
+                ceres::CostFunction* prior_cost = PriorResidual::Create(prior_T, opt_state.roll, opt_state.pitch, prior_covariance);
+                problem.AddResidualBlock(prior_cost, robust_loss, opt_state.state.data());
             }
 
 
@@ -1094,8 +1098,6 @@ private:
     std::unordered_map<std::string, double> tag_delta_translation_;
 
     double odom_error_distance_, odom_error_angle_;
-
-    double uav_roll_, uav_pitch_, uav_yaw_;
 
 };
 int main(int argc, char** argv) {
