@@ -32,6 +32,8 @@
 #include <sstream>
 #include <deque>
 #include <Eigen/Dense>
+#include <algorithm>
+#include <random>
 
 #include <utility>
 #include <unordered_map>
@@ -165,7 +167,6 @@ public:
     tf_publisher_ = this->create_publisher<geometry_msgs::msg::PoseWithCovarianceStamped>("eliko_optimization_node/optimized_T", 10);
     tf_broadcaster_ = std::make_shared<tf2_ros::TransformBroadcaster>(this);
 
-    global_opt_window_s_ = 5.0; //size of the sliding window in seconds
     global_opt_rate_s_ = 0.1; //rate of the optimization
     min_measurements_ = 50.0; //min number of measurements for running optimizer
     measurement_stdev_ = 0.1; //10 cm measurement noise
@@ -199,6 +200,9 @@ public:
     uav_opt_frame_id_ = "uav_opt"; 
     agv_opt_frame_id_ = "agv_opt"; 
 
+    odom_error_distance_ = 0.0;
+    odom_error_angle_ = 0.0;
+
     //Initial values for state
     init_state_.state = Eigen::Vector4d(0.0, 0.0, 0.0, 0.0);
     init_state_.covariance = Eigen::Matrix4d::Identity(); //
@@ -220,11 +224,9 @@ public:
     uav_delta_translation_ = agv_delta_translation_ = uav_delta_rotation_ = agv_delta_rotation_ = 0.0;
     uav_total_translation_ = agv_total_translation_ = uav_total_rotation_ = agv_total_rotation_ = 0.0;
 
-    odom_error_distance_ = 0.0;
-    odom_error_angle_ = 0.0;
-
     agv_anchor_available_ = false;
     uav_anchor_available_ = false;
+    use_anchor_prior_ = false;
 
     global_optimization_timer_ = this->create_wall_timer(
         std::chrono::milliseconds(int(global_opt_rate_s_*1000)), std::bind(&ElikoGlobalOptNode::global_opt_cb_, this));
@@ -483,31 +485,6 @@ private:
             }
         }
 
-        // std::vector<Measurement> minimalSubset = selectMinimalSubset(global_measurements_, min_traveled_distance_);
-        // if (minimalSubset.size() < 6) {
-        //     RCLCPP_WARN(this->get_logger(), "[Eliko global_opt node] Not enough distinct positions for minimal subset.");
-        // }
-
-        // else{
-        //     RCLCPP_INFO(this->get_logger(), "[Eliko global_opt node] Got a minimal subset of %ld measurements:", minimalSubset.size());
-        //     for (size_t i = 0; i < minimalSubset.size(); i++) {
-        //         const auto &meas = minimalSubset[i];
-        //         RCLCPP_INFO(this->get_logger(), "Measurement at timestamp %.2f: Tag Position in UAV Odometry Frame = [%.2f, %.2f, %.2f], Anchor Position in AGV Odometry Frame = [%.2f, %.2f, %.2f]",
-        //             meas.timestamp.seconds(),
-        //             meas.tag_odom_pose.x(), meas.tag_odom_pose.y(), meas.tag_odom_pose.z(),
-        //             meas.anchor_odom_pose.x(), meas.anchor_odom_pose.y(), meas.anchor_odom_pose.z());
-        //     }
-        // }
-
-        //*****************Perform initial algebraic solution ****************************/
-
-
-
-
-
-
-        //*****************Nonlinear WLS refinement with all measurements ****************************/
-
         // Then, check if there are enough measurements remaining.
         if (global_measurements_.size() < min_measurements_) {
             RCLCPP_WARN(this->get_logger(), "[Eliko global_opt node] Not enough data to run optimization.");
@@ -523,9 +500,15 @@ private:
             RCLCPP_WARN(this->get_logger(), "[Eliko global_opt node] Only one tag available. YAW IS NOT RELIABLE.");
         }
 
-
         RCLCPP_WARN(this->get_logger(), "[Eliko global_opt node] Movement UAV = [%.2fm %.2fº], AGV= [%.2fm %.2fº].", uav_delta_translation_, uav_delta_rotation_ * 180.0/M_PI, agv_delta_translation_, agv_delta_rotation_ * 180.0/M_PI);
 
+        //*****************Calculate initial solution ****************************/
+
+        Eigen::MatrixXd M;
+        Eigen::VectorXd b;
+        init_state_.state = solveMartelLinearSystem(global_measurements_, M, b, false); //false: use full stack of measurements true: subset of measurements
+
+        //*****************Nonlinear WLS refinement with all measurements ****************************/
 
         // Compute odometry covariance based on distance increments from step to step 
         Eigen::Matrix4d predicted_motion_covariance = Eigen::Matrix4d::Zero();
@@ -535,6 +518,8 @@ private:
         predicted_motion_covariance(1,1) = std::pow(predicted_drift_translation, 2.0);
         predicted_motion_covariance(2,2) = std::pow(predicted_drift_translation, 2.0);
         predicted_motion_covariance(3,3) = std::pow(predicted_drift_rotation, 2.0);
+
+        predicted_motion_covariance += Eigen::Matrix4d::Identity()*1e-6;
 
 
         //Update odom for next optimization
@@ -563,6 +548,105 @@ private:
             RCLCPP_INFO(this->get_logger(), "[Eliko global_opt node] Optimizer did not converge");
         }
 
+    }
+
+    // This function builds the linear system M*x = b based on the current measurements window.
+    Eigen::Vector4d solveMartelLinearSystem(const std::deque<Measurement>& measurements,
+            Eigen::MatrixXd &M,
+            Eigen::VectorXd &b, bool useSubset = false)
+    {
+
+        std::vector<Measurement> finalSet;
+        if (useSubset) {
+            // Define a desired subset size
+            size_t subsetSize = std::min<size_t>(measurements.size(), 10);
+            finalSet = getRandomSubset(measurements, subsetSize);
+        }
+        else {
+            // Use all measurements by copying the deque into a vector.
+            finalSet = std::vector<Measurement>(measurements.begin(), measurements.end());
+        }
+        // Number of measurements in the window
+        const int numMeasurements = measurements.size();
+        // Our unknown vector x has 8 elements:
+        // [ u, v, w, cos(α), sin(α), L1, L2, L3 ]
+        M.resize(numMeasurements, 8);
+        b.resize(numMeasurements);
+
+        for (int i = 0; i < numMeasurements; ++i) {
+            const Measurement &meas = finalSet[i];
+
+            // Anchor coordinates from AGV odometry frame
+            double x = meas.anchor_odom_pose(0);
+            double y = meas.anchor_odom_pose(1);
+            double z = meas.anchor_odom_pose(2);
+
+            // Tag coordinates from UAV odometry frame
+            double A = meas.tag_odom_pose(0);
+            double B = meas.tag_odom_pose(1);
+            double C = meas.tag_odom_pose(2);
+
+            // Measured distance (already converted to meters)
+            double d = meas.distance;
+
+            // Compute the right-hand side term b_i (following Equation (14) in the paper)
+            double bi = d*d - (A*A + B*B + C*C) - (x*x + y*y + z*z) + 2.0 * C * z;
+
+            // Compute the coefficients β_i1 through β_i7
+            double beta1 = -2.0 * A;
+            double beta2 = -2.0 * B;
+            double beta3 = 2.0 * z - 2.0 * C;
+            double beta4 = -2.0 * (A * x + B * y);
+            double beta5 = 2.0 * (A * y - B * x);
+            double beta6 = 2.0 * x;
+            double beta7 = 2.0 * y;
+
+            // Form the i-th row of the matrix M:
+            // [ β_i1, β_i2, β_i3, β_i4, β_i5, β_i6, β_i7, 1 ]
+            M(i, 0) = beta1;
+            M(i, 1) = beta2;
+            M(i, 2) = beta3;
+            M(i, 3) = beta4;
+            M(i, 4) = beta5;
+            M(i, 5) = beta6;
+            M(i, 6) = beta7;
+            M(i, 7) = 1.0;
+
+            b(i) = bi;
+        }
+
+        // Solve for x using SVD (least-squares solution)
+        Eigen::VectorXd solution = M.jacobiSvd(Eigen::ComputeThinU | Eigen::ComputeThinV).solve(b);
+        // The solution vector is:
+        // x = [ u, v, w, cos(α), sin(α), L1, L2, L3 ]ᵀ
+        Eigen::Vector4d state_solution(solution[0], solution[1], solution[2], std::atan2(solution[4], solution[3]));
+
+        RCLCPP_INFO_STREAM(this->get_logger(), "Initial solution: " << state_solution.transpose());
+
+        return state_solution;
+    }
+
+
+    std::vector<Measurement> getRandomSubset(const std::deque<Measurement>& measurements, size_t N)
+    {
+        // Copy measurements into a vector
+        std::vector<Measurement> measurementVec(measurements.begin(), measurements.end());
+        
+        // Create a random generator
+        std::random_device rd;
+        std::mt19937 gen(rd());
+        
+        // Shuffle the vector randomly
+        std::shuffle(measurementVec.begin(), measurementVec.end(), gen);
+        
+        // If N is greater than the available measurements, use the full vector
+        if (N > measurementVec.size()) {
+            N = measurementVec.size();
+        }
+        
+        // Create a subset vector with the first N elements
+        std::vector<Measurement> subset(measurementVec.begin(), measurementVec.begin() + N);
+        return subset;
     }
 
 
@@ -844,15 +928,16 @@ private:
             double huber_threshold = 2.5; // = residuals higher than 2.5 times sigma are outliers
             ceres::LossFunction* robust_loss = new ceres::HuberLoss(huber_threshold);
 
-            if(agv_anchor_available_ && uav_anchor_available_){
+            if(use_anchor_prior_ && (agv_anchor_available_ && uav_anchor_available_)){
                 Sophus::SE3d prior_anchor_T = uav_anchor_pose_.inverse() * agv_anchor_pose_;
                 ceres::CostFunction* prior_anchor_cost = PriorResidual::Create(prior_anchor_T, opt_state.roll, opt_state.pitch, uav_anchor_covariance_);
                 problem.AddResidualBlock(prior_anchor_cost, robust_loss, opt_state.state.data());
             }
 
+            //Set prior using linear initial solution
             else{
-                Eigen::Matrix4d prior_covariance = opt_state_.covariance + motion_covariance;
-                Sophus::SE3d prior_T = build_transformation_SE3(opt_state_.roll, opt_state_.pitch, opt_state_.state);
+                Eigen::Matrix4d prior_covariance = motion_covariance;
+                Sophus::SE3d prior_T = build_transformation_SE3(init_state_.roll, init_state_.pitch, init_state_.state);
                 //Add the prior residual with the full covariance
                 ceres::CostFunction* prior_cost = PriorResidual::Create(prior_T, opt_state.roll, opt_state.pitch, prior_covariance);
                 problem.AddResidualBlock(prior_cost, robust_loss, opt_state.state.data());
@@ -885,7 +970,7 @@ private:
             // Solve
             ceres::Solver::Summary summary;
             ceres::Solve(options, &problem, &summary);
-            //RCLCPP_INFO(this->get_logger(), summary.BriefReport().c_str());
+            RCLCPP_INFO(this->get_logger(), summary.BriefReport().c_str());
 
             // Notify and update values if optimization converged
             if (summary.termination_type == ceres::CONVERGENCE){
@@ -1074,13 +1159,14 @@ private:
 
     bool moving_average_;
     size_t min_measurements_;
-    double global_opt_window_s_, global_opt_rate_s_;
+    double global_opt_rate_s_;
     double measurement_stdev_, measurement_covariance_;
 
     Sophus::SE3d uav_odom_pose_, last_uav_odom_pose_;         // Current UAV odometry position and last used for optimization
     Sophus::SE3d uav_anchor_pose_, agv_anchor_pose_;
     Eigen::Matrix4d uav_anchor_covariance_, agv_anchor_covariance_;
     bool agv_anchor_available_, uav_anchor_available_;
+    bool use_anchor_prior_;
     Sophus::SE3d agv_odom_pose_, last_agv_odom_pose_;        // Current AGV odometry position and last used for optimization
     Eigen::Matrix<double, 6, 6> uav_odom_covariance_, agv_odom_covariance_;  // UAV odometry covariance
     nav_msgs::msg::Odometry last_agv_odom_msg_, last_uav_odom_msg_;
