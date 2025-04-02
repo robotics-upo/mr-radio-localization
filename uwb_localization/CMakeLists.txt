@@ -18,7 +18,6 @@ find_package(Ceres REQUIRED)
 find_package(Sophus REQUIRED)
 find_package(small_gicp REQUIRED)
 
-
 find_package(Boost REQUIRED date_time)
 find_package(Qt5OpenGL REQUIRED)
 

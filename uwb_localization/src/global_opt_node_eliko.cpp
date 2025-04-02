@@ -138,7 +138,7 @@ public:
 
     ElikoGlobalOptNode() : Node("eliko_global_opt_node") {
     
-    std::string odom_topic_agv = "/arco/idmind_motors/odom"; //or "/agv/odom" "/arco/idmind_motors/odom"
+    std::string odom_topic_agv = "/agv/odom"; //or "/agv/odom" "/arco/idmind_motors/odom"
     std::string anchor_topic_agv = "/pose_graph_node/agv_anchor";
     std::string odom_topic_uav = "/uav/odom"; //or "/uav/odom"
     std::string anchor_topic_uav = "/pose_graph_node/uav_anchor";
@@ -220,8 +220,8 @@ public:
     uav_delta_translation_ = agv_delta_translation_ = uav_delta_rotation_ = agv_delta_rotation_ = 0.0;
     uav_total_translation_ = agv_total_translation_ = uav_total_rotation_ = agv_total_rotation_ = 0.0;
 
-    odom_error_distance_ = 2.0;
-    odom_error_angle_ = 2.0;
+    odom_error_distance_ = 0.0;
+    odom_error_angle_ = 0.0;
 
     agv_anchor_available_ = false;
     uav_anchor_available_ = false;
@@ -470,7 +470,7 @@ private:
             double tag_disp = latest.tag_cumulative_distance - oldest.tag_cumulative_distance;
             double anchor_disp = latest.anchor_cumulative_distance - oldest.anchor_cumulative_distance;
 
-            if(tag_disp < max_traveled_distance_ / 5.0 && anchor_disp < max_traveled_distance_ / 5.0){
+            if(tag_disp < min_traveled_distance_ * 5.0 && anchor_disp < min_traveled_distance_ * 5.0){
                 RCLCPP_INFO_THROTTLE(this->get_logger(), *this->get_clock(), 1000, "Insufficient displacement in window. Tag displacement = [%.2f], Anchor displacement = [%.2f]",
                 tag_disp, anchor_disp);
                 return;
@@ -828,8 +828,6 @@ private:
 
             //Initial conditions
             State opt_state = opt_state_;
-            opt_state.roll = 0.0;
-            opt_state.pitch = 0.0;
   
             //Update the timestamp
             opt_state.timestamp = current_time;
@@ -853,10 +851,9 @@ private:
             }
 
             else{
-
                 Eigen::Matrix4d prior_covariance = opt_state_.covariance + motion_covariance;
                 Sophus::SE3d prior_T = build_transformation_SE3(opt_state_.roll, opt_state_.pitch, opt_state_.state);
-                // Add the prior residual with the full covariance
+                //Add the prior residual with the full covariance
                 ceres::CostFunction* prior_cost = PriorResidual::Create(prior_T, opt_state.roll, opt_state.pitch, prior_covariance);
                 problem.AddResidualBlock(prior_cost, robust_loss, opt_state.state.data());
             }
