@@ -506,7 +506,7 @@ private:
 
         Eigen::MatrixXd M;
         Eigen::VectorXd b;
-        init_state_.state = solveMartelLinearSystem(global_measurements_, M, b, false); //false: use full stack of measurements true: subset of measurements
+        init_state_.state = solveMartelLinearSystem(global_measurements_, M, b, true); //false: use full stack of measurements true: subset of 50 measurements
 
         //*****************Nonlinear WLS refinement with all measurements ****************************/
 
@@ -558,8 +558,8 @@ private:
 
         std::vector<Measurement> finalSet;
         if (useSubset) {
-            // Define a desired subset size
-            size_t subsetSize = std::min<size_t>(measurements.size(), 10);
+            // Define a desired subset size (30% of the total set)
+            size_t subsetSize = 0.3 * measurements.size();
             finalSet = getRandomSubset(measurements, subsetSize);
         }
         else {
@@ -567,7 +567,7 @@ private:
             finalSet = std::vector<Measurement>(measurements.begin(), measurements.end());
         }
         // Number of measurements in the window
-        const int numMeasurements = measurements.size();
+        const int numMeasurements = finalSet.size();
         // Our unknown vector x has 8 elements:
         // [ u, v, w, cos(α), sin(α), L1, L2, L3 ]
         M.resize(numMeasurements, 8);

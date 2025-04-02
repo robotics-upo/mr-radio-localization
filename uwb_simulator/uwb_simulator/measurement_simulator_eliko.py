@@ -33,6 +33,7 @@ class MeasurementSimulatorEliko(Node):
             parameters=[
                 ('measurement_noise_std', 0.1),
                 ('pub_rate', 10.0),
+                ('add_outliers', True),
                 ('anchors.a1.id', "0x0009D6"),
                 ('anchors.a2.id', "0x0009E5"),
                 ('anchors.a3.id', "0x0016FA"),
@@ -43,6 +44,9 @@ class MeasurementSimulatorEliko(Node):
 
         self.measurement_noise_std = self.get_parameter("measurement_noise_std").value
         self.rate = self.get_parameter("pub_rate").value
+        self.add_outliers = self.get_parameter("add_outliers").value
+        self.get_logger().info(f'Publish rate:{self.rate}, Sigma:{self.measurement_noise_std}, Outliers:{self.add_outliers}')
+
 
         self.anchors_ids =	{
             'a1': self.get_parameter("anchors.a1.id").value,
@@ -396,7 +400,7 @@ class MeasurementSimulatorEliko(Node):
                 distance.tag_sn = self.tags_ids['t1']
 
                  # Add outlier with 5% probability
-                if random.random() < 0.05:
+                if self.add_outliers and random.random() < 0.05:
                     gaussian_noise = np.random.normal(0, self.measurement_noise_std*5.0)
                 else:
                     gaussian_noise = np.random.normal(0, self.measurement_noise_std)
@@ -433,7 +437,7 @@ class MeasurementSimulatorEliko(Node):
                 distance.anchor_sn = id
                 distance.tag_sn = self.tags_ids['t2']
                  # Add outlier with 5% probability
-                if random.random() < 0.05:
+                if self.add_outliers and random.random() < 0.05:
                     gaussian_noise = np.random.normal(0, self.measurement_noise_std*5.0)
                 else:
                     gaussian_noise = np.random.normal(0, self.measurement_noise_std)

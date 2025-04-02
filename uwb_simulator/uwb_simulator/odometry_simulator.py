@@ -297,10 +297,10 @@ class OdometrySimulator(Node):
         self.agv_pose, self.agv_odom_pose = self.integrate_odometry(self.agv_pose, v_agv, w_agv, dt, self.traveled_distance_agv, self.traveled_angle_agv, self.agv_origin, self.holonomic_xy)
         
         #self.get_logger().info(f'Traveled distance AGV: {self.traveled_distance_agv:.2f}', throttle_duration_sec=1)
-        self.get_logger().info(f'AGV Odom Pose: {self.agv_odom_pose}', throttle_duration_sec=1)
-        self.get_logger().info(f'UAV Odom Pose: {self.uav_odom_pose}', throttle_duration_sec=1)
-        self.get_logger().info(f'AGV GT Pose: {self.agv_pose}', throttle_duration_sec=1)
-        self.get_logger().info(f'UAV GT Pose: {self.uav_pose}', throttle_duration_sec=1)
+        # self.get_logger().info(f'AGV Odom Pose: {self.agv_odom_pose}', throttle_duration_sec=1)
+        # self.get_logger().info(f'UAV Odom Pose: {self.uav_odom_pose}', throttle_duration_sec=1)
+        # self.get_logger().info(f'AGV GT Pose: {self.agv_pose}', throttle_duration_sec=1)
+        # self.get_logger().info(f'UAV GT Pose: {self.uav_pose}', throttle_duration_sec=1)
 
         # Publish transforms (ground truth)
         self.transform_publisher(self.uav_pose, 'world', 'uav_gt')
