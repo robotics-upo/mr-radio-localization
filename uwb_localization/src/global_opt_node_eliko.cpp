@@ -140,28 +140,20 @@ public:
 
     ElikoGlobalOptNode() : Node("eliko_global_opt_node") {
     
-    std::string odom_topic_agv = "/agv/odom"; //or "/agv/odom" "/arco/idmind_motors/odom"
-    std::string anchor_topic_agv = "/pose_graph_node/agv_anchor";
+    std::string odom_topic_agv = "/arco/idmind_motors/odom"; //or "/agv/odom" "/arco/idmind_motors/odom"
     std::string odom_topic_uav = "/uav/odom"; //or "/uav/odom"
-    std::string anchor_topic_uav = "/pose_graph_node/uav_anchor";
 
     //Subscribe to distances publisher
     eliko_distances_sub_ = this->create_subscription<eliko_messages::msg::DistancesList>(
-                "/eliko/Distances", 10, std::bind(&ElikoGlobalOptNode::distances_coords_cb_, this, std::placeholders::_1));
+                "/eliko/Distances", 10, std::bind(&ElikoGlobalOptNode::distancesCoordsCb, this, std::placeholders::_1));
 
     rclcpp::SensorDataQoS qos; // Use a QoS profile compatible with sensor data
 
     agv_odom_sub_ = this->create_subscription<nav_msgs::msg::Odometry>(
-    odom_topic_agv, qos, std::bind(&ElikoGlobalOptNode::agv_odom_cb_, this, std::placeholders::_1));
-
-    agv_anchor_sub_ = this->create_subscription<geometry_msgs::msg::PoseWithCovarianceStamped>(
-        anchor_topic_agv, qos, std::bind(&ElikoGlobalOptNode::agv_anchor_cb_, this, std::placeholders::_1));
+    odom_topic_agv, qos, std::bind(&ElikoGlobalOptNode::agvOdomCb, this, std::placeholders::_1));
     
     uav_odom_sub_ = this->create_subscription<nav_msgs::msg::Odometry>(
-        odom_topic_uav, qos, std::bind(&ElikoGlobalOptNode::uav_odom_cb_, this, std::placeholders::_1));
-
-    uav_anchor_sub_ = this->create_subscription<geometry_msgs::msg::PoseWithCovarianceStamped>(
-            anchor_topic_uav, qos, std::bind(&ElikoGlobalOptNode::uav_anchor_cb_, this, std::placeholders::_1));
+        odom_topic_uav, qos, std::bind(&ElikoGlobalOptNode::uavOdomCb, this, std::placeholders::_1));
     
     // Create publisher/broadcaster for optimized transformation
     tf_publisher_ = this->create_publisher<geometry_msgs::msg::PoseWithCovarianceStamped>("eliko_optimization_node/optimized_T", 10);
@@ -200,8 +192,8 @@ public:
     uav_opt_frame_id_ = "uav_opt"; 
     agv_opt_frame_id_ = "agv_opt"; 
 
-    odom_error_distance_ = 0.0;
-    odom_error_angle_ = 0.0;
+    odom_error_distance_ = 2.0;
+    odom_error_angle_ = 2.0;
 
     //Initial values for state
     init_state_.state = Eigen::Vector4d(0.0, 0.0, 0.0, 0.0);
@@ -224,19 +216,15 @@ public:
     uav_delta_translation_ = agv_delta_translation_ = uav_delta_rotation_ = agv_delta_rotation_ = 0.0;
     uav_total_translation_ = agv_total_translation_ = uav_total_rotation_ = agv_total_rotation_ = 0.0;
 
-    agv_anchor_available_ = false;
-    uav_anchor_available_ = false;
-    use_anchor_prior_ = false;
-
     global_optimization_timer_ = this->create_wall_timer(
-        std::chrono::milliseconds(int(global_opt_rate_s_*1000)), std::bind(&ElikoGlobalOptNode::global_opt_cb_, this));
+        std::chrono::milliseconds(int(global_opt_rate_s_*1000)), std::bind(&ElikoGlobalOptNode::globalOptCb, this));
     
     RCLCPP_INFO(this->get_logger(), "Eliko Optimization Node initialized.");
   }
 
 private:
 
-    void uav_odom_cb_(const nav_msgs::msg::Odometry::SharedPtr msg) {
+    void uavOdomCb(const nav_msgs::msg::Odometry::SharedPtr msg) {
         
         //******************Method 1: Just extract pose from odom*********************//
 
@@ -310,7 +298,7 @@ private:
     }
 
 
-    void agv_odom_cb_(const nav_msgs::msg::Odometry::SharedPtr msg) {
+    void agvOdomCb(const nav_msgs::msg::Odometry::SharedPtr msg) {
         
         //******************Method 1: Just extract pose from odom*********************//
 
@@ -384,42 +372,9 @@ private:
     
     }
 
-    void agv_anchor_cb_(const geometry_msgs::msg::PoseWithCovarianceStamped::SharedPtr msg) {
-        
-        // Convert the incoming pose into a Sophus::SE3d.
-        agv_anchor_pose_ = transformSE3FromPoseMsg(msg->pose.pose);
-
-        // Extract the 6x6 covariance from the message.
-        Eigen::Matrix<double,6,6> cov6;
-        for (int i = 0; i < 36; ++i) {
-            cov6(i/6, i%6) = msg->pose.covariance[i];
-        }
-        // Reduce the 6x6 covariance to a 4x4 matrix (x, y, z and yaw).
-        agv_anchor_covariance_ = reduce_covariance_matrix(cov6);
-
-        if(!agv_anchor_available_) agv_anchor_available_ = true;
-
-    }
-
-    void uav_anchor_cb_(const geometry_msgs::msg::PoseWithCovarianceStamped::SharedPtr msg) {
-
-        // Convert the incoming pose into a Sophus::SE3d.
-        uav_anchor_pose_ = transformSE3FromPoseMsg(msg->pose.pose);
-
-        // Extract the 6x6 covariance from the message.
-        Eigen::Matrix<double,6,6> cov6;
-        for (int i = 0; i < 36; ++i) {
-            cov6(i/6, i%6) = msg->pose.covariance[i];
-        }
-        // Reduce the 6x6 covariance to a 4x4 matrix.
-        uav_anchor_covariance_ = reduce_covariance_matrix(cov6);
-
-        if(!uav_anchor_available_) uav_anchor_available_ = true;
-
-    }
 
 
-    void distances_coords_cb_(const eliko_messages::msg::DistancesList::SharedPtr msg) {
+    void distancesCoordsCb(const eliko_messages::msg::DistancesList::SharedPtr msg) {
     
 
         for (const auto& distance_msg : msg->anchor_distances) {
@@ -445,7 +400,7 @@ private:
     }
 
 
-    void global_opt_cb_() {
+    void globalOptCb() {
 
         rclcpp::Time current_time = this->get_clock()->now();
 
@@ -472,7 +427,7 @@ private:
             double tag_disp = latest.tag_cumulative_distance - oldest.tag_cumulative_distance;
             double anchor_disp = latest.anchor_cumulative_distance - oldest.anchor_cumulative_distance;
 
-            if(tag_disp < min_traveled_distance_ * 5.0 && anchor_disp < min_traveled_distance_ * 5.0){
+            if(tag_disp < 2.0 || anchor_disp < 2.0){
                 RCLCPP_INFO_THROTTLE(this->get_logger(), *this->get_clock(), 1000, "Insufficient displacement in window. Tag displacement = [%.2f], Anchor displacement = [%.2f]",
                 tag_disp, anchor_disp);
                 return;
@@ -506,7 +461,7 @@ private:
 
         Eigen::MatrixXd M;
         Eigen::VectorXd b;
-        init_state_.state = solveMartelLinearSystem(global_measurements_, M, b, true); //false: use full stack of measurements true: subset of 50 measurements
+        bool init_prior = solveMartelLinearSystem(global_measurements_, M, b, init_state_, true); //false: use full stack of measurements true: subset of 50 measurements
 
         //*****************Nonlinear WLS refinement with all measurements ****************************/
 
@@ -519,8 +474,6 @@ private:
         predicted_motion_covariance(2,2) = std::pow(predicted_drift_translation, 2.0);
         predicted_motion_covariance(3,3) = std::pow(predicted_drift_rotation, 2.0);
 
-        predicted_motion_covariance += Eigen::Matrix4d::Identity()*1e-6;
-
 
         //Update odom for next optimization
         uav_delta_translation_ = agv_delta_translation_ = uav_delta_rotation_ = agv_delta_rotation_ = 0.0;
@@ -528,18 +481,18 @@ private:
         //Optimize    
         RCLCPP_INFO(this->get_logger(), "[Eliko global_opt node] Optimizing trajectory of %ld measurements", global_measurements_.size());
         //Update transforms after convergence
-        if(run_optimization(current_time, predicted_motion_covariance)){
+        if(runOptimization(current_time, predicted_motion_covariance, init_prior)){
         
             if(moving_average_){
                 // /*Run moving average*/
-                auto smoothed_state = moving_average(opt_state_);
+                auto smoothed_state = movingAverage(opt_state_);
                 //Update for initial estimation of following step
                 opt_state_.state = smoothed_state;
             }
 
-            Sophus::SE3d That_ts = build_transformation_SE3(opt_state_.roll, opt_state_.pitch, opt_state_.state);
+            Sophus::SE3d That_ts = buildTransformationSE3(opt_state_.roll, opt_state_.pitch, opt_state_.state);
             
-            geometry_msgs::msg::PoseWithCovarianceStamped msg = build_pose_msg(That_ts, opt_state_.covariance + predicted_motion_covariance, opt_state_.timestamp, uav_odom_frame_id_);
+            geometry_msgs::msg::PoseWithCovarianceStamped msg = buildPoseMsg(That_ts, opt_state_.covariance + predicted_motion_covariance, opt_state_.timestamp, uav_odom_frame_id_);
             tf_publisher_->publish(msg);
 
         }
@@ -551,9 +504,9 @@ private:
     }
 
     // This function builds the linear system M*x = b based on the current measurements window.
-    Eigen::Vector4d solveMartelLinearSystem(const std::deque<Measurement>& measurements,
+    bool solveMartelLinearSystem(const std::deque<Measurement>& measurements,
             Eigen::MatrixXd &M,
-            Eigen::VectorXd &b, bool useSubset = false)
+            Eigen::VectorXd &b, State &init_state, bool useSubset = false)
     {
 
         std::vector<Measurement> finalSet;
@@ -615,15 +568,39 @@ private:
             b(i) = bi;
         }
 
-        // Solve for x using SVD (least-squares solution)
-        Eigen::VectorXd solution = M.jacobiSvd(Eigen::ComputeThinU | Eigen::ComputeThinV).solve(b);
+        // Compute the SVD of M
+        Eigen::JacobiSVD<Eigen::MatrixXd> svd(M, Eigen::ComputeThinU | Eigen::ComputeThinV);
+        auto singularValues = svd.singularValues();
+
+        // Determine effective rank: a common approach is to compare each singular value with tol:
+        int rank = 0;
+        double tol = std::max(M.rows(), M.cols()) * singularValues(0) * std::numeric_limits<double>::epsilon();
+        for (int i = 0; i < singularValues.size(); ++i) {
+            if (singularValues(i) > tol)
+                ++rank;
+        }
+
+        if (rank < 7) {
+            RCLCPP_WARN(this->get_logger(), "Unfavourable configuration: rank(%d) < 7", rank);
+            // Here you may choose to return a default state or handle the situation accordingly.
+            init_state.state = Eigen::Vector4d::Zero();
+            init_state.covariance = Eigen::Matrix4d::Identity();
+            return false;
+        }
+
+        // Solve for x using the computed SVD (least-squares solution)
+        Eigen::VectorXd solution = svd.solve(b);
         // The solution vector is:
         // x = [ u, v, w, cos(α), sin(α), L1, L2, L3 ]ᵀ
-        Eigen::Vector4d state_solution(solution[0], solution[1], solution[2], std::atan2(solution[4], solution[3]));
 
-        RCLCPP_INFO_STREAM(this->get_logger(), "Initial solution: " << state_solution.transpose());
+        init_state.state[0] = solution[0];
+        init_state.state[1] = solution[1];
+        init_state.state[2] = solution[2];
+        init_state.state[3] = std::atan2(solution[4], solution[3]);
 
-        return state_solution;
+        RCLCPP_INFO_STREAM(this->get_logger(), "Initial solution: " << init_state.state.transpose());
+
+        return true;
     }
 
 
@@ -651,14 +628,14 @@ private:
 
 
         // Normalize an angle to the range [-pi, pi]
-    double normalize_angle(double angle) {
+    double normalizeAngle(double angle) {
         while (angle > M_PI) angle -= 2.0 * M_PI;
         while (angle < -M_PI) angle += 2.0 * M_PI;
         return angle;
         }
 
     //Write to display a 4x4 transformation matrix
-    void log_transformation_matrix(const Eigen::Matrix4d &T)   {
+    void logTransformationMatrix(const Eigen::Matrix4d &T)   {
 
         RCLCPP_INFO(this->get_logger(), "T:\n"
             "[%f, %f, %f, %f]\n[%f, %f, %f, %f]\n[%f, %f, %f, %f]\n[%f, %f, %f, %f]",
@@ -669,7 +646,7 @@ private:
 
     }
 
-    Eigen::Vector4d moving_average(const State &sample) {
+    Eigen::Vector4d movingAverage(const State &sample) {
         
             // Add the new sample with timestamp
             moving_average_states_.push_back(sample);
@@ -719,13 +696,13 @@ private:
 
                 // Calculate weighted average yaw using the weighted sine and cosine
                 smoothed_state[3] = std::atan2(sum_sin / total_weight, sum_cos / total_weight);
-                smoothed_state[3] = normalize_angle(smoothed_state[3]);
+                smoothed_state[3] = normalizeAngle(smoothed_state[3]);
             }
 
             return smoothed_state;
     }
 
-    void publish_transform(const Sophus::SE3d& T, const std::string &frame_id, const std::string &child_frame_id, const rclcpp::Time &current_time) {
+    void publishTransform(const Sophus::SE3d& T, const std::string &frame_id, const std::string &child_frame_id, const rclcpp::Time &current_time) {
         
         
         geometry_msgs::msg::TransformStamped that_st_msg;
@@ -755,7 +732,7 @@ private:
     }
 
 
-    geometry_msgs::msg::PoseWithCovarianceStamped build_pose_msg(const Sophus::SE3d &T, const Eigen::Matrix4d& cov4, 
+    geometry_msgs::msg::PoseWithCovarianceStamped buildPoseMsg(const Sophus::SE3d &T, const Eigen::Matrix4d& cov4, 
         const rclcpp::Time &current_time, const std::string &frame_id) {
 
         geometry_msgs::msg::PoseWithCovarianceStamped p_msg;
@@ -835,7 +812,7 @@ private:
         return Sophus::SE3d(q, t);
       }
 
-    Eigen::Matrix4d reduce_covariance_matrix(const Eigen::Matrix<double,6,6> &cov6) {
+    Eigen::Matrix4d reduceCovarianceMatrix(const Eigen::Matrix<double,6,6> &cov6) {
         // Choose indices for [x, y, z, yaw]. Here, we assume that the yaw covariance
         // is stored at row/column 5 in the 6x6 matrix (with the 6-vector being [x,y,z,roll,pitch,yaw]).
         std::vector<int> indices = {0, 1, 2, 5};
@@ -865,7 +842,7 @@ private:
         return state;
     }
 
-    Sophus::SE3d build_transformation_SE3(double roll, double pitch, const Eigen::Vector4d& s) {
+    Sophus::SE3d buildTransformationSE3(double roll, double pitch, const Eigen::Vector4d& s) {
         Eigen::Vector3d t(s[0], s[1], s[2]);  // Use Vector3d instead of an incorrect Matrix type.
         Eigen::Matrix3d R = (Eigen::AngleAxisd(s[3], Eigen::Vector3d::UnitZ()) *
                              Eigen::AngleAxisd(pitch, Eigen::Vector3d::UnitY()) *
@@ -873,40 +850,8 @@ private:
         return Sophus::SE3d(R, t);
     }
 
-
-    std::vector<Measurement> selectMinimalSubset(
-        const std::deque<Measurement>& measurements,
-        double translationThreshold,
-        size_t minCount = 6)
-    {
-        std::vector<Measurement> minimalSubset;
-        if (measurements.empty())
-            return minimalSubset;
-    
-        // Start with the first measurement.
-        minimalSubset.push_back(measurements.front());
-        const Measurement* lastSelected = &measurements.front();
-    
-        // Iterate over the remaining measurements.
-        for (const auto& meas : measurements) {
-            // Compute the displacement between the current measurement and the last selected one.
-            double tag_disp = (meas.tag_odom_pose - lastSelected->tag_odom_pose).norm();
-            double anchor_disp = (meas.anchor_odom_pose - lastSelected->anchor_odom_pose).norm();
-    
-            // If both the tag and the anchor have moved at least the threshold,
-            // add this measurement to the subset.
-            if (tag_disp >= translationThreshold && anchor_disp >= translationThreshold) {
-                minimalSubset.push_back(meas);
-                lastSelected = &meas;  // update the last selected measurement
-            }
-            if (minimalSubset.size() >= minCount)
-                break;
-        }
-        return minimalSubset;
-    }
-
     // Run the optimization once all measurements are received
-    bool run_optimization(const rclcpp::Time &current_time, const Eigen::Matrix4d& motion_covariance) {
+    bool runOptimization(const rclcpp::Time &current_time, const Eigen::Matrix4d& motion_covariance, const bool& init_prior) {
 
             ceres::Problem problem;
 
@@ -928,16 +873,10 @@ private:
             double huber_threshold = 2.5; // = residuals higher than 2.5 times sigma are outliers
             ceres::LossFunction* robust_loss = new ceres::HuberLoss(huber_threshold);
 
-            if(use_anchor_prior_ && (agv_anchor_available_ && uav_anchor_available_)){
-                Sophus::SE3d prior_anchor_T = uav_anchor_pose_.inverse() * agv_anchor_pose_;
-                ceres::CostFunction* prior_anchor_cost = PriorResidual::Create(prior_anchor_T, opt_state.roll, opt_state.pitch, uav_anchor_covariance_);
-                problem.AddResidualBlock(prior_anchor_cost, robust_loss, opt_state.state.data());
-            }
-
             //Set prior using linear initial solution
-            else{
-                Eigen::Matrix4d prior_covariance = motion_covariance;
-                Sophus::SE3d prior_T = build_transformation_SE3(init_state_.roll, init_state_.pitch, init_state_.state);
+            if(init_prior){
+                Eigen::Matrix4d prior_covariance = motion_covariance + Eigen::Matrix4d::Identity() * std::pow(2.0*measurement_stdev_,2.0);
+                Sophus::SE3d prior_T = buildTransformationSE3(init_state_.roll, init_state_.pitch, init_state_.state);
                 //Add the prior residual with the full covariance
                 ceres::CostFunction* prior_cost = PriorResidual::Create(prior_T, opt_state.roll, opt_state.pitch, prior_covariance);
                 problem.AddResidualBlock(prior_cost, robust_loss, opt_state.state.data());
@@ -945,10 +884,6 @@ private:
 
 
             for (const auto& measurement : global_measurements_) {                   
-                
-                //Use positions of anchors and tags in the body frame (no odometry)
-                // Eigen::Vector3d anchor_pos = anchor_positions_[measurement.anchor_id];
-                // Eigen::Vector3d tag_pos = tag_positions_[measurement.tag_id];
                 
                 // //Use positions of anchors and tags in each robot odometry frame
                 Eigen::Vector3d anchor_pos = measurement.anchor_odom_pose;
@@ -1134,8 +1069,7 @@ private:
     // Subscriptions
     rclcpp::Subscription<eliko_messages::msg::DistancesList>::SharedPtr eliko_distances_sub_;
     rclcpp::Subscription<nav_msgs::msg::Odometry>::SharedPtr agv_odom_sub_, uav_odom_sub_;
-    rclcpp::Subscription<geometry_msgs::msg::PoseWithCovarianceStamped>::SharedPtr agv_anchor_sub_, uav_anchor_sub_;
-    
+
     // Timers
     rclcpp::TimerBase::SharedPtr global_optimization_timer_;
 
@@ -1163,10 +1097,6 @@ private:
     double measurement_stdev_, measurement_covariance_;
 
     Sophus::SE3d uav_odom_pose_, last_uav_odom_pose_;         // Current UAV odometry position and last used for optimization
-    Sophus::SE3d uav_anchor_pose_, agv_anchor_pose_;
-    Eigen::Matrix4d uav_anchor_covariance_, agv_anchor_covariance_;
-    bool agv_anchor_available_, uav_anchor_available_;
-    bool use_anchor_prior_;
     Sophus::SE3d agv_odom_pose_, last_agv_odom_pose_;        // Current AGV odometry position and last used for optimization
     Eigen::Matrix<double, 6, 6> uav_odom_covariance_, agv_odom_covariance_;  // UAV odometry covariance
     nav_msgs::msg::Odometry last_agv_odom_msg_, last_uav_odom_msg_;

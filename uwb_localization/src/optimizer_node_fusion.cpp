@@ -222,7 +222,7 @@ public:
     FusionOptimizationNode() : Node("fusion_optimization_node") {
 
     //Option 1: get odometry through topics -> includes covariance
-    std::string odom_topic_agv = "/agv/odom"; //or "/agv/odom" or "/arco/idmind_motors/odom"
+    std::string odom_topic_agv = "/arco/idmind_motors/odom"; //or "/agv/odom" or "/arco/idmind_motors/odom"
     std::string odom_topic_uav = "/uav/odom"; //or "/uav/odom"
 
     rclcpp::SensorDataQoS qos; // Use a QoS profile compatible with sensor data
@@ -1106,8 +1106,29 @@ private:
 
                 /***************************************************** */
 
-                for (const auto &olderKF : radar_history_agv_) {
+                //Match two latest scans
+                Eigen::Matrix4f T_icp = Eigen::Matrix4f::Identity();
+                if(uwb_transform_available_) {
+                    Sophus::SE3d w_That_target = latest_relative_pose_SE3_.inverse() * uav_measurements_.odom_pose;
+                    Sophus::SE3d w_That_source = agv_measurements_.odom_pose;
+                    Sophus::SE3d That_icp = w_That_target.inverse() * w_That_source;
+                    //T_icp = latest_relative_pose_SE3_.cast<float>().matrix();
+                    T_icp = That_icp.cast<float>().matrix();
+                }
 
+                if (!addPointCloudConstraint(agv_measurements_.radar_scan, uav_measurements_.radar_scan,
+                                            T_agv_radar_, T_uav_radar_, pointcloud_radar_sigma_,
+                                            icp_type_radar_,
+                                            agv_id_, uav_id_,
+                                            encounter_constraints_pointcloud_, false,
+                                            &T_icp))
+                {
+                    RCLCPP_WARN(this->get_logger(), "Failed to add radar constraint between KF %d and KF %d", agv_id_, uav_id_);
+                }
+
+                //Match latest UAV scan with previous AGV scans
+                for (const auto &olderKF : radar_history_agv_) {
+                    if(olderKF.KF_id == agv_id_) continue;
                     Eigen::Matrix4f T_icp = Eigen::Matrix4f::Identity();
                     if(uwb_transform_available_) {
                         Sophus::SE3d w_That_target = latest_relative_pose_SE3_.inverse() * uav_measurements_.odom_pose;
@@ -1121,6 +1142,29 @@ private:
                                                 T_agv_radar_, T_uav_radar_, pointcloud_radar_sigma_,
                                                 icp_type_radar_,
                                                 olderKF.KF_id, uav_id_,
+                                                encounter_constraints_pointcloud_, false,
+                                                &T_icp))
+                    {
+                        RCLCPP_WARN(this->get_logger(), "Failed to add radar constraint between KF %d and KF %d", olderKF.KF_id, uav_id_);
+                    }
+                }
+
+                //Match latest AGV scan with previous UAV scans
+                for (const auto &olderKF : radar_history_uav_) {
+                    if(olderKF.KF_id == uav_id_) continue;
+                    Eigen::Matrix4f T_icp = Eigen::Matrix4f::Identity();
+                    if(uwb_transform_available_) {
+                        Sophus::SE3d w_That_target = latest_relative_pose_SE3_.inverse() * olderKF.odom_pose;
+                        Sophus::SE3d w_That_source = agv_measurements_.odom_pose;
+                        Sophus::SE3d That_icp = w_That_target.inverse() * w_That_source;
+                        //T_icp = latest_relative_pose_SE3_.cast<float>().matrix();
+                        T_icp = That_icp.cast<float>().matrix();
+                    }
+
+                    if (!addPointCloudConstraint(agv_measurements_.radar_scan, olderKF.radar_scan,
+                                                T_agv_radar_, T_uav_radar_, pointcloud_radar_sigma_,
+                                                icp_type_radar_,
+                                                agv_id_, olderKF.KF_id,
                                                 encounter_constraints_pointcloud_, false,
                                                 &T_icp))
                     {
@@ -1374,15 +1418,15 @@ private:
             final_hessian = final_hessian + reg.getFinalHessian();
             aligned_cloud = aligned;
 
-             std::stringstream ss;
-            ss << "--- T_target_source ---\n" << transformation;
-            RCLCPP_INFO(this->get_logger(), "%s", ss.str().c_str());
+            // std::stringstream ss;
+            // ss << "--- T_target_source ---\n" << transformation;
+            // RCLCPP_INFO(this->get_logger(), "%s", ss.str().c_str());
 
-            ss.str(""); // Clear the stringstream
-            ss << "--- H ---\n" << reg.getFinalHessian();
-            RCLCPP_INFO(this->get_logger(), "%s", ss.str().c_str());
+            // ss.str(""); // Clear the stringstream
+            // ss << "--- H ---\n" << reg.getFinalHessian();
+            // RCLCPP_INFO(this->get_logger(), "%s", ss.str().c_str());
  
-             RCLCPP_INFO(this->get_logger(), "GICP converged with score: %f", fitness);
+            // RCLCPP_INFO(this->get_logger(), "GICP converged with score: %f", fitness);
  
 
             return true;
