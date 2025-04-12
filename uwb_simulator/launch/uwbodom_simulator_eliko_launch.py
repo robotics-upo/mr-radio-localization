@@ -13,7 +13,7 @@ def generate_launch_description():
         get_package_share_directory('uwb_simulator'),
         'config',
         'params.yaml'
-        ),
+        )
            
     node1 = Node(
                 package='uwb_simulator',

@@ -148,7 +148,7 @@ namespace posegraph
         return is_recent;
     }
 
-    inline bool isNodeFixedKF(const int current_node_id, const int node_id, const double &max_keyframes, const double &min_keyframes){
+    inline bool isNodeFixedKF(const int current_node_id, const int node_id, const int &max_keyframes, const int &min_keyframes){
         return (current_node_id - node_id > max_keyframes || current_node_id < min_keyframes);
     }
 

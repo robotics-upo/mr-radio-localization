@@ -47,9 +47,10 @@ class ElikoGlobalOptNode : public rclcpp::Node {
 public:
 
     ElikoGlobalOptNode() : Node("eliko_global_opt_node") {
-    
-    std::string odom_topic_agv = "/agv/odom"; //or "/agv/odom" "/arco/idmind_motors/odom"
-    std::string odom_topic_uav = "/uav/odom"; //or "/uav/odom"
+
+    declareParams();
+
+    getParams();
 
     //Subscribe to distances publisher
     eliko_distances_sub_ = this->create_subscription<eliko_messages::msg::DistancesList>(
@@ -58,28 +59,14 @@ public:
     rclcpp::SensorDataQoS qos; // Use a QoS profile compatible with sensor data
 
     agv_odom_sub_ = this->create_subscription<nav_msgs::msg::Odometry>(
-    odom_topic_agv, qos, std::bind(&ElikoGlobalOptNode::agvOdomCb, this, std::placeholders::_1));
+    odom_topic_agv_, qos, std::bind(&ElikoGlobalOptNode::agvOdomCb, this, std::placeholders::_1));
     
     uav_odom_sub_ = this->create_subscription<nav_msgs::msg::Odometry>(
-        odom_topic_uav, qos, std::bind(&ElikoGlobalOptNode::uavOdomCb, this, std::placeholders::_1));
+        odom_topic_uav_, qos, std::bind(&ElikoGlobalOptNode::uavOdomCb, this, std::placeholders::_1));
     
     // Create publisher/broadcaster for optimized transformation
     tf_publisher_ = this->create_publisher<geometry_msgs::msg::PoseWithCovarianceStamped>("eliko_optimization_node/optimized_T", 10);
     tf_broadcaster_ = std::make_shared<tf2_ros::TransformBroadcaster>(this);
-
-    global_opt_rate_s_ = 0.1; //rate of the optimization
-    min_measurements_ = 50.0; //min number of measurements for running optimizer
-    measurement_stdev_ = 0.1; //10 cm measurement noise
-    measurement_covariance_ = measurement_stdev_ * measurement_stdev_;
-
-    anchor_positions_ = {
-        {"0x0009D6", {-0.32, 0.3, 0.875}}, {"0x0009E5", {0.32, -0.3, 0.875}},
-        {"0x0016FA", {0.32, 0.3, 0.33}}, {"0x0016CF", {-0.32, -0.3, 0.33}}
-    };
-    
-    tag_positions_ = {
-        {"0x001155", {-0.24, -0.24, -0.06}}, {"0x001397", {0.24, 0.24, -0.06}}  //{"0x001155", {-0.24, -0.24, -0.06}}, {"0x001397", {0.24, 0.24, -0.06}}
-    };
 
     anchor_positions_odom_ = anchor_positions_;
     tag_positions_odom_ = tag_positions_;
@@ -91,9 +78,6 @@ public:
     uav_opt_frame_id_ = "uav_opt"; 
     agv_opt_frame_id_ = "agv_opt"; 
 
-    odom_error_distance_ = 2.0;
-    odom_error_angle_ = 2.0;
-
     //Initial values for state
     init_state_.state = Eigen::Vector4d(0.0, 0.0, 0.0, 0.0);
     init_state_.covariance = Eigen::Matrix4d::Identity(); //
@@ -104,25 +88,142 @@ public:
 
     opt_state_ = init_state_;
 
-    moving_average_ = true;
-    moving_average_max_samples_ = 10;
-
     last_agv_odom_initialized_ = false;
     last_uav_odom_initialized_ = false;
 
-    min_traveled_distance_ = 0.5;
-    min_traveled_angle_ = 30.0 * M_PI / 180.0;
-    max_traveled_distance_ = min_traveled_distance_ * 10.0;
     uav_delta_translation_ = agv_delta_translation_ = uav_delta_rotation_ = agv_delta_rotation_ = 0.0;
     uav_total_translation_ = agv_total_translation_ = uav_total_rotation_ = agv_total_rotation_ = 0.0;
 
+    // Calculate the optimization timer period from opt_timer_rate_ (Hz).
+    double opt_timer_period_s = 1.0 / opt_timer_rate_;
     global_optimization_timer_ = this->create_wall_timer(
-        std::chrono::milliseconds(int(global_opt_rate_s_*1000)), std::bind(&ElikoGlobalOptNode::globalOptCb, this));
+        std::chrono::milliseconds(int(opt_timer_period_s*1000)), std::bind(&ElikoGlobalOptNode::globalOptCb, this));
     
     RCLCPP_INFO(this->get_logger(), "Eliko Optimization Node initialized.");
   }
 
 private:
+
+    void declareParams() {
+
+         // Declare parameters with their default values.
+        // Topics and update rate
+        this->declare_parameter<std::string>("odom_topic_agv", "/arco/idmind_motors/odom");
+        this->declare_parameter<std::string>("odom_topic_uav", "/uav/odom");
+        this->declare_parameter<double>("opt_timer_rate_", 10.0);  // in Hz
+
+        // Optimization settings
+        this->declare_parameter<int>("min_measurements", 50);
+        this->declare_parameter<double>("min_traveled_distance", 0.5);   // in meters
+        this->declare_parameter<double>("min_traveled_angle", 0.524);      // in radians (0.524 rad ~ 30 deg)
+        this->declare_parameter<double>("max_traveled_distance", 10.0);    // in meters
+        this->declare_parameter<double>("measurement_stdev", 0.1);         // in meters
+        this->declare_parameter<double>("odom_error_position", 2.0);
+        this->declare_parameter<double>("odom_error_angle", 2.0);
+        this->declare_parameter<int>("moving_average_max_samples", 10);
+
+        // Declare the anchors parameters.
+        this->declare_parameter<std::string>("anchors.a1.id", "0x0009D6");
+        this->declare_parameter<std::vector<double>>("anchors.a1.position", std::vector<double>{-0.32, 0.3, 0.875});
+        this->declare_parameter<std::string>("anchors.a2.id", "0x0009E5");
+        this->declare_parameter<std::vector<double>>("anchors.a2.position", std::vector<double>{0.32, -0.3, 0.875});
+        this->declare_parameter<std::string>("anchors.a3.id", "0x0016FA");
+        this->declare_parameter<std::vector<double>>("anchors.a3.position", std::vector<double>{0.32, 0.3, 0.33});
+        this->declare_parameter<std::string>("anchors.a4.id", "0x0016CF");
+        this->declare_parameter<std::vector<double>>("anchors.a4.position", std::vector<double>{-0.32, -0.3, 0.33});
+
+        // Declare the tags parameters.
+        this->declare_parameter<std::string>("tags.t1.id", "0x001155");
+        this->declare_parameter<std::vector<double>>("tags.t1.position", std::vector<double>{-0.24, -0.24, -0.06});
+        this->declare_parameter<std::string>("tags.t2.id", "0x001397");
+        this->declare_parameter<std::vector<double>>("tags.t2.position", std::vector<double>{0.24, 0.24, -0.06});
+    }
+
+    void getParams() {
+
+        this->get_parameter("odom_topic_agv", odom_topic_agv_);
+        this->get_parameter("odom_topic_uav", odom_topic_uav_);
+        this->get_parameter("opt_timer_rate_", opt_timer_rate_);
+        this->get_parameter("min_measurements", min_measurements_);
+        this->get_parameter("min_traveled_distance", min_traveled_distance_);
+        // Convert angle from degrees to radians.
+        this->get_parameter("min_traveled_angle", min_traveled_angle_);
+        this->get_parameter("max_traveled_distance", max_traveled_distance_);
+        this->get_parameter("measurement_stdev", measurement_stdev_);
+        this->get_parameter("odom_error_position", odom_error_distance_);
+        this->get_parameter("odom_error_angle", odom_error_angle_);
+        //this->get_parameter("moving_average", moving_average_);
+        this->get_parameter("moving_average_max_samples", moving_average_max_samples_);
+
+        // Log the read parameters.
+        RCLCPP_INFO(this->get_logger(), "Parameters read:");
+        RCLCPP_INFO(this->get_logger(), "  odom_topic_agv: %s", odom_topic_agv_.c_str());
+        RCLCPP_INFO(this->get_logger(), "  odom_topic_uav: %s", odom_topic_uav_.c_str());
+        RCLCPP_INFO(this->get_logger(), "  opt_timer_rate_: %f Hz", opt_timer_rate_);
+        RCLCPP_INFO(this->get_logger(), "  min_measurements: %zu", min_measurements_);
+        RCLCPP_INFO(this->get_logger(), "  min_traveled_distance: %f m", min_traveled_distance_);
+        RCLCPP_INFO(this->get_logger(), "  min_traveled_angle: %f rad", min_traveled_angle_);
+        RCLCPP_INFO(this->get_logger(), "  max_traveled_distance: %f m", max_traveled_distance_);
+        RCLCPP_INFO(this->get_logger(), "  measurement_stdev: %f m", measurement_stdev_);
+        RCLCPP_INFO(this->get_logger(), "  odom_error_position: %f", odom_error_distance_);
+        RCLCPP_INFO(this->get_logger(), "  odom_error_angle: %f", odom_error_angle_);
+        RCLCPP_INFO(this->get_logger(), "  moving_average: %s", moving_average_ ? "true" : "false");
+        RCLCPP_INFO(this->get_logger(), "  moving_average_max_samples: %zu", moving_average_max_samples_);
+    
+        // Initialize anchors from parameters.
+        std::string a1_id, a2_id, a3_id, a4_id;
+        std::vector<double> a1_pos, a2_pos, a3_pos, a4_pos;
+        
+        {
+            // Anchor A1
+            this->get_parameter("anchors.a1.id", a1_id);
+            this->get_parameter("anchors.a1.position", a1_pos);
+            anchor_positions_[a1_id] = Eigen::Vector3d(a1_pos[0], a1_pos[1], a1_pos[2]);
+    
+            this->get_parameter("anchors.a2.id", a2_id);
+            this->get_parameter("anchors.a2.position", a2_pos);
+            anchor_positions_[a2_id] = Eigen::Vector3d(a2_pos[0], a2_pos[1], a2_pos[2]);
+    
+            this->get_parameter("anchors.a3.id", a3_id);
+            this->get_parameter("anchors.a3.position", a3_pos);
+            anchor_positions_[a3_id] = Eigen::Vector3d(a3_pos[0], a3_pos[1], a3_pos[2]);
+    
+            this->get_parameter("anchors.a4.id", a4_id);
+            this->get_parameter("anchors.a4.position", a4_pos);
+            anchor_positions_[a4_id] = Eigen::Vector3d(a4_pos[0], a4_pos[1], a4_pos[2]);
+    
+        }
+    
+        // Initialize anchors from parameters.
+        std::string t1_id, t2_id;
+        std::vector<double> t1_pos, t2_pos;
+    
+        // Initialize tags from parameters.
+        {
+            this->get_parameter("tags.t1.id", t1_id);
+            this->get_parameter("tags.t1.position", t1_pos);
+            tag_positions_[t1_id] = Eigen::Vector3d(t1_pos[0], t1_pos[1], t1_pos[2]);
+    
+            this->get_parameter("tags.t2.id", t2_id);
+            this->get_parameter("tags.t2.position", t2_pos);
+            tag_positions_[t2_id] = Eigen::Vector3d(t2_pos[0], t2_pos[1], t2_pos[2]);
+        }
+
+ 
+        // Log anchors.
+        for (const auto& kv : anchor_positions_) {
+            const auto &id = kv.first;
+            const auto &pos = kv.second;
+            RCLCPP_INFO(this->get_logger(), "  Anchor '%s': [%f, %f, %f]", id.c_str(), pos.x(), pos.y(), pos.z());
+        }
+    
+        // Log tags.
+        for (const auto& kv : tag_positions_) {
+            const auto &id = kv.first;
+            const auto &pos = kv.second;
+            RCLCPP_INFO(this->get_logger(), "  Tag '%s': [%f, %f, %f]", id.c_str(), pos.x(), pos.y(), pos.z());
+        }
+   }
 
     void uavOdomCb(const nav_msgs::msg::Odometry::SharedPtr msg) {
         
@@ -645,8 +746,17 @@ private:
     rclcpp::Publisher<geometry_msgs::msg::PoseWithCovarianceStamped>::SharedPtr tf_publisher_;
     std::shared_ptr<tf2_ros::TransformBroadcaster> tf_broadcaster_;
 
+    //Parameters
+    std::string odom_topic_agv_, odom_topic_uav_;
+    double opt_timer_rate_;
+    size_t min_measurements_;
+    double min_traveled_distance_, min_traveled_angle_, max_traveled_distance_;
+    double measurement_stdev_;
+    size_t moving_average_max_samples_;
+    bool moving_average_ = true;
     std::unordered_map<std::string, Eigen::Vector3d> anchor_positions_;
     std::unordered_map<std::string, Eigen::Vector3d> tag_positions_;
+
 
     std::string agv_odom_frame_id_, uav_odom_frame_id_;
     std::string agv_body_frame_id_, uav_body_frame_id_;
@@ -655,12 +765,6 @@ private:
     State opt_state_;
     State init_state_;
     std::deque<State> moving_average_states_;
-    size_t moving_average_max_samples_;
-
-    bool moving_average_;
-    size_t min_measurements_;
-    double global_opt_rate_s_;
-    double measurement_stdev_, measurement_covariance_;
 
     Sophus::SE3d uav_odom_pose_, last_uav_odom_pose_;         // Current UAV odometry position and last used for optimization
     Sophus::SE3d agv_odom_pose_, last_agv_odom_pose_;        // Current AGV odometry position and last used for optimization
@@ -668,7 +772,6 @@ private:
     nav_msgs::msg::Odometry last_agv_odom_msg_, last_uav_odom_msg_;
     bool last_agv_odom_initialized_, last_uav_odom_initialized_;
 
-    double min_traveled_distance_, min_traveled_angle_, max_traveled_distance_;
     double uav_delta_translation_, agv_delta_translation_, uav_delta_rotation_, agv_delta_rotation_;
     double uav_total_translation_, agv_total_translation_, uav_total_rotation_, agv_total_rotation_;
 

@@ -58,7 +58,6 @@ target_link_libraries(global_opt_node_eliko Ceres::ceres ${CERES_LIBRARIES} Soph
 target_link_libraries(optimizer_node_fusion Ceres::ceres ${PCL_LIBRARIES}  ${pcl_conversions_LIBRARIES} ${pcl_ros_LIBRARIES} Sophus::Sophus OpenMP::OpenMP_CXX)
 target_link_libraries(uav_odometry_node Sophus::Sophus)
 
-
 ament_target_dependencies(global_opt_node_eliko rclcpp std_msgs geometry_msgs nav_msgs tf2_ros tf2_geometry_msgs eliko_messages)
 ament_target_dependencies(optimizer_node_fusion rclcpp std_msgs geometry_msgs nav_msgs sensor_msgs tf2_ros tf2_geometry_msgs eliko_messages pcl_ros pcl_conversions)
 ament_target_dependencies(uav_odometry_node rclcpp geometry_msgs nav_msgs)
@@ -83,18 +82,27 @@ target_compile_features(optimizer_node_fusion PUBLIC c_std_99 cxx_std_17)  # Req
 target_include_directories(pcl_visualizer PUBLIC
   $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
   $<INSTALL_INTERFACE:include>)
-target_compile_features(optimizer_node_fusion PUBLIC c_std_99 cxx_std_17)  # Require C99 and C++17
+target_compile_features(pcl_visualizer PUBLIC c_std_99 cxx_std_17)  # Require C99 and C++17
 
 target_include_directories(uav_odometry_node PUBLIC
   $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
   $<INSTALL_INTERFACE:include>)
-target_compile_features(optimizer_node_fusion PUBLIC c_std_99 cxx_std_17)  # Require C99 and C++17
-
+target_compile_features(uav_odometry_node PUBLIC c_std_99 cxx_std_17)  # Require C99 and C++17
 
 target_compile_options(optimizer_node_fusion PRIVATE ${OpenMP_CXX_FLAGS})
 
 install(TARGETS global_opt_node_eliko optimizer_node_fusion pcl_visualizer uav_odometry_node
   DESTINATION lib/${PROJECT_NAME})
+
+install(DIRECTORY
+launch
+DESTINATION share/${PROJECT_NAME}
+)
+
+install(DIRECTORY
+config
+DESTINATION share/${PROJECT_NAME}
+)
 
 if(BUILD_TESTING)
   find_package(ament_lint_auto REQUIRED)

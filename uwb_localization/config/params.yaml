@@ -1,0 +1,66 @@
+eliko_global_opt_node:
+  ros__parameters:
+    use_sim_time: True
+    odom_topic_agv: "/agv/odom" #or "/agv/odom" #"/arco/idmind_motors/odom"
+    odom_topic_uav: "/uav/odom"
+    opt_timer_rate: 10.0 #Hz
+    min_measurements: 50
+    min_traveled_distance: 0.5 #m
+    min_traveled_angle: 0.524 #radians
+    max_traveled_distance: 10.0 #m
+    measurement_stdev: 0.1 #m
+    odom_error_position: 2.0 # %,  meters for every 100 meters traveled
+    odom_error_angle: 2.0 # % degrees for every 100 degrees
+    moving_average: true
+    moving_average_max_samples: 10
+    anchors:
+      a1:
+        id: "0x0009D6"
+        position: [-0.32, 0.3, 0.875] #[-0.32, 0.3, 0.875]
+      a2:
+        id: "0x0009E5"
+        position: [0.32, -0.3, 0.875] #[0.32, -0.3, 0.875]
+      a3:
+        id: "0x0016FA"
+        position: [0.32, 0.3, 0.33] #[0.32, 0.3, 0.33]
+      a4:
+        id: "0x0016CF"
+        position: [-0.32, -0.3, 0.33] # [-0.32, -0.3, 0.33]
+    tags:
+      t1: 
+        id: "0x001155"
+        position: [-0.24, -0.24, -0.06]  #[-0.24, -0.24, -0.06]
+      t2: 
+        id: "0x001397"
+        position: [0.24, 0.24, -0.06]  #[0.24, 0.24, -0.06]
+
+fusion_optimization_node:
+  ros__parameters:
+    use_sim_time: true
+    odom_topic_agv: "/agv/odom" #or "/agv/odom" #"/arco/idmind_motors/odom"
+    lidar_topic_agv: "/arco/ouster/points"
+    radar_topic_agv: "/arco/radar/PointCloudDetection"
+    odom_topic_uav: "/uav/odom"
+    topic_lidar_uav: "/os1_cloud_node/points_non_dense"
+    topic_radar_uav: "/drone/radar/PointCloudDetection"
+    opt_timer_rate: 10.0 #Hz
+    min_traveled_distance: 0.5 #m
+    min_traveled_angle: 0.524 #radians
+    min_keyframes: 3
+    max_keyframes: 10
+    using_odom: true
+    using_lidar: false
+    using_radar: true
+    lidar_stdev: 0.05
+    radar_stdev: 0.1
+    icp_type_lidar: 1   #ICP algorithm variant: 2->Generalized ICP, 1->Point to Plane ICP, else -> basic ICP
+    icp_type_radar: 2
+    radar_history_size: 5 #history of radar keyframes to compare against
+    lidar_uav:
+        position: [0.21, 0.0, 0.25, 0.0, 0.0, 0.0]  #[0.21, 0.0, 0.25, 0.0, 0.0, 0.0]
+    radar_uav:
+        position: [-0.385, -0.02, -0.225, 0.0, 2.417, 3.14]  #[-0.385, -0.02, -0.225, 0.0, 2.417, 3.14]
+    lidar_agv:
+        position: [0.3, 0.0, 0.45, 3.14, 0.0, 0.0]  #[0.3, 0.0, 0.45, 3.14, 0.0, 0.0]
+    radar_agv:
+        position: [0.45, 0.05, 0.65, 0.0, 0.0, 0.0]  #[0.45, 0.05, 0.65, 0.0, 0.0, 0.0]

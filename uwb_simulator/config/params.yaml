@@ -2,6 +2,7 @@ measurement_simulator:
   ros__parameters:
     measurement_noise_std: 0.1
     pub_rate: 10.0
+    add_outliers: True
     use_sim_time: True
 trajectory_simulator:
   ros__parameters:
@@ -38,11 +39,11 @@ odometry_simulator:
   ros__parameters:
     simple_trajectory: False
     holonomic_xy: False    #move independently in horizontal plane
-    trajectory_name: "trajectory_identical_inc"
+    trajectory_name: "trajectory_simple2"
     total_distance: 100
     pub_rate: 10.0
     use_sim_time: True
-    uav_origin: [0.0, 0.0, 2.0, 0.0] #xyz yaw
+    uav_origin: [0.5, -0.5, 2.0, 0.524] #xyz yaw
     ground_vehicle_origin: [0.0, 0.0, 0.0, 0.0] #xyz yaw
     linear_velocity_range: [0.1, 1.0]
     max_linear_acceleration: 0.5 #m/s²

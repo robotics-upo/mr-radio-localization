@@ -79,51 +79,32 @@ public:
 
     FusionOptimizationNode() : Node("fusion_optimization_node") {
 
-    //Option 1: get odometry through topics -> includes covariance
-    std::string odom_topic_agv = "/agv/odom"; //or "/agv/odom" or "/arco/idmind_motors/odom"
-    std::string odom_topic_uav = "/uav/odom"; //or "/uav/odom"
+    declareParams();
+
+    getParams();
 
     rclcpp::SensorDataQoS qos; // Use a QoS profile compatible with sensor data
 
-    last_agv_odom_initialized_ = false;
-    last_uav_odom_initialized_ = false;
-    relative_pose_initialized_ = false;
-
-    min_traveled_distance_ = 0.5;
-    min_traveled_angle_ = 30.0 * M_PI / 180.0;
-    max_traveled_distance_ = 10.0 * min_traveled_distance_;
-    max_traveled_angle_ = 10.0 * min_traveled_angle_;
-    uav_translation_ = agv_translation_ = uav_rotation_ = agv_rotation_ = 0.0;
-
     agv_odom_sub_ = this->create_subscription<nav_msgs::msg::Odometry>(
-    odom_topic_agv, qos, std::bind(&FusionOptimizationNode::agvOdomCb, this, std::placeholders::_1));
+    odom_topic_agv_, qos, std::bind(&FusionOptimizationNode::agvOdomCb, this, std::placeholders::_1));
 
     uav_odom_sub_ = this->create_subscription<nav_msgs::msg::Odometry>(
-        odom_topic_uav, qos, std::bind(&FusionOptimizationNode::uavOdomCb, this, std::placeholders::_1));
+        odom_topic_uav_, qos, std::bind(&FusionOptimizationNode::uavOdomCb, this, std::placeholders::_1));
 
-    //Option 2: get odometry through tf readings -> only transform
-    odom_tf_agv_s_ = "agv/base_link"; //source
     odom_tf_agv_t_ = "agv/odom"; //target
-    odom_tf_uav_s_ = "uav/base_link"; //source
     odom_tf_uav_t_ = "uav/odom"; //target
 
-    //Point cloud topics (RADAR or LIDAR)
-    std::string pcl_topic_lidar_agv = "/arco/ouster/points"; //LIDAR: "/arco/ouster/points", RADAR: "/arco/radar/PointCloudObject"
-    std::string pcl_topic_lidar_uav = "/os1_cloud_node/points_non_dense"; //LIDAR: "/os1_cloud_node/points_non_dense", RADAR: "/drone/radar/PointCloudObject"
-    std::string pcl_topic_radar_agv = "/arco/radar/PointCloudDetection";
-    std::string pcl_topic_radar_uav = "/drone/radar/PointCloudDetection";
-
     pcl_agv_lidar_sub_ = this->create_subscription<sensor_msgs::msg::PointCloud2>(
-                pcl_topic_lidar_agv, qos, std::bind(&FusionOptimizationNode::pclAgvLidarCb, this, std::placeholders::_1));
+                pcl_topic_lidar_agv_, qos, std::bind(&FusionOptimizationNode::pclAgvLidarCb, this, std::placeholders::_1));
 
     pcl_uav__lidar_sub_ = this->create_subscription<sensor_msgs::msg::PointCloud2>(
-                pcl_topic_lidar_uav, qos, std::bind(&FusionOptimizationNode::pclUavLidarCb, this, std::placeholders::_1));
+                pcl_topic_lidar_uav_, qos, std::bind(&FusionOptimizationNode::pclUavLidarCb, this, std::placeholders::_1));
 
     pcl_agv_radar_sub_ = this->create_subscription<sensor_msgs::msg::PointCloud2>(
-                    pcl_topic_radar_agv, qos, std::bind(&FusionOptimizationNode::pclAgvRadarCb, this, std::placeholders::_1));
+                    pcl_topic_radar_agv_, qos, std::bind(&FusionOptimizationNode::pclAgvRadarCb, this, std::placeholders::_1));
     
     pcl_uav_radar_sub = this->create_subscription<sensor_msgs::msg::PointCloud2>(
-                    pcl_topic_radar_uav, qos, std::bind(&FusionOptimizationNode::pclUavRadarCb, this, std::placeholders::_1));
+                    pcl_topic_radar_uav_, qos, std::bind(&FusionOptimizationNode::pclUavRadarCb, this, std::placeholders::_1));
 
     pcl_visualizer_client_ = this->create_client<uwb_localization::srv::UpdatePointClouds>("eliko_optimization_node/pcl_visualizer_service");
 
@@ -140,37 +121,29 @@ public:
 
     tf_broadcaster_ = std::make_shared<tf2_ros::TransformBroadcaster>(this);
 
-    global_opt_window_s_ = 5.0; //size of the sliding window in seconds
-    global_opt_rate_s_ = 0.1; //rate of the optimization
-    min_keyframes_ = 3.0; //number of nodes to run optimization
-    max_keyframes_ = std::min(int(max_traveled_distance_ / min_traveled_distance_), int(max_traveled_angle_/min_traveled_angle_));
-    radar_history_size_ = 5.0;
-
     T_uav_lidar_ = buildTransformationSE3(0.0,0.0, Eigen::Vector4d(0.21,0.0,0.25,0.0));
     T_agv_lidar_ = buildTransformationSE3(3.14,0.0, Eigen::Vector4d(0.3,0.0,0.45,0.0));
     T_uav_radar_ = buildTransformationSE3(0.0,2.417, Eigen::Vector4d(-0.385,-0.02,-0.225,3.14));
     T_agv_radar_ = buildTransformationSE3(0.0,0.0, Eigen::Vector4d(0.45,0.05,0.65,0.0));
-    pointcloud_lidar_sigma_ = 0.05;  //5cm for lidar, 10 cm for radar
-    pointcloud_radar_sigma_ = 0.1;
-    using_odom_ = true;
-    using_radar_ = true;
-    using_lidar_ = false;
-    //Set ICP algorithm variant: 2->Generalized ICP, 1->Point to Plane ICP, else -> basic ICP
-    icp_type_lidar_ = 1;
-    icp_type_radar_ = 2;
 
+    double global_opt_rate_s = 1.0/opt_timer_rate_; //rate of the optimization
     global_optimization_timer_ = this->create_wall_timer(
-            std::chrono::milliseconds(int(global_opt_rate_s_*1000)), std::bind(&FusionOptimizationNode::globalOptCb, this));
+            std::chrono::milliseconds(int(global_opt_rate_s*1000)), std::bind(&FusionOptimizationNode::globalOptCb, this));
 
     global_frame_graph_ = "graph_odom";
     eliko_frame_id_ = "agv_opt"; //frame of the eliko system-> arco/eliko, for simulation use "agv_gt" for ground truth, "agv_odom" for odometry w/ errors
     uav_frame_id_ = "uav_opt"; //frame of the uav -> "base_link", for simulation use "uav_opt"
 
+    last_agv_odom_initialized_ = false;
+    last_uav_odom_initialized_ = false;
+    relative_pose_initialized_ = false;
+
+    uav_translation_ = agv_translation_ = uav_rotation_ = agv_rotation_ = 0.0;
+
     //Start node counter
     agv_id_ = uav_id_ = 0;
 
     graph_initialized_ = false;
-
     uwb_transform_available_ = false;
 
     RCLCPP_INFO(this->get_logger(), "Eliko Optimization Node initialized.");
@@ -199,6 +172,120 @@ public:
 
 
 private:
+
+    void declareParams(){
+        
+        // Basic topics and timing.
+        this->declare_parameter<std::string>("odom_topic_agv", "/arco/idmind_motors/odom");
+        this->declare_parameter<std::string>("odom_topic_uav", "/uav/odom");
+        this->declare_parameter<std::string>("lidar_topic_agv", "/arco/ouster/points");
+        this->declare_parameter<std::string>("radar_topic_agv", "/arco/radar/PointCloudDetection");
+        this->declare_parameter<std::string>("lidar_topic_uav", "/os1_cloud_node/points_non_dense");
+        this->declare_parameter<std::string>("radar_topic_uav", "/drone/radar/PointCloudDetection");
+        this->declare_parameter<double>("opt_timer_rate", 10.0); // Hz
+
+        // KF Management
+        this->declare_parameter<double>("min_traveled_distance", 0.5);   // meters
+        this->declare_parameter<double>("min_traveled_angle", 0.524);      // radians
+        this->declare_parameter<int64_t>("min_keyframes", 3);
+        this->declare_parameter<int64_t>("max_keyframes", 10);
+
+        // Modes
+        this->declare_parameter<bool>("using_odom", true);
+        this->declare_parameter<bool>("using_lidar", false);
+        this->declare_parameter<bool>("using_radar", true);
+
+        // ICP variables
+        this->declare_parameter<double>("lidar_stdev", 0.05);
+        this->declare_parameter<double>("radar_stdev", 0.1);
+        this->declare_parameter<int64_t>("icp_type_lidar", 1);  // 1: point-to-plane ICP; 2: generalized ICP
+        this->declare_parameter<int64_t>("icp_type_radar", 2);
+        this->declare_parameter<int64_t>("radar_history_size", 5);
+
+        // Sensor placement parameters (each as a vector of doubles with 6 elements):
+        //[tx, ty, tz, roll, pitch, yaw].
+        this->declare_parameter<std::vector<double>>("lidar_uav.position",
+                        std::vector<double>{0.21, 0.0, 0.25, 0.0, 0.0, 0.0});
+        this->declare_parameter<std::vector<double>>("radar_uav.position",
+                        std::vector<double>{-0.385, -0.02, -0.225, 0.0, 2.417, 3.14});
+        this->declare_parameter<std::vector<double>>("lidar_agv.position",
+                        std::vector<double>{0.3, 0.0, 0.45, 3.14, 0.0, 0.0});
+        this->declare_parameter<std::vector<double>>("radar_agv.position",
+                        std::vector<double>{0.45, 0.05, 0.65, 0.0, 0.0, 0.0});
+
+    }
+
+    void getParams(){
+
+        this->get_parameter("opt_timer_rate", opt_timer_rate_);
+        this->get_parameter("odom_topic_agv", odom_topic_agv_);
+        this->get_parameter("odom_topic_uav", odom_topic_uav_);
+        this->get_parameter("lidar_topic_agv", pcl_topic_lidar_agv_);
+        this->get_parameter("lidar_topic_uav", pcl_topic_lidar_uav_);
+        this->get_parameter("radar_topic_agv", pcl_topic_radar_agv_);
+        this->get_parameter("radar_topic_uav", pcl_topic_radar_uav_);
+        
+        this->get_parameter("using_odom", using_odom_);
+        this->get_parameter("using_lidar", using_lidar_);
+        this->get_parameter("using_radar", using_radar_);
+        
+        this->get_parameter("icp_type_lidar", icp_type_lidar_);
+        this->get_parameter("icp_type_radar", icp_type_radar_);
+        this->get_parameter("lidar_stdev", pointcloud_lidar_sigma_);
+        this->get_parameter("radar_stdev", pointcloud_radar_sigma_);
+        
+        this->get_parameter("min_traveled_distance", min_traveled_distance_);
+        this->get_parameter("min_traveled_angle", min_traveled_angle_);
+        this->get_parameter("min_keyframes", min_keyframes_);
+        this->get_parameter("max_keyframes", max_keyframes_);
+        this->get_parameter("radar_history_size", radar_history_size_);
+
+         // Retrieve sensor placement vectors.
+        std::vector<double> lidar_uav_pos, radar_uav_pos, lidar_agv_pos, radar_agv_pos;
+        this->get_parameter("lidar_uav.position", lidar_uav_pos);
+        this->get_parameter("radar_uav.position", radar_uav_pos);
+        this->get_parameter("lidar_agv.position", lidar_agv_pos);
+        this->get_parameter("radar_agv.position", radar_agv_pos);
+
+        // Now, build sensor transforms.
+        T_uav_lidar_ = buildTransformationSE3(lidar_uav_pos[3], lidar_uav_pos[4],
+                                  Eigen::Vector4d(lidar_uav_pos[0], lidar_uav_pos[1], lidar_uav_pos[2], lidar_uav_pos[5]));
+        T_agv_lidar_ = buildTransformationSE3(lidar_agv_pos[3], lidar_agv_pos[4],
+                                  Eigen::Vector4d(lidar_agv_pos[0], lidar_agv_pos[1], lidar_agv_pos[2], lidar_agv_pos[5]));
+        T_uav_radar_ = buildTransformationSE3(radar_uav_pos[3], radar_uav_pos[4],
+                                  Eigen::Vector4d(radar_uav_pos[0], radar_uav_pos[1], radar_uav_pos[2], radar_uav_pos[5]));
+        T_agv_radar_ = buildTransformationSE3(radar_agv_pos[3], radar_agv_pos[4],
+                                  Eigen::Vector4d(radar_agv_pos[0], radar_agv_pos[1], radar_agv_pos[2], radar_agv_pos[5]));
+
+         // Log the retrieved parameters.
+        RCLCPP_INFO(this->get_logger(), "FusionOptimizationNode parameters:");
+        RCLCPP_INFO(this->get_logger(), "  odom_topic_agv: %s", odom_topic_agv_.c_str());
+        RCLCPP_INFO(this->get_logger(), "  odom_topic_uav: %s", odom_topic_uav_.c_str());
+        RCLCPP_INFO(this->get_logger(), "  lidar_topic_agv: %s", pcl_topic_lidar_agv_.c_str());
+        RCLCPP_INFO(this->get_logger(), "  radar_topic_agv: %s", pcl_topic_radar_agv_.c_str());
+        RCLCPP_INFO(this->get_logger(), "  lidar_topic_uav: %s", pcl_topic_lidar_uav_.c_str());
+        RCLCPP_INFO(this->get_logger(), "  radar_topic_uav: %s", pcl_topic_radar_uav_.c_str());
+        RCLCPP_INFO(this->get_logger(), "  opt_timer_rate: %f Hz", opt_timer_rate_);
+        RCLCPP_INFO(this->get_logger(), "  min_traveled_distance: %f m", min_traveled_distance_);
+        RCLCPP_INFO(this->get_logger(), "  min_traveled_angle: %f rad", min_traveled_angle_);
+        RCLCPP_INFO(this->get_logger(), "  min_keyframes: %d, max_keyframes: %d", min_keyframes_, max_keyframes_);
+        RCLCPP_INFO(this->get_logger(), "  using_odom: %s, using_lidar: %s, using_radar: %s",
+                    using_odom_ ? "true" : "false",
+                    using_lidar_ ? "true" : "false",
+                    using_radar_ ? "true" : "false");
+        RCLCPP_INFO(this->get_logger(), "  lidar_sigma: %f, radar_sigma: %f", pointcloud_lidar_sigma_, pointcloud_radar_sigma_);
+        RCLCPP_INFO(this->get_logger(), "  icp_type_lidar: %d, icp_type_radar: %d", icp_type_lidar_, icp_type_radar_);
+        RCLCPP_INFO(this->get_logger(), "  radar_history_size: %d", radar_history_size_);
+
+        RCLCPP_INFO(this->get_logger(), "  T_uav_lidar: [%f, %f, %f, %f]", 
+                    T_uav_lidar_.matrix()(0,0), T_uav_lidar_.matrix()(0,1), T_uav_lidar_.matrix()(0,2), T_uav_lidar_.matrix()(0,3));
+        RCLCPP_INFO(this->get_logger(), "  T_agv_lidar: [%f, %f, %f, %f]", 
+                    T_agv_lidar_.matrix()(0,0), T_agv_lidar_.matrix()(0,1), T_agv_lidar_.matrix()(0,2), T_agv_lidar_.matrix()(0,3));
+        RCLCPP_INFO(this->get_logger(), "  T_uav_radar: [%f, %f, %f, %f]", 
+                    T_uav_radar_.matrix()(0,0), T_uav_radar_.matrix()(0,1), T_uav_radar_.matrix()(0,2), T_uav_radar_.matrix()(0,3));
+        RCLCPP_INFO(this->get_logger(), "  T_agv_radar: [%f, %f, %f, %f]", 
+                    T_agv_radar_.matrix()(0,0), T_agv_radar_.matrix()(0,1), T_agv_radar_.matrix()(0,2), T_agv_radar_.matrix()(0,3));
+    }
 
 
     void agvOdomCb(const nav_msgs::msg::Odometry::SharedPtr msg) {
@@ -1604,22 +1691,30 @@ private:
     rclcpp::Publisher<geometry_msgs::msg::PoseWithCovarianceStamped>::SharedPtr anchor_agv_publisher_, anchor_uav_publisher_;
     rclcpp::Publisher<uwb_localization::msg::PoseWithCovarianceStampedArray>::SharedPtr poses_uav_publisher_, poses_agv_publisher_;
 
-    //Lidar and radar positions
+    //Params
+    double opt_timer_rate_;
     Sophus::SE3d T_uav_lidar_, T_agv_lidar_;
     Sophus::SE3d T_uav_radar_, T_agv_radar_;
     double pointcloud_lidar_sigma_, pointcloud_radar_sigma_;
+    std::string odom_topic_agv_, odom_topic_uav_;
+    std::string pcl_topic_lidar_agv_, pcl_topic_lidar_uav_;
+    std::string pcl_topic_radar_agv_, pcl_topic_radar_uav_;
+    int icp_type_lidar_, icp_type_radar_;
+    bool using_radar_, using_lidar_, using_odom_;
+    double min_traveled_distance_, min_traveled_angle_;
+    int max_keyframes_, min_keyframes_;
+    int radar_history_size_;
+
 
     //Measurements
     pcl::PointCloud<pcl::PointXYZ>::Ptr uav_lidar_cloud_{new pcl::PointCloud<pcl::PointXYZ>};
     pcl::PointCloud<pcl::PointXYZ>::Ptr agv_lidar_cloud_{new pcl::PointCloud<pcl::PointXYZ>};
     pcl::PointCloud<pcl::PointXYZ>::Ptr uav_radar_cloud_{new pcl::PointCloud<pcl::PointXYZ>};
     pcl::PointCloud<pcl::PointXYZ>::Ptr agv_radar_cloud_{new pcl::PointCloud<pcl::PointXYZ>};
-    int icp_type_lidar_, icp_type_radar_;
     bool uwb_transform_available_; 
     geometry_msgs::msg::PoseWithCovarianceStamped latest_relative_pose_;
     Sophus::SE3d latest_relative_pose_SE3_;
     Eigen::Matrix<double, 6, 6> latest_relative_pose_cov_;
-    double min_keyframes_;
 
     State init_state_uav_, init_state_agv_; 
     State anchor_node_uav_, anchor_node_agv_;
@@ -1633,16 +1728,11 @@ private:
     std::deque<RadarMeasurements> radar_history_agv_, radar_history_uav_;
     int uav_id_, agv_id_;
     bool graph_initialized_;
-    bool using_radar_, using_lidar_, using_odom_;
     // Publishers/Broadcasters
     std::shared_ptr<tf2_ros::TransformBroadcaster> tf_broadcaster_;
 
     std::string eliko_frame_id_, uav_frame_id_, global_frame_graph_;
-    std::string odom_tf_agv_s_, odom_tf_agv_t_;
-    std::string odom_tf_uav_s_, odom_tf_uav_t_;
-
-    double global_opt_window_s_, global_opt_rate_s_;
-    int max_keyframes_, radar_history_size_;
+    std::string odom_tf_agv_t_, odom_tf_uav_t_;
 
     Sophus::SE3d uav_odom_pose_, last_uav_odom_pose_;         // Current UAV odometry position and last used for optimization
     Sophus::SE3d agv_odom_pose_, last_agv_odom_pose_;        // Current AGV odometry position and last used for optimization
@@ -1656,8 +1746,6 @@ private:
     bool last_agv_odom_initialized_, last_uav_odom_initialized_;
     bool relative_pose_initialized_;
     
-    double min_traveled_distance_, min_traveled_angle_;
-    double max_traveled_distance_, max_traveled_angle_;
     double uav_translation_, agv_translation_;
     double uav_rotation_, agv_rotation_;
 
