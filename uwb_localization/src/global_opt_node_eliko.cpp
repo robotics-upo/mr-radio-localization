@@ -36,7 +36,7 @@
 #include <chrono>
 
 #include "uwb_localization/utils.hpp"
-#include "uwb_localization/residuals.hpp"
+#include "uwb_localization/CostFunctions.hpp"
 #include "uwb_localization/manifolds.hpp"
 
 using namespace uwb_localization;
@@ -94,12 +94,33 @@ public:
     uav_delta_translation_ = agv_delta_translation_ = uav_delta_rotation_ = agv_delta_rotation_ = 0.0;
     uav_total_translation_ = agv_total_translation_ = uav_total_rotation_ = agv_total_rotation_ = 0.0;
 
+    total_solves_ = 0;
+    total_solver_time_ = 0.0;
+
     // Calculate the optimization timer period from opt_timer_rate_ (Hz).
     double opt_timer_period_s = 1.0 / opt_timer_rate_;
     global_optimization_timer_ = this->create_wall_timer(
         std::chrono::milliseconds(int(opt_timer_period_s*1000)), std::bind(&ElikoGlobalOptNode::globalOptCb, this));
     
     RCLCPP_INFO(this->get_logger(), "Eliko Optimization Node initialized.");
+  }
+
+  void getMetrics() const
+  {
+    if (total_solves_ > 0)
+    {
+      double avg = total_solver_time_ / static_cast<double>(total_solves_);
+      RCLCPP_INFO(this->get_logger(),
+                  "===== Ceres Solver Metrics =====\n"
+                  "Total runs: %d\n"
+                  "Total time: %.6f s\n"
+                  "Average time per solve: %.6f s",
+                  total_solves_, total_solver_time_, avg);
+    }
+    else
+    {
+      RCLCPP_WARN(this->get_logger(), "No solver runs have completed yet.");
+    }
   }
 
 private:
@@ -120,6 +141,8 @@ private:
         this->declare_parameter<double>("measurement_stdev", 0.1);         // in meters
         this->declare_parameter<double>("odom_error_position", 2.0);
         this->declare_parameter<double>("odom_error_angle", 2.0);
+        this->declare_parameter<bool>("use_prior", true);
+        this->declare_parameter<bool>("moving_average", true);
         this->declare_parameter<int>("moving_average_max_samples", 10);
 
         // Declare the anchors parameters.
@@ -152,7 +175,8 @@ private:
         this->get_parameter("measurement_stdev", measurement_stdev_);
         this->get_parameter("odom_error_position", odom_error_distance_);
         this->get_parameter("odom_error_angle", odom_error_angle_);
-        //this->get_parameter("moving_average", moving_average_);
+        this->get_parameter("use_prior", use_prior_);
+        this->get_parameter("moving_average", moving_average_);
         this->get_parameter("moving_average_max_samples", moving_average_max_samples_);
 
         // Log the read parameters.
@@ -168,6 +192,7 @@ private:
         RCLCPP_INFO(this->get_logger(), "  odom_error_position: %f", odom_error_distance_);
         RCLCPP_INFO(this->get_logger(), "  odom_error_angle: %f", odom_error_angle_);
         RCLCPP_INFO(this->get_logger(), "  moving_average: %s", moving_average_ ? "true" : "false");
+        RCLCPP_INFO(this->get_logger(), "  use_prior: %s", use_prior_ ? "true" : "false");
         RCLCPP_INFO(this->get_logger(), "  moving_average_max_samples: %zu", moving_average_max_samples_);
     
         // Initialize anchors from parameters.
@@ -440,8 +465,10 @@ private:
 
         Eigen::MatrixXd M;
         Eigen::VectorXd b;
-        bool init_prior = solveMartelLinearSystem(global_measurements_, M, b, init_state_, true); //false: use full stack of measurements true: subset of 50 measurements
-
+        bool init_prior = false;
+        if(use_prior_){
+            init_prior = solveMartelLinearSystem(global_measurements_, M, b, init_state_, true); //false: use full stack of measurements true: subset of 30% measurements
+        }
         //*****************Nonlinear WLS refinement with all measurements ****************************/
 
         // Compute odometry covariance based on distance increments from step to step 
@@ -461,7 +488,7 @@ private:
         RCLCPP_INFO(this->get_logger(), "[Eliko global_opt node] Optimizing trajectory of %ld measurements", global_measurements_.size());
         //Update transforms after convergence
         if(runOptimization(current_time, predicted_motion_covariance, init_prior)){
-        
+            
             if(moving_average_){
                 // /*Run moving average*/
                 auto smoothed_state = movingAverage(opt_state_, moving_average_max_samples_);
@@ -482,7 +509,7 @@ private:
 
     }
 
-    // This function builds the linear system M*x = b based on the current measurements window.
+// This function builds the linear system M*x = b based on the current measurements window.
     bool solveMartelLinearSystem(const std::deque<UWBMeasurement>& measurements,
             Eigen::MatrixXd &M,
             Eigen::VectorXd &b, State &init_state, bool useSubset = false)
@@ -643,9 +670,10 @@ private:
 
             ceres::Problem problem;
 
-            //Initial conditions
-            State opt_state = opt_state_;
+            State opt_state;
   
+            opt_state = opt_state_;
+            
             //Update the timestamp
             opt_state.timestamp = current_time;
 
@@ -663,10 +691,10 @@ private:
 
             //Set prior using linear initial solution
             if(init_prior){
-                Eigen::Matrix4d prior_covariance = motion_covariance + Eigen::Matrix4d::Identity() * std::pow(2.0*measurement_stdev_,2.0);
+                Eigen::Matrix4d prior_covariance = motion_covariance + Eigen::Matrix4d::Identity() * std::pow(measurement_stdev_,2.0);
                 Sophus::SE3d prior_T = buildTransformationSE3(init_state_.roll, init_state_.pitch, init_state_.state);
                 //Add the prior residual with the full covariance
-                ceres::CostFunction* prior_cost = PriorResidual::Create(prior_T, opt_state.roll, opt_state.pitch, prior_covariance);
+                ceres::CostFunction* prior_cost = PriorCostFunction::Create(prior_T, opt_state.roll, opt_state.pitch, prior_covariance);
                 problem.AddResidualBlock(prior_cost, robust_loss, opt_state.state.data());
             }
 
@@ -677,7 +705,7 @@ private:
                 Eigen::Vector3d anchor_pos = measurement.anchor_odom_pose;
                 Eigen::Vector3d tag_pos = measurement.tag_odom_pose;
 
-                ceres::CostFunction* cost_function = UWBResidual::Create(
+                ceres::CostFunction* cost_function = UWBCostFunction::Create(
                     anchor_pos, tag_pos, measurement.distance, opt_state.roll, opt_state.pitch, measurement_stdev_);
                 problem.AddResidualBlock(cost_function, robust_loss, opt_state.state.data());
             }
@@ -698,6 +726,8 @@ private:
             // Notify and update values if optimization converged
             if (summary.termination_type == ceres::CONVERGENCE){
                 
+                total_solves_++;
+                total_solver_time_ += summary.total_time_in_seconds;
                 // Compute Covariance
                 ceres::Covariance::Options cov_options;
                 ceres::Covariance covariance(cov_options);
@@ -753,7 +783,8 @@ private:
     double min_traveled_distance_, min_traveled_angle_, max_traveled_distance_;
     double measurement_stdev_;
     size_t moving_average_max_samples_;
-    bool moving_average_ = true;
+    bool moving_average_;
+    bool use_prior_;
     std::unordered_map<std::string, Eigen::Vector3d> anchor_positions_;
     std::unordered_map<std::string, Eigen::Vector3d> tag_positions_;
 
@@ -779,12 +810,20 @@ private:
 
     double odom_error_distance_, odom_error_angle_;
 
+    //Timing metrics
+    int total_solves_;
+    double total_solver_time_;
+
 };
 int main(int argc, char** argv) {
     rclcpp::init(argc, argv);
     auto node = std::make_shared<ElikoGlobalOptNode>();
     node->set_parameter(rclcpp::Parameter("use_sim_time", true));
     rclcpp::spin(node);
+
+    // Once spin() returns (e.g. on SIGINT), dump out metrics:
+    node->getMetrics();
+
     rclcpp::shutdown();
     return 0;
 }

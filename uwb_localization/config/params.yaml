@@ -1,6 +1,6 @@
 eliko_global_opt_node:
   ros__parameters:
-    use_sim_time: True
+    use_sim_time: true
     odom_topic_agv: "/agv/odom" #or "/agv/odom" #"/arco/idmind_motors/odom"
     odom_topic_uav: "/uav/odom"
     opt_timer_rate: 10.0 #Hz
@@ -11,6 +11,7 @@ eliko_global_opt_node:
     measurement_stdev: 0.1 #m
     odom_error_position: 2.0 # %,  meters for every 100 meters traveled
     odom_error_angle: 2.0 # % degrees for every 100 degrees
+    use_prior: true
     moving_average: true
     moving_average_max_samples: 10
     anchors:
@@ -39,10 +40,10 @@ fusion_optimization_node:
     use_sim_time: true
     odom_topic_agv: "/agv/odom" #or "/agv/odom" #"/arco/idmind_motors/odom"
     lidar_topic_agv: "/arco/ouster/points"
-    radar_topic_agv: "/arco/radar/PointCloudDetection"
+    radar_topic_agv: "/agv/filtered_pointcloud" #or /arco/radar/PointCloudDetection OR /agv/filtered_pointcloud
     odom_topic_uav: "/uav/odom"
     topic_lidar_uav: "/os1_cloud_node/points_non_dense"
-    topic_radar_uav: "/drone/radar/PointCloudDetection"
+    topic_radar_uav: "/uav/filtered_pointcloud" #/drone/radar/PointCloudDetection OR /uav/filtered_pointcloud
     opt_timer_rate: 10.0 #Hz
     min_traveled_distance: 0.5 #m
     min_traveled_angle: 0.524 #radians
@@ -50,7 +51,7 @@ fusion_optimization_node:
     max_keyframes: 10
     using_odom: true
     using_lidar: false
-    using_radar: true
+    using_radar: false
     lidar_stdev: 0.05
     radar_stdev: 0.1
     icp_type_lidar: 1   #ICP algorithm variant: 2->Generalized ICP, 1->Point to Plane ICP, else -> basic ICP
@@ -59,8 +60,8 @@ fusion_optimization_node:
     lidar_uav:
         position: [0.21, 0.0, 0.25, 0.0, 0.0, 0.0]  #[0.21, 0.0, 0.25, 0.0, 0.0, 0.0]
     radar_uav:
-        position: [-0.385, -0.02, -0.225, 0.0, 2.417, 3.14]  #[-0.385, -0.02, -0.225, 0.0, 2.417, 3.14]
+        position: [-0.385, -0.02, -0.225, 0.0, 2.417, 3.14]   #OR [-0.385, -0.02, -0.225, 0.0, 2.417, 3.14]
     lidar_agv:
         position: [0.3, 0.0, 0.45, 3.14, 0.0, 0.0]  #[0.3, 0.0, 0.45, 3.14, 0.0, 0.0]
     radar_agv:
-        position: [0.45, 0.05, 0.65, 0.0, 0.0, 0.0]  #[0.45, 0.05, 0.65, 0.0, 0.0, 0.0]
+        position: [0.45, 0.05, 0.5, 0.0, 0.0, 0.0]   #OR [0.45, 0.05, 0.65, 0.0, 0.0, 0.0]

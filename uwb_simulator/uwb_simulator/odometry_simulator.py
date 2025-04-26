@@ -150,37 +150,70 @@ class OdometrySimulator(Node):
         agv_commands = []
 
         # Define trajectory parameters
-        use_circular_trajectory = True  # Toggle between circular or straight-line trajectories
+        use_circular_trajectory = False  # Toggle between circular or straight-line trajectories
+        use_lemniscate = True
+
+        dt = 1.0 / self.publish_rate
+        average_vel = 0.5
+        duration = self.total_distance / average_vel  # Time to complete the trajectory
+        total_steps = int(duration * self.publish_rate)
 
         if use_circular_trajectory:
+            self.get_logger().info(f"Generating circular trajectory!.")
+
             # Circular trajectory parameters
             radius = 2.0  # Radius of the circular trajectory
             angular_velocity = 0.5  # Angular velocity for the circular motion
-            duration = self.total_distance / (radius * angular_velocity)  # Time to complete the trajectory
-            dt = 1.0 / self.publish_rate
-            total_steps = int(duration * self.publish_rate)
-            half_steps = total_steps // 2
 
             for step in range(total_steps):
                 
-                #direction_multiplier = 1 if step < half_steps else -1
-
                 # UAV circular trajectory
                 agv_v = [radius * angular_velocity, 0.0]
                 agv_w = angular_velocity
                 agv_commands.append((*agv_v, agv_w))
 
-                # AGV circular trajectory with yaw offset
                 uav_v = agv_v
                 uav_w = agv_w 
                 uav_commands.append((*uav_v, uav_w))
 
+        elif use_lemniscate:
+            
+            R = 5.0
+            # 1) approximate L:
+            thetas = np.linspace(0, 2*np.pi, 4_000)
+            dx_dθ =  R * np.cos(thetas)
+            dy_dθ =  R * np.cos(2*thetas)
+            L = np.trapz(np.hypot(dx_dθ, dy_dθ), thetas)
+
+            # 2) timing + steps:
+            v_avg = 0.5
+            T_loop = L / v_avg
+            N_steps = int(np.ceil(T_loop * self.publish_rate))
+            N_loops = int(np.ceil(self.total_distance / L))
+
+            for loop in range (N_loops):
+                for i in range(N_steps):
+                    theta = 2.0 * np.pi * (i / N_steps)
+                    # derivatives:
+                    dx =  R * np.cos(theta) * (2.0*np.pi/T_loop)
+                    dy =  R * np.cos(2*theta)* (2.0*np.pi/T_loop)
+                    ddx = -R * np.sin(theta) * (2.0*np.pi/T_loop)**2.0
+                    ddy = -2*R*np.sin(2*theta)*(2.0*np.pi/T_loop)**2.0
+                    v = np.hypot(dx, dy)
+                    kappa = (dx*ddy - dy*ddx) / (v**3.0 + 1e-8)
+                    angular_vel = kappa * v
+
+                    agv_commands.append((v, 0.0, angular_vel))
+                    uav_commands.append((v, 0.0, angular_vel))
+
+            self.get_logger().info(f"Generated {len(uav_commands)} commands for UAV and AGV.")
+
         else:
+            self.get_logger().info(f"Generating straight line!.")
+
             # Straight-line trajectory parameters
             linear_speed = 1.0  # Speed of the vehicles on the straight line
             duration = self.total_distance / linear_speed  # Time to complete the straight line
-            dt = 1.0 / self.publish_rate
-            total_steps = int(duration * self.publish_rate)
 
             # Fixed yaw rotation between UAV and AGV
             yaw_offset = np.pi / 4  # 45-degree offset

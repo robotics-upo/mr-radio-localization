@@ -67,7 +67,7 @@ using namespace small_gicp;
 
 #include "uwb_localization/utils.hpp"
 #include "uwb_localization/posegraph.hpp"
-#include "uwb_localization/residuals.hpp"
+#include "uwb_localization/CostFunctions.hpp"
 #include "uwb_localization/manifolds.hpp"
 
 using namespace uwb_localization;
@@ -211,7 +211,7 @@ private:
         this->declare_parameter<std::vector<double>>("lidar_agv.position",
                         std::vector<double>{0.3, 0.0, 0.45, 3.14, 0.0, 0.0});
         this->declare_parameter<std::vector<double>>("radar_agv.position",
-                        std::vector<double>{0.45, 0.05, 0.65, 0.0, 0.0, 0.0});
+                        std::vector<double>{0.45, 0.05, 0.5, 0.0, 0.0, 0.0});
 
     }
 
@@ -240,7 +240,7 @@ private:
         this->get_parameter("max_keyframes", max_keyframes_);
         this->get_parameter("radar_history_size", radar_history_size_);
 
-         // Retrieve sensor placement vectors.
+        // Retrieve sensor placement vectors.
         std::vector<double> lidar_uav_pos, radar_uav_pos, lidar_agv_pos, radar_agv_pos;
         this->get_parameter("lidar_uav.position", lidar_uav_pos);
         this->get_parameter("radar_uav.position", radar_uav_pos);
@@ -277,14 +277,15 @@ private:
         RCLCPP_INFO(this->get_logger(), "  icp_type_lidar: %d, icp_type_radar: %d", icp_type_lidar_, icp_type_radar_);
         RCLCPP_INFO(this->get_logger(), "  radar_history_size: %d", radar_history_size_);
 
-        RCLCPP_INFO(this->get_logger(), "  T_uav_lidar: [%f, %f, %f, %f]", 
-                    T_uav_lidar_.matrix()(0,0), T_uav_lidar_.matrix()(0,1), T_uav_lidar_.matrix()(0,2), T_uav_lidar_.matrix()(0,3));
-        RCLCPP_INFO(this->get_logger(), "  T_agv_lidar: [%f, %f, %f, %f]", 
-                    T_agv_lidar_.matrix()(0,0), T_agv_lidar_.matrix()(0,1), T_agv_lidar_.matrix()(0,2), T_agv_lidar_.matrix()(0,3));
-        RCLCPP_INFO(this->get_logger(), "  T_uav_radar: [%f, %f, %f, %f]", 
-                    T_uav_radar_.matrix()(0,0), T_uav_radar_.matrix()(0,1), T_uav_radar_.matrix()(0,2), T_uav_radar_.matrix()(0,3));
-        RCLCPP_INFO(this->get_logger(), "  T_agv_radar: [%f, %f, %f, %f]", 
-                    T_agv_radar_.matrix()(0,0), T_agv_radar_.matrix()(0,1), T_agv_radar_.matrix()(0,2), T_agv_radar_.matrix()(0,3));
+        RCLCPP_INFO(this->get_logger(), "T_uav_lidar:\n");
+        logTransformationMatrix(T_uav_lidar_.matrix(), this->get_logger());
+        RCLCPP_INFO(this->get_logger(), "T_agv_lidar:\n");
+        logTransformationMatrix(T_agv_lidar_.matrix(), this->get_logger());
+        RCLCPP_INFO(this->get_logger(), "T_uav_radar:\n");
+        logTransformationMatrix(T_uav_radar_.matrix(), this->get_logger());
+        RCLCPP_INFO(this->get_logger(), "T_agv_radar:\n");
+        logTransformationMatrix(T_agv_radar_.matrix(), this->get_logger());
+
     }
 
 
@@ -1557,13 +1558,13 @@ private:
        // For the starting nodes, add the prior residual blocks if they are not yet optimized and fixed.
         if (!isNodeFixedKF(agv_id_, 0, max_keyframes_, min_keyframes_)){
             auto first_node_agv = agv_map[0];
-            ceres::CostFunction* prior_cost_agv = PriorResidual::Create(prior_agv_.pose, first_node_agv.roll, first_node_agv.pitch, prior_agv_.covariance);
+            ceres::CostFunction* prior_cost_agv = PriorCostFunction::Create(prior_agv_.pose, first_node_agv.roll, first_node_agv.pitch, prior_agv_.covariance);
             problem.AddResidualBlock(prior_cost_agv, nullptr, first_node_agv.state.data());
         }
 
         if (!isNodeFixedKF(uav_id_, 0, max_keyframes_, min_keyframes_)) {    
             auto first_node_uav = uav_map[0];
-            ceres::CostFunction* prior_cost_uav = PriorResidual::Create(prior_uav_.pose, first_node_uav.roll, first_node_uav.pitch, prior_uav_.covariance);
+            ceres::CostFunction* prior_cost_uav = PriorCostFunction::Create(prior_uav_.pose, first_node_uav.roll, first_node_uav.pitch, prior_uav_.covariance);
             problem.AddResidualBlock(prior_cost_uav, nullptr, first_node_uav.state.data());
         }
 
@@ -1584,7 +1585,7 @@ private:
         }
         else{
             // Add a prior residual for the AGV anchor node (ALWAYS THERE IS AN ANCOUNTER)
-            ceres::CostFunction *prior_cost_anchor = PriorResidual::Create(prior_anchor_agv_.pose, 
+            ceres::CostFunction *prior_cost_anchor = PriorCostFunction::Create(prior_anchor_agv_.pose, 
                 anchor_node_agv_.roll, anchor_node_agv_.pitch, prior_anchor_agv_.covariance);
             problem.AddResidualBlock(prior_cost_anchor, nullptr, anchor_node_agv_.state.data());
         }

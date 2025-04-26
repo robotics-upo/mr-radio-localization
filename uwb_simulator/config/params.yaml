@@ -39,7 +39,7 @@ odometry_simulator:
   ros__parameters:
     simple_trajectory: False
     holonomic_xy: False    #move independently in horizontal plane
-    trajectory_name: "trajectory_simple2"
+    trajectory_name: "trajectory_lemniscate"
     total_distance: 100
     pub_rate: 10.0
     use_sim_time: True
