@@ -424,11 +424,17 @@ class OdometrySimulator(Node):
         odom_msg.pose.pose.position.x = pose[0]
         odom_msg.pose.pose.position.y = pose[1]
         odom_msg.pose.pose.position.z = pose[2]
-        quat = R.from_euler('z', pose[3]).as_quat()
-        odom_msg.pose.pose.orientation.x = quat[0]
-        odom_msg.pose.pose.orientation.y = quat[1]
-        odom_msg.pose.pose.orientation.z = quat[2]
-        odom_msg.pose.pose.orientation.w = quat[3]
+
+        # sample noise
+        roll_noise  = random.gauss(0.0, 0.01)
+        pitch_noise = random.gauss(0.0, 0.01)
+
+         # orientation w/ noise on roll & pitch
+        noisy_quat = R.from_euler('xyz', [roll_noise, pitch_noise, pose[3]]).as_quat()
+        odom_msg.pose.pose.orientation.x = noisy_quat[0]
+        odom_msg.pose.pose.orientation.y = noisy_quat[1]
+        odom_msg.pose.pose.orientation.z = noisy_quat[2]
+        odom_msg.pose.pose.orientation.w = noisy_quat[3]
 
         # Set linear and angular velocity
         odom_msg.twist.twist.linear.x = linear_velocity[0]
@@ -558,6 +564,11 @@ class OdometrySimulator(Node):
     def transform_publisher(self, pose, parent_frame, child_frame):
         """Publish the transform for a given pose."""
         x, y, z, theta = pose
+
+        # sample noise
+        roll_noise  = random.gauss(0.0, 0.01)
+        pitch_noise = random.gauss(0.0, 0.01)
+
         transform = TransformStamped()
         transform.header.stamp = self.get_clock().now().to_msg()
         transform.header.frame_id = parent_frame
@@ -567,7 +578,8 @@ class OdometrySimulator(Node):
         transform.transform.translation.y = y
         transform.transform.translation.z = z
 
-        quat = R.from_euler('z', theta).as_quat()
+        # rotation: apply noise on roll & pitch, keep yaw = theta
+        quat = R.from_euler('xyz', [roll_noise, pitch_noise, theta]).as_quat()
         transform.transform.rotation.x = quat[0]
         transform.transform.rotation.y = quat[1]
         transform.transform.rotation.z = quat[2]

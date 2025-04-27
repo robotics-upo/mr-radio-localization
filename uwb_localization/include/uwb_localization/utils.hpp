@@ -44,6 +44,7 @@ namespace uwb_localization
         double pitch;
         Sophus::SE3d pose; //full pose, with roll and pitch read from imu
         Eigen::Matrix4d covariance;
+        bool planar; //to indicate the optimizer whether the motion is planar or not
     
         EIGEN_MAKE_ALIGNED_OPERATOR_NEW
     

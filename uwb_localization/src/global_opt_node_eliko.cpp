@@ -678,7 +678,7 @@ private:
             opt_state.timestamp = current_time;
 
             // Create an instance of our custom manifold.
-            ceres::Manifold* state_manifold = new StateManifold();
+            ceres::Manifold* state_manifold = new StateManifold4D();
             // Attach it to the parameter block.
             problem.AddParameterBlock(opt_state.state.data(), 4);
 

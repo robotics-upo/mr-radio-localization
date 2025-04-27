@@ -589,6 +589,7 @@ private:
             Eigen::Matrix3d R_odom_agv = agv_measurements_.odom_pose.rotationMatrix();  // or T.so3().matrix()
             // Compute Euler angles in ZYX order: [yaw, pitch, roll]
             Eigen::Vector3d euler_agv = R_odom_agv.eulerAngles(2, 1, 0);
+
             //Initial values for state AGV
             init_state_agv_.timestamp = current_time;
             init_state_agv_.state = Eigen::Vector4d(t_odom_agv[0], t_odom_agv[1], t_odom_agv[2], euler_agv[0]);
@@ -609,6 +610,7 @@ private:
             anchor_node_agv_.pitch = 0.0;
             anchor_node_agv_.pose = init_state_agv_.pose;
             anchor_node_agv_.covariance = Eigen::Matrix4d::Identity(); //
+            anchor_node_agv_.planar = true;
 
             agv_translation_ = agv_rotation_ = 0.0;
             prev_agv_measurements_ = agv_measurements_;
@@ -637,6 +639,7 @@ private:
             init_state_uav_.pitch = euler_uav[1];
             init_state_uav_.pose = buildTransformationSE3(init_state_uav_.roll, init_state_uav_.pitch, init_state_uav_.state);
             init_state_uav_.covariance = Eigen::Matrix4d::Identity(); //
+            init_state_uav_.planar = false;
 
             RCLCPP_INFO(this->get_logger(), "Adding initial UAV node at timestamp %.2f: [%f, %f, %f, %f]", current_time.seconds(),
             init_state_uav_.state[0], init_state_uav_.state[1], init_state_uav_.state[2], init_state_uav_.state[3]);
@@ -652,6 +655,7 @@ private:
             anchor_node_uav_.pitch = 0.0;
             anchor_node_uav_.pose = buildTransformationSE3(anchor_node_uav_.roll, anchor_node_uav_.pitch, anchor_node_uav_.state);
             anchor_node_uav_.covariance = Eigen::Matrix4d::Identity(); //
+            anchor_node_uav_.planar = false;
 
             uav_translation_ = uav_rotation_ = 0.0;
             prev_uav_measurements_ = uav_measurements_;
@@ -720,8 +724,13 @@ private:
             Eigen::Matrix3d R_odom_agv = agv_measurements_.odom_pose.rotationMatrix();  // or T.so3().matrix()
             // Compute Euler angles in ZYX order: [yaw, pitch, roll]
             Eigen::Vector3d euler_agv = R_odom_agv.eulerAngles(2, 1, 0);
+
             new_agv.pitch = euler_agv[1];  // rotation around Y-axis
             new_agv.roll = euler_agv[2];  // rotation around X-axis
+            
+            double tilt = std::acos( R_odom_agv(2,2) );  // dot(body_z, world_z)
+            new_agv.planar = ( tilt <= 15.0 * M_PI/180.0 );
+
             if(agv_id_ > min_keyframes_){
                 new_agv.state = agv_map_[agv_id_ - 1].state;
                 new_agv.pose = agv_map_[agv_id_ - 1].pose;
@@ -735,8 +744,8 @@ private:
             
             agv_map_[agv_id_] = new_agv;
 
-            RCLCPP_INFO(this->get_logger(), "Adding AGV node %d at timestamp %.2f: [%f, %f, %f, %f]", agv_id_, current_time.seconds(),
-                            new_agv.state[0], new_agv.state[1], new_agv.state[2], new_agv.state[3]);
+            RCLCPP_INFO(this->get_logger(), "Adding AGV node %d at timestamp %.2f: [%f, %f, %f, %f] with %s motion", agv_id_, current_time.seconds(),
+                            new_agv.state[0], new_agv.state[1], new_agv.state[2], new_agv.state[3], new_agv.planar ? "planar" : "vertical");
 
 
             //ADD AGV Proprioceptive constraints
@@ -831,11 +840,20 @@ private:
             new_uav.timestamp = current_time;
 
             Eigen::Vector3d t_odom_uav = uav_measurements_.odom_pose.translation();
+            Eigen::Vector3d prev_t_odom_uav = prev_uav_measurements_.odom_pose.translation();
+
             Eigen::Matrix3d R_odom_uav = uav_measurements_.odom_pose.rotationMatrix();  // or T.so3().matrix()
             // Compute Euler angles in ZYX order: [yaw, pitch, roll]
             Eigen::Vector3d euler_uav = R_odom_uav.eulerAngles(2, 1, 0);
+
             new_uav.pitch = euler_uav[1];  // rotation around Y-axis
             new_uav.roll = euler_uav[2];  // rotation around X-axis
+            
+            //Try to find changes in altitude to determine if the UAV has moved vertically
+            double z_diff = std::abs(t_odom_uav[2] - prev_t_odom_uav[2]);
+            new_uav.planar = true;
+            if(z_diff > 0.25) new_uav.planar = false;
+
             if(uav_id_ > min_keyframes_){
                 new_uav.state = uav_map_[uav_id_ - 1].state;
                 new_uav.pose = uav_map_[uav_id_ - 1].pose;
@@ -849,8 +867,8 @@ private:
 
             uav_map_[uav_id_] = new_uav;
 
-            RCLCPP_INFO(this->get_logger(), "Adding new UAV node %d at timestamp %.2f: [%f, %f, %f, %f]", uav_id_, current_time.seconds(),
-                            new_uav.state[0], new_uav.state[1], new_uav.state[2], new_uav.state[3]);
+            RCLCPP_INFO(this->get_logger(), "Adding new UAV node %d at timestamp %.2f: [%f, %f, %f, %f] with %s motion", uav_id_, current_time.seconds(),
+                        new_uav.state[0], new_uav.state[1], new_uav.state[2], new_uav.state[3], new_uav.planar ? "planar" : "vertical");
 
             //ADD UAV Proprioceptive constraints
 
@@ -1508,8 +1526,8 @@ private:
         bool* ptrFalse = new bool(false);
         bool* ptrTrue = new bool(true);
 
-        ceres::Manifold* state_manifold_2d = new StateManifold3D(ptrFalse);
-        ceres::Manifold* state_manifold_3d = new StateManifold3D(ptrTrue);
+        ceres::Manifold* state_manifold_4d = new StateManifold4D();
+        ceres::Manifold* state_manifold_3d = new StateManifold3D();
 
         // Define a robust kernel
         double huber_threshold = 2.5; // = residuals higher than 2.5 times sigma are outliers
@@ -1518,41 +1536,33 @@ private:
         //Add the anchor nodes
         problem.AddParameterBlock(anchor_node_uav_.state.data(), 4);
         problem.AddParameterBlock(anchor_node_agv_.state.data(), 4);
-        problem.SetManifold(anchor_node_uav_.state.data(), state_manifold_3d);
-        problem.SetManifold(anchor_node_agv_.state.data(), state_manifold_2d);
+        problem.SetManifold(anchor_node_uav_.state.data(), state_manifold_4d);
+        problem.SetManifold(anchor_node_agv_.state.data(), state_manifold_3d);
 
-        //remove the gauge freedom (i.e. the fact that an overall rigid body transform can be added to all poses without changing the relative errors).
         //anchor -freeze- the first node, and freeze the part of the node outside the sliding window
 
         for (auto it = agv_map.begin(); it != agv_map.end(); ++it) {
             State& state = it->second;
             problem.AddParameterBlock(state.state.data(), 4);  
-            // For the first node, there is no previous measurement.
-            if (it == agv_map.begin()) {
-                // You could choose to allow full 3D update or restrict it.
-                problem.SetManifold(state.state.data(), state_manifold_2d);
-            } else {
-                // Compare the pitch difference between the current state and the previous one.
-                auto prev_it = std::prev(it);
-                double pitch_diff = std::abs(state.pitch - prev_it->second.pitch);
-                // If the pitch difference is greater than 15 degrees (in radians), allow full update.
-                if (pitch_diff > 15.0 * M_PI / 180.0) problem.SetManifold(state.state.data(), state_manifold_3d);
-                else problem.SetManifold(state.state.data(), state_manifold_2d);
-            }            
+
+            if(state.planar) problem.SetManifold(state.state.data(), state_manifold_3d);
+            else problem.SetManifold(state.state.data(), state_manifold_4d);
+
             if (isNodeFixedKF(agv_id_, it->first, max_keyframes_, min_keyframes_)) problem.SetParameterBlockConstant(state.state.data());
             else RCLCPP_DEBUG(this->get_logger(), "Optimizing for AGV node %d", it->first);
         }
 
-        for (auto& kv : uav_map) {
-            State& state = kv.second;
-            problem.AddParameterBlock(state.state.data(), 4); 
-            problem.SetManifold(state.state.data(), state_manifold_3d);
-            if (isNodeFixedKF(uav_id_, kv.first, max_keyframes_, min_keyframes_)) {
+        for (auto it = uav_map.begin(); it != uav_map.end(); ++it) {
+            State& state = it->second;
+            problem.AddParameterBlock(state.state.data(), 4);
+
+            if(state.planar) problem.SetManifold(state.state.data(), state_manifold_3d);
+            else problem.SetManifold(state.state.data(), state_manifold_4d);
+
+            // now still apply your fixed‐node logic, etc.
+            if (isNodeFixedKF(uav_id_, it->first, max_keyframes_, min_keyframes_)) {
                 problem.SetParameterBlockConstant(state.state.data());
-            } else {
-                RCLCPP_DEBUG(this->get_logger(), "Optimizing for UAV node %d", kv.first);
             }
-   
         }
 
        // For the starting nodes, add the prior residual blocks if they are not yet optimized and fixed.
