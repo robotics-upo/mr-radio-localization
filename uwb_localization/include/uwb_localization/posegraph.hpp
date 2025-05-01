@@ -65,6 +65,7 @@ namespace posegraph
         // Pointer to an associated point cloud (keyframe scan).
         pcl::PointCloud<pcl::PointXYZ>::Ptr lidar_scan;
         pcl::PointCloud<pcl::PointXYZ>::Ptr radar_scan;
+        Eigen::Vector3d radar_egovel;
     
          // Constructor to initialize the pointer.
          Measurements() : lidar_scan(new pcl::PointCloud<pcl::PointXYZ>), radar_scan(new pcl::PointCloud<pcl::PointXYZ>) {}

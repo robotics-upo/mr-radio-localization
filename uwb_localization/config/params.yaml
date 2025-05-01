@@ -1,7 +1,7 @@
 eliko_global_opt_node:
   ros__parameters:
     use_sim_time: true
-    odom_topic_agv: "/agv/odom" #or "/agv/odom" #"/arco/idmind_motors/odom"
+    odom_topic_agv: "/arco/idmind_motors/odom" #or "/agv/odom" #"/arco/idmind_motors/odom"
     odom_topic_uav: "/uav/odom"
     opt_timer_rate: 10.0 #Hz
     min_measurements: 50
@@ -38,12 +38,14 @@ eliko_global_opt_node:
 fusion_optimization_node:
   ros__parameters:
     use_sim_time: true
-    odom_topic_agv: "/agv/odom" #or "/agv/odom" #"/arco/idmind_motors/odom"
+    odom_topic_agv: "/arco/idmind_motors/odom" #or "/agv/odom" #"/arco/idmind_motors/odom"
     lidar_topic_agv: "/arco/ouster/points"
     radar_topic_agv: "/agv/filtered_pointcloud" #or /arco/radar/PointCloudDetection OR /agv/filtered_pointcloud
+    radar_egovel_topic_agv: "/agv/Ego_Vel_Twist"
     odom_topic_uav: "/uav/odom"
-    topic_lidar_uav: "/os1_cloud_node/points_non_dense"
-    topic_radar_uav: "/uav/filtered_pointcloud" #/drone/radar/PointCloudDetection OR /uav/filtered_pointcloud
+    lidar_topic_uav: "/os1_cloud_node/points_non_dense"
+    radar_topic_uav: "/uav/filtered_pointcloud" #/drone/radar/PointCloudDetection OR /uav/filtered_pointcloud
+    radar_egovel_topic_uav: "/uav/Ego_Vel_Twist"
     opt_timer_rate: 10.0 #Hz
     min_traveled_distance: 0.5 #m
     min_traveled_angle: 0.524 #radians
@@ -51,7 +53,7 @@ fusion_optimization_node:
     max_keyframes: 10
     using_odom: true
     using_lidar: false
-    using_radar: false
+    using_radar: true
     lidar_stdev: 0.05
     radar_stdev: 0.1
     icp_type_lidar: 1   #ICP algorithm variant: 2->Generalized ICP, 1->Point to Plane ICP, else -> basic ICP
