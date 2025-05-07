@@ -2,13 +2,26 @@
 
 import sys
 import pandas as pd
+import matplotlib as mpl
 import matplotlib.pyplot as plt
 from mpl_toolkits.mplot3d import Axes3D
 import math
 import numpy as np
 from scipy.spatial.transform import Rotation as R
 import re
+from matplotlib.ticker import MultipleLocator
 
+
+# === for paper‐quality bigger fonts ===
+mpl.rcParams.update({
+    'font.size':         14,   # base font size
+    'axes.labelsize':    14,   # x/y label
+    'axes.titlesize':    16,   # subplot title
+    'xtick.labelsize':   12,   # tick numbers
+    'ytick.labelsize':   12,
+    'legend.fontsize':   12,
+    'figure.titlesize':  18    # overall figure title
+})
 
 def compute_That_w_t(timestamp, target_gt_data_df, target_odom_data_df, t_That_s_data_df, columns_target_gt_data, columns_target_odom_data, columns_t_That_s_data):
     """
@@ -188,7 +201,7 @@ def plot_3d_scatter(path, data_frame_ref, data_frame_ref_odom, data_frame_target
     odom_source_x = source_odom_origin[0] + np.cos(theta_source) * data_frame_ref_odom[cols_ref_odom[1]] - np.sin(theta_source) * data_frame_ref_odom[cols_ref_odom[2]]
     odom_source_y = source_odom_origin[1] + np.sin(theta_source) * data_frame_ref_odom[cols_ref_odom[1]] + np.cos(theta_source) * data_frame_ref_odom[cols_ref_odom[2]]
     odom_source_z = source_odom_origin[2] + data_frame_ref_odom[cols_ref_odom[3]]
-    ax.plot(odom_source_x, odom_source_y, odom_source_z, c='r', label='odom source', linestyle='--', linewidth=2)
+    ax.plot(odom_source_x, odom_source_y, odom_source_z, c='r', label='Odom source', linestyle='--', linewidth=2)
 
 
     # Plot ground truth target trajectory
@@ -209,11 +222,13 @@ def plot_3d_scatter(path, data_frame_ref, data_frame_ref_odom, data_frame_target
     ax.set_zlabel("Z (m)")
     ax.legend()
 
-    plt.savefig(path + '/pose_3D.png', bbox_inches='tight')
+    plt.savefig(path + '/pose_3D.svg', format = 'svg', bbox_inches='tight')
+    plt.savefig(path + '/pose_3D.png', format = 'png', bbox_inches='tight')
 
     # Create a top-down view
     ax.view_init(elev=90, azim=-90)  # Elevation of 90° for top-down view, azimuth adjusted for alignment
-    plt.savefig(f"{path}/pose_top_down.png", bbox_inches='tight')
+    plt.savefig(f"{path}/pose_top_down.svg", format = 'svg', bbox_inches='tight')
+    plt.savefig(f"{path}/pose_top_down.png", format = 'png', bbox_inches='tight')
 
     plt.show()
 
@@ -289,7 +304,9 @@ def plot_pose_temporal_evolution(path, df_ref, df_experiment, df_covariance, df_
 
     axes[2].set_xlabel("Time(s)")
 
-    plt.savefig(path + '/pose_t.png', bbox_inches='tight')
+    plt.savefig(path + '/pose_t.svg', format= 'svg', bbox_inches='tight')
+    plt.savefig(path + '/pose_t.png', format= 'png', bbox_inches='tight')
+
 
     plt.show()
 
@@ -314,7 +331,7 @@ def plot_transform(path, df_experiment, df_covariance, cols_experiment, cols_cov
     # # Subtract the first element of the timestamp column to start from 0
     # df_experiment[cols_experiment[0]] *= 1e-6
 
-    axes[0].plot(np.array(df_experiment[cols_experiment[0]]), np.array(df_experiment[cols_experiment[1]]), c='b', label = 'pose_opt')
+    axes[0].plot(np.array(df_experiment[cols_experiment[0]]), np.array(df_experiment[cols_experiment[1]]), '-o', c='b', label = 'pose_opt')
 
 
     axes[0].fill_between(np.array(df_experiment[cols_experiment[0]]),
@@ -325,7 +342,7 @@ def plot_transform(path, df_experiment, df_covariance, cols_experiment, cols_cov
     #plt.xlabel("Timestamp")
     axes[0].set_ylabel("X(m)")
     axes[0].grid()
-    axes[1].plot(np.array(df_experiment[cols_experiment[0]]), np.array(df_experiment[cols_experiment[2]]), c='b')
+    axes[1].plot(np.array(df_experiment[cols_experiment[0]]), np.array(df_experiment[cols_experiment[2]]),'-o', c='b')
 
 
     axes[1].fill_between(np.array(df_experiment[cols_experiment[0]]),
@@ -335,7 +352,7 @@ def plot_transform(path, df_experiment, df_covariance, cols_experiment, cols_cov
     axes[1].set_ylabel("Y(m)")
     axes[1].grid()
 
-    axes[2].plot(np.array(df_experiment[cols_experiment[0]]), np.array(df_experiment[cols_experiment[3]]), c='b')
+    axes[2].plot(np.array(df_experiment[cols_experiment[0]]), np.array(df_experiment[cols_experiment[3]]), '-o', c='b')
 
 
     axes[2].fill_between(np.array(df_experiment[cols_experiment[0]]),
@@ -345,7 +362,7 @@ def plot_transform(path, df_experiment, df_covariance, cols_experiment, cols_cov
     axes[2].set_ylabel("Z(m)")
     axes[2].grid()
 
-    axes[3].plot(np.array(df_experiment[cols_experiment[0]]), np.array(df_experiment[cols_experiment[-1]]), c='b')
+    axes[3].plot(np.array(df_experiment[cols_experiment[0]]), np.array(df_experiment[cols_experiment[-1]]), '-o', c='b')
 
 
     axes[3].fill_between(np.array(df_experiment[cols_experiment[0]]),
@@ -357,7 +374,9 @@ def plot_transform(path, df_experiment, df_covariance, cols_experiment, cols_cov
 
     axes[3].set_xlabel("Time(s)")
 
-    plt.savefig(path + '/t_That_s.png', bbox_inches='tight')
+    plt.savefig(path + '/t_That_s.svg', format = 'svg', bbox_inches='tight')
+    plt.savefig(path + '/t_That_s.png', format = 'png', bbox_inches='tight')
+
 
     plt.show()
 
@@ -423,7 +442,8 @@ def plot_attitude_temporal_evolution(path, df_ref_rpy, df_opt_rpy, df_covariance
     axes[2].set_xlabel("Time(s)")
 
 
-    plt.savefig(path + '/attitude_t.png', bbox_inches='tight')
+    plt.savefig(path + '/attitude_t.svg', format = 'svg', bbox_inches='tight')
+    plt.savefig(path + '/attitude_t.png', format = 'png', bbox_inches='tight')
 
     plt.show() 
 
@@ -451,7 +471,9 @@ def plot_metrics(path, df_metrics, cols_metrics, t0, title, filename):
 
     axes[1].set_xlabel("Time(s)")
 
-    plt.savefig(path + f'/metrics_{filename}.png', bbox_inches='tight')
+    plt.savefig(path + f'/metrics_{filename}.svg', format = 'svg', bbox_inches='tight')
+    plt.savefig(path + f'/metrics_{filename}.png', format = 'png', bbox_inches='tight')
+
 
     plt.show()
     
@@ -468,9 +490,9 @@ def plot_experiment_data(path_experiment_data, path_folder, sim = "True"):
     target_gt_frame_id = 'uav_gt'
 
     odom_topic_uav = "/uav/odom"
-    odom_topic_agv = "/arco/idmind_motors/odom"
+    odom_topic_agv = "/arco/idmind_motors/odom"              #"/arco/idmind_motors/odom"
 
-    target_odom_origin = np.array([0.25,-0.25,2.0,0.17])
+    target_odom_origin = np.array([0.5,-0.5,2.0,0.124])
     source_odom_origin = np.array([0.0,0.0,0.0,0.0])
 
     if sim == "True":
@@ -656,8 +678,6 @@ def plot_experiment_data(path_experiment_data, path_folder, sim = "True"):
     
     if sim == "True":
 
-        t0 = target_gt_data_df[columns_target_gt_data[0]].iloc[0]
-
         # Plot 3D representation
 
         columns_source_gt_data = [time_data_setpoint, source_gt_x_data, source_gt_y_data, source_gt_z_data, source_gt_q0_data, source_gt_q1_data,source_gt_q2_data, source_gt_q3_data   ]
@@ -675,7 +695,7 @@ def plot_experiment_data(path_experiment_data, path_folder, sim = "True"):
         target_gt_data_df = read_pandas_df(path_experiment_data, columns_target_gt_data, 
                                            timestamp_col=time_data_setpoint, max_timestamp=max_timestamp)
         
-
+        t0 = target_gt_data_df[columns_target_gt_data[0]].iloc[0]
 
         w_That_t_data_df = compute_That_w_t(time_data_setpoint, target_gt_data_df, target_odom_data_df, 
                                                            t_That_s_data_df, columns_target_gt_data, 
@@ -732,20 +752,22 @@ def plot_experiment_data(path_experiment_data, path_folder, sim = "True"):
         plot_metrics(path_folder, metrics_df_data, columns_metrics, t0, "Relative transform errors", "transform")
         plot_metrics(path_folder, metrics_traj_df_data, columns_traj_metrics, t0, "Overall trajectory errors", "trajectory")
 
-        plot_posegraph_temporal(poses_agv, source_gt_data_df, columns_source_gt_data)
-        plot_posegraph_temporal(poses_uav_world, target_gt_data_df, columns_target_gt_data)
-        plot_posegraphs_3d(poses_agv, poses_uav_world, source_gt_data_df, target_gt_data_df, columns_source_gt_data, columns_target_gt_data)
+        plot_posegraph_temporal(path_folder, "posegraph_agv_poses", poses_agv, source_gt_data_df, columns_source_gt_data)
+        plot_posegraph_temporal(path_folder, "posegraph_uav_poses", poses_uav_world, target_gt_data_df, columns_target_gt_data)
+        plot_posegraphs_3d(path_folder, "posegraph_3d_poses", poses_agv, poses_uav_world, source_gt_data_df, target_gt_data_df, columns_source_gt_data, columns_target_gt_data)
 
         rmse_agv_pos, rmse_agv_yaw = compute_rmse(poses_agv, source_gt_data_df, pose_graph_agv_cols, columns_source_gt_data)
         rmse_uav_pos, rmse_uav_yaw = compute_rmse(poses_uav_world, target_gt_data_df, pose_graph_uav_cols, columns_target_gt_data)
         print(f'RMSE AGV ----> Translation: {rmse_agv_pos} m, Rotation: {np.rad2deg(rmse_agv_yaw)} º')
         print(f'RMSE UAV ----> Translation: {rmse_uav_pos} m, Rotation: {np.rad2deg(rmse_uav_yaw)} º')
+
     else:
         t0 = target_odom_data_df[columns_target_odom_data[0]].iloc[0]
-        plot_posegraph_temporal(poses_agv, source_odom_data_df, columns_source_odom_data)
-        plot_posegraph_temporal(poses_uav, target_odom_data_df, columns_target_odom_data)
-        plot_posegraph_temporal(poses_uav_world)
-        plot_posegraphs_3d(poses_agv, poses_uav_world)
+        plot_posegraph_temporal(path_folder, "posegraph_agv_poses", poses_agv, source_odom_data_df, columns_source_odom_data)
+        plot_posegraph_temporal(path_folder, "posegraph_uav_local_poses", poses_uav, target_odom_data_df, columns_target_odom_data)
+        plot_posegraph_temporal(path_folder, "posegraph_uav_world_poses", poses_uav_world)
+        plot_posegraphs_3d_side_by_side(path_folder, "local_posegraph_3d_poses", poses_agv, poses_uav)
+        plot_posegraphs_3d(path_folder, "posegraph_3d_poses", poses_agv, poses_uav_world)
 
     plot_transform(path_folder, t_That_s_data_df, covariance_data_df, columns_t_That_s_data, columns_covariance, t0)
 
@@ -782,10 +804,6 @@ def compute_rmse(pose_graph, gt_df, pose_graph_cols, gt_cols):
     # Merge the two DataFrames based on nearest timestamp.
     merged = pd.merge_asof(pose_graph_df, gt_df, left_on=pose_graph_cols[1], right_on=gt_cols[0], direction="nearest")
 
-    csv_filename = 'abertos_rejuags.csv'
-    merged.to_csv(csv_filename, index=False)
-    print(f"Merged DataFrame exported to {csv_filename}")
-
     gt_yaw = []
     for i in range(len(merged)):
         quat = [merged[gt_cols[4]].iloc[i], merged[gt_cols[5]].iloc[i],
@@ -806,7 +824,7 @@ def compute_rmse(pose_graph, gt_df, pose_graph_cols, gt_cols):
 
     return rmse_pos, rmse_yaw
 
-def plot_posegraphs_3d(poses_agv, poses_uav, gt_agv = None, gt_uav = None, cols_gt_agv = None, cols_gt_uav = None):
+def plot_posegraphs_3d(path, filename, poses_agv, poses_uav, gt_agv = None, gt_uav = None, cols_gt_agv = None, cols_gt_uav = None):
     """
     Plots the 3D trajectories for both AGV and UAV.
 
@@ -868,9 +886,90 @@ def plot_posegraphs_3d(poses_agv, poses_uav, gt_agv = None, gt_uav = None, cols_
     ax.legend()
     plt.title("3D Trajectories of AGV and UAV")
     plt.tight_layout()
+    plt.savefig(path + f'/{filename}.svg', format = 'svg', bbox_inches='tight')
+    plt.savefig(path + f'/{filename}.png', format = 'png', bbox_inches='tight')
+
     plt.show()
 
-def plot_posegraph_temporal(poses, gt = None, cols_gt = None):
+def plot_posegraphs_3d_side_by_side(path, filename, poses_agv, poses_uav, gt_agv=None, gt_uav=None, cols_gt_agv=None, cols_gt_uav=None):
+    """
+    Plots the 3D trajectories for AGV and UAV side-by-side in different subplots.
+
+    Parameters:
+        poses_agv (dict): Dictionary of AGV poses. Each key is an index and each value is a dict with:
+                          - 'timestamp': float (seconds)
+                          - 'position': np.array of shape (3,)
+        poses_uav (dict): Dictionary of UAV poses, with the same structure as poses_agv.
+        gt_agv (np.array, optional): Ground truth data for AGV.
+        gt_uav (np.array, optional): Ground truth data for UAV.
+        cols_gt_agv (list, optional): List of indices to extract columns from gt_agv.
+        cols_gt_uav (list, optional): List of indices to extract columns from gt_uav.
+    """
+    # Process AGV poses.
+    agv_data = []
+    for idx, pose in poses_agv.items():
+        if (pose.get('timestamp') is not None and 
+            pose.get('position') is not None and 
+            not np.isnan(pose['timestamp'])):
+            agv_data.append((pose['timestamp'], pose['position']))
+    if len(agv_data) == 0:
+        print("No valid AGV poses found.")
+        return
+    agv_data.sort(key=lambda x: x[0])
+    agv_positions = np.vstack([pos for _, pos in agv_data])
+    
+    # Process UAV poses.
+    uav_data = []
+    for idx, pose in poses_uav.items():
+        if (pose.get('timestamp') is not None and 
+            pose.get('position') is not None and 
+            not np.isnan(pose['timestamp'])):
+            uav_data.append((pose['timestamp'], pose['position']))
+    if len(uav_data) == 0:
+        print("No valid UAV poses found.")
+        return
+    uav_data.sort(key=lambda x: x[0])
+    uav_positions = np.vstack([pos for _, pos in uav_data])
+    
+    # Create figure with 2 side-by-side 3D subplots.
+    fig = plt.figure(figsize=(14, 6))
+    ax_agv = fig.add_subplot(121, projection='3d')
+    ax_uav = fig.add_subplot(122, projection='3d')
+    
+    # Plot AGV trajectory.
+    ax_agv.plot(agv_positions[:, 0], agv_positions[:, 1], agv_positions[:, 2],
+                '-o', color='red', label='AGV Trajectory')
+    ax_agv.set_title("AGV Trajectory")
+    ax_agv.set_xlabel("X (m)")
+    ax_agv.set_ylabel("Y (m)")
+    ax_agv.set_zlabel("Z (m)")
+    ax_agv.legend()
+    
+    # Optionally, plot ground truth for AGV.
+    if gt_agv is not None and cols_gt_agv is not None:
+        ax_agv.plot(gt_agv[cols_gt_agv[1]], gt_agv[cols_gt_agv[2]], gt_agv[cols_gt_agv[3]], 
+                    c='r', label='AGV Ground Truth', linewidth=2)
+    
+    # Plot UAV trajectory.
+    ax_uav.plot(uav_positions[:, 0], uav_positions[:, 1], uav_positions[:, 2],
+                '-o', color='blue', label='UAV Trajectory')
+    ax_uav.set_title("UAV Trajectory")
+    ax_uav.set_xlabel("X (m)")
+    ax_uav.set_ylabel("Y (m)")
+    ax_uav.set_zlabel("Z (m)")
+    ax_uav.legend()
+    
+    # Optionally, plot ground truth for UAV.
+    if gt_uav is not None and cols_gt_uav is not None:
+        ax_uav.plot(gt_uav[cols_gt_uav[1]], gt_uav[cols_gt_uav[2]], gt_uav[cols_gt_uav[3]],
+                    c='b', label='UAV Ground Truth', linewidth=2)
+    
+    plt.suptitle("3D Trajectories of AGV and UAV")
+    plt.tight_layout()
+    plt.savefig(path + f'/{filename}.png', format='png', bbox_inches='tight')
+    plt.show()
+
+def plot_posegraph_temporal(path, filename, poses, gt = None, cols_gt = None):
     """
     Plots the temporal evolution of x, y, z, and yaw given a dictionary of poses.
     
@@ -918,6 +1017,7 @@ def plot_posegraph_temporal(poses, gt = None, cols_gt = None):
 
     # Plot each variable vs. time
     fig, axs = plt.subplots(4, 1, figsize=(10, 12), sharex=True)
+
     axs[0].plot(timestamps, xs, marker='o', linestyle='-')
     axs[0].set_ylabel('X (m)')
     axs[0].grid()
@@ -953,7 +1053,12 @@ def plot_posegraph_temporal(poses, gt = None, cols_gt = None):
         axs[3].plot(np.array(gt[cols_gt[0]]), gt_yaw, c='r', label = 'target ref')
     
     plt.suptitle("Temporal Evolution of Pose (x, y, z, yaw)")
+    plt.savefig(path + f'/{filename}.svg', format = 'svg', bbox_inches='tight')
+    plt.savefig(path + f'/{filename}.png', format = 'png', bbox_inches='tight')
+
     plt.show()
+
+
 
 def load_pose_graph(df, cols):
     """
