@@ -431,7 +431,7 @@ private:
             double uav_disp = latest.uav_cumulative_distance - oldest.uav_cumulative_distance;
             double agv_disp = latest.agv_cumulative_distance - oldest.agv_cumulative_distance;
 
-            if(uav_disp < 2.0 || agv_disp < 2.0){
+            if(uav_disp < min_traveled_distance_ || agv_disp < min_traveled_distance_){
                 RCLCPP_INFO_THROTTLE(this->get_logger(), *this->get_clock(), 1000, "Insufficient displacement in window. UAV displacement = [%.2f], AGV displacement = [%.2f]",
                 uav_disp, agv_disp);
                 return;

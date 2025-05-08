@@ -59,6 +59,7 @@ fusion_optimization_node:
     icp_type_lidar: 1   #ICP algorithm variant: 2->Generalized ICP, 1->Point to Plane ICP, else -> basic ICP
     icp_type_radar: 2
     radar_history_size: 5 #history of radar keyframes to compare against
+    anchor_prior: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0] #[13.694, 25.197, 0.58, 0.001, 0.001, 3.09] #prior for the AGV anchor node (initial pose wrt global map frame)
     lidar_uav:
         position: [0.21, 0.0, 0.25, 0.0, 0.0, 0.0]  #[0.21, 0.0, 0.25, 0.0, 0.0, 0.0]
     radar_uav:

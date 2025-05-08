@@ -66,6 +66,12 @@ namespace posegraph
         pcl::PointCloud<pcl::PointXYZ>::Ptr lidar_scan;
         pcl::PointCloud<pcl::PointXYZ>::Ptr radar_scan;
         Eigen::Vector3d radar_egovel;
+
+        //Check the timestamps to determine if the measurements are recent enough
+        bool odom_ok;
+        bool lidar_ok;
+        bool radar_ok;
+        bool radar_velocity_ok;
     
          // Constructor to initialize the pointer.
          Measurements() : lidar_scan(new pcl::PointCloud<pcl::PointXYZ>), radar_scan(new pcl::PointCloud<pcl::PointXYZ>) {}
@@ -142,11 +148,8 @@ namespace posegraph
             file.close();
     }
 
-    inline bool isRelativeTransformAvailable(const rclcpp::Time &current_time, const rclcpp::Time &latest_relative_time, const double threshold){
-
-        bool is_recent = (current_time - latest_relative_time).seconds() < threshold;
-
-        return is_recent;
+    inline bool isRecent(const rclcpp::Time &current_time, const rclcpp::Time &measurement_time, const double threshold){
+        return (current_time - measurement_time).seconds() < threshold;
     }
 
     inline bool isNodeFixedKF(const int current_node_id, const int node_id, const int &max_keyframes, const int &min_keyframes){
