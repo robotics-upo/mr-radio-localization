@@ -1,7 +1,7 @@
 eliko_global_opt_node:
   ros__parameters:
     use_sim_time: true
-    odom_topic_agv: "/arco/idmind_motors/odom" #or "/agv/odom" #"/arco/idmind_motors/odom"
+    odom_topic_agv: "/agv/odom" #or "/agv/odom" #"/arco/idmind_motors/odom"
     odom_topic_uav: "/uav/odom"
     opt_timer_rate: 10.0 #Hz
     min_measurements: 50
@@ -9,8 +9,9 @@ eliko_global_opt_node:
     min_traveled_angle: 0.524 #radians
     max_traveled_distance: 10.0 #m
     measurement_stdev: 0.1 #m
-    odom_error_position: 2.0 # %,  meters for every 100 meters traveled
-    odom_error_angle: 2.0 # % degrees for every 100 degrees
+    odom_error_position: 0.0 # %,  meters for every 100 meters traveled
+    odom_error_angle: 0.0 # % degrees for every 100 degrees
+    dll_odom: false #set this to true to subscribe to the poses estimated by dll, instead of odometry
     use_prior: true
     moving_average: true
     moving_average_max_samples: 10
@@ -38,7 +39,7 @@ eliko_global_opt_node:
 fusion_optimization_node:
   ros__parameters:
     use_sim_time: true
-    odom_topic_agv: "/arco/idmind_motors/odom" #or "/agv/odom" #"/arco/idmind_motors/odom"
+    odom_topic_agv: "/agv/odom" #or "/agv/odom" #"/arco/idmind_motors/odom"
     lidar_topic_agv: "/arco/ouster/points"
     radar_topic_agv: "/agv/filtered_pointcloud" #or /arco/radar/PointCloudDetection OR /agv/filtered_pointcloud
     radar_egovel_topic_agv: "/agv/Ego_Vel_Twist"
@@ -53,12 +54,12 @@ fusion_optimization_node:
     max_keyframes: 10
     using_odom: true
     using_lidar: false
-    using_radar: true
+    using_radar: false
     lidar_stdev: 0.05
     radar_stdev: 0.1
-    icp_type_lidar: 1   #ICP algorithm variant: 2->Generalized ICP, 1->Point to Plane ICP, else -> basic ICP
+    icp_type_lidar: 0   #ICP algorithm variant: 2->Generalized ICP, 1->Point to Plane ICP, else -> basic ICP
     icp_type_radar: 2
-    radar_history_size: 5 #history of radar keyframes to compare against
+    radar_history_size: 2 #history of radar keyframes to compare against
     anchor_prior: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0] #[13.694, 25.197, 0.58, 0.001, 0.001, 3.09] #prior for the AGV anchor node (initial pose wrt global map frame)
     lidar_uav:
         position: [0.21, 0.0, 0.25, 0.0, 0.0, 0.0]  #[0.21, 0.0, 0.25, 0.0, 0.0, 0.0]

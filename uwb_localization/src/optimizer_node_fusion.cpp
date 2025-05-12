@@ -338,7 +338,7 @@ private:
         
         // If this is the first message, simply store it and return.
         if (!last_agv_odom_initialized_) {
-            last_agv_odom_msg_ = *msg;
+            last_agv_odom_time_sec_ = rclcpp::Time(msg->header.stamp).seconds();
             last_agv_odom_initialized_ = true;
             last_agv_odom_pose_ = agv_odom_pose_;
             return;
@@ -363,7 +363,7 @@ private:
         }
         agv_odom_covariance_ = cov;
         last_agv_odom_pose_ = agv_odom_pose_;
-        last_agv_odom_msg_ = *msg;
+        last_agv_odom_time_sec_ = rclcpp::Time(msg->header.stamp).seconds();
     
         // RCLCPP_INFO(this->get_logger(), "Updated AGV odometry");
     }
@@ -390,7 +390,7 @@ private:
 
         // If this is the first message, simply store it and return.
         if (!last_uav_odom_initialized_) {
-            last_uav_odom_msg_ = *msg;
+            last_uav_odom_time_sec_ = rclcpp::Time(msg->header.stamp).seconds();
             last_uav_odom_initialized_ = true;
             last_uav_odom_pose_ = uav_odom_pose_;
             return;
@@ -415,7 +415,7 @@ private:
         }
         uav_odom_covariance_ = cov;
         last_uav_odom_pose_ = uav_odom_pose_;
-        last_uav_odom_msg_ = *msg;
+        last_uav_odom_time_sec_ = rclcpp::Time(msg->header.stamp).seconds();
     
         // RCLCPP_INFO(this->get_logger(), "Updated AGV odometry from velocities");
     }
@@ -427,7 +427,7 @@ private:
         if (!msg->data.empty()) {  // Ensure the incoming message has data
             pcl::fromROSMsg(*msg, *agv_lidar_cloud_);
             RCLCPP_DEBUG(this->get_logger(), "AGV cloud received with %zu points", agv_lidar_cloud_->points.size());
-            last_agv_lidar_msg_ = *msg;
+            last_agv_lidar_time_sec_ = rclcpp::Time(msg->header.stamp).seconds();
         } 
 
         else {
@@ -441,7 +441,7 @@ private:
         if (!msg->data.empty()) {  // Ensure the incoming message has data
             pcl::fromROSMsg(*msg, *uav_lidar_cloud_);
             RCLCPP_DEBUG(this->get_logger(), "UAV cloud received with %zu points", uav_lidar_cloud_->points.size());
-            last_uav_lidar_msg_ = *msg;
+            last_uav_lidar_time_sec_ = rclcpp::Time(msg->header.stamp).seconds();
         } 
         
         else {            
@@ -458,7 +458,7 @@ private:
         if (!msg->data.empty()) {  // Ensure the incoming message has data
             pcl::fromROSMsg(*msg, *agv_radar_cloud_);
             RCLCPP_DEBUG(this->get_logger(), "AGV cloud received with %zu points", agv_radar_cloud_->points.size());
-            last_agv_radar_msg_ = *msg;
+            last_agv_radar_time_sec_ = rclcpp::Time(msg->header.stamp).seconds();
         } 
 
         else {
@@ -472,7 +472,7 @@ private:
         if (!msg->data.empty()) {  // Ensure the incoming message has data
             pcl::fromROSMsg(*msg, *uav_radar_cloud_);
             RCLCPP_DEBUG(this->get_logger(), "UAV cloud received with %zu points", uav_radar_cloud_->points.size());
-            last_uav_radar_msg_ = *msg;
+            last_uav_radar_time_sec_ = rclcpp::Time(msg->header.stamp).seconds();
         } 
         
         else {            
@@ -491,6 +491,7 @@ private:
         //Filter bad samples
         if(std::abs(v) > 5.0) return;
         agv_radar_egovel_ = *msg;
+        last_agv_egovel_time_sec_ = rclcpp::Time(msg->header.stamp).seconds();
     }
     
     void UavEgoVelCb(const geometry_msgs::msg::TwistWithCovarianceStamped::SharedPtr msg) {
@@ -502,12 +503,14 @@ private:
         //Filter bad samples
         if(std::abs(v) > 5.0) return;
         uav_radar_egovel_ = *msg;
+        last_uav_egovel_time_sec_ = rclcpp::Time(msg->header.stamp).seconds();
     }
 
      // Callback for receiving the optimized relative transform from the fast node.
     void optimizedTfCb(const geometry_msgs::msg::PoseWithCovarianceStamped::SharedPtr msg) {
 
         latest_relative_pose_ = *msg;
+        last_relative_pose_time_sec_ = rclcpp::Time(msg->header.stamp).seconds();
 
         // If this is the first message, simply store it and return.
         if (!relative_pose_initialized_) {
@@ -615,6 +618,7 @@ private:
     void globalOptCb() {
 
         rclcpp::Time current_time = this->get_clock()->now();
+        double current_time_sec = current_time.seconds();
 
         //********************INITIALIZATIONS*********************** */
         if(!last_agv_odom_initialized_ || !last_uav_odom_initialized_){
@@ -637,10 +641,10 @@ private:
             agv_measurements_.odom_pose = agv_odom_pose_;
             agv_measurements_.odom_covariance = agv_odom_covariance_;
 
-            agv_measurements_.odom_ok  = isRecent(current_time, last_agv_odom_msg_.header.stamp, 1.0);
-            agv_measurements_.lidar_ok = isRecent(current_time, last_agv_lidar_msg_.header.stamp, 1.0);
-            agv_measurements_.radar_ok = isRecent(current_time, last_agv_radar_msg_.header.stamp, 1.0);
-            agv_measurements_.radar_velocity_ok = isRecent(current_time, agv_radar_egovel_.header.stamp, 1.0);
+            agv_measurements_.odom_ok  = current_time_sec - last_agv_odom_time_sec_ <= measurement_sync_thr_;
+            agv_measurements_.lidar_ok = current_time_sec - last_agv_lidar_time_sec_ <= measurement_sync_thr_;
+            agv_measurements_.radar_ok = current_time_sec - last_agv_radar_time_sec_ <= measurement_sync_thr_;
+            agv_measurements_.radar_velocity_ok = current_time_sec - last_agv_egovel_time_sec_ <= measurement_sync_thr_;
 
             RadarMeasurements radar_agv;
             radar_agv.KF_id = agv_id_;
@@ -693,10 +697,10 @@ private:
             uav_measurements_.odom_pose = uav_odom_pose_;
             uav_measurements_.odom_covariance = uav_odom_covariance_;
 
-            uav_measurements_.odom_ok  = isRecent(current_time, last_agv_odom_msg_.header.stamp, 1.0);
-            uav_measurements_.lidar_ok = isRecent(current_time, last_agv_lidar_msg_.header.stamp, 1.0);
-            uav_measurements_.radar_ok = isRecent(current_time, last_agv_radar_msg_.header.stamp, 1.0);
-            uav_measurements_.radar_velocity_ok = isRecent(current_time, agv_radar_egovel_.header.stamp, 1.0);
+            uav_measurements_.odom_ok  = current_time_sec - last_uav_odom_time_sec_ <= measurement_sync_thr_;
+            uav_measurements_.lidar_ok = current_time_sec - last_uav_lidar_time_sec_ <= measurement_sync_thr_;
+            uav_measurements_.radar_ok = current_time_sec - last_uav_radar_time_sec_ <= measurement_sync_thr_;
+            uav_measurements_.radar_velocity_ok = current_time_sec - last_uav_egovel_time_sec_ <= measurement_sync_thr_;
 
             RadarMeasurements radar_uav;
             radar_uav.KF_id = uav_id_;
@@ -789,11 +793,10 @@ private:
             agv_measurements_.odom_pose = agv_odom_pose_;
             agv_measurements_.odom_covariance = agv_odom_covariance_;
 
-            agv_measurements_.odom_ok  = isRecent(current_time, last_agv_odom_msg_.header.stamp, 1.0);
-            agv_measurements_.lidar_ok = isRecent(current_time, last_agv_lidar_msg_.header.stamp, 1.0);
-            agv_measurements_.radar_ok = isRecent(current_time, last_agv_radar_msg_.header.stamp, 1.0);
-            agv_measurements_.radar_velocity_ok = isRecent(current_time, agv_radar_egovel_.header.stamp, 1.0);
-
+            agv_measurements_.odom_ok  = current_time_sec - last_agv_odom_time_sec_ <= measurement_sync_thr_;
+            agv_measurements_.lidar_ok = current_time_sec - last_agv_lidar_time_sec_ <= measurement_sync_thr_;
+            agv_measurements_.radar_ok = current_time_sec - last_agv_radar_time_sec_ <= measurement_sync_thr_;
+            agv_measurements_.radar_velocity_ok = current_time_sec - last_agv_egovel_time_sec_ <= measurement_sync_thr_;
 
             RadarMeasurements radar_agv;
             radar_agv.KF_id = agv_id_;
@@ -927,10 +930,10 @@ private:
             uav_measurements_.odom_pose = uav_odom_pose_;
             uav_measurements_.odom_covariance = uav_odom_covariance_;
 
-            uav_measurements_.odom_ok  = isRecent(current_time, last_uav_odom_msg_.header.stamp, 1.0);
-            uav_measurements_.lidar_ok = true;//isRecent(current_time, last_uav_lidar_stamp_, 1.0);
-            uav_measurements_.radar_ok = true;//isRecent(current_time, last_uav_radar_stamp_, 1.0);
-            uav_measurements_.radar_velocity_ok = isRecent(current_time, uav_radar_egovel_.header.stamp, 1.0);
+            uav_measurements_.odom_ok  = current_time_sec - last_uav_odom_time_sec_ <= measurement_sync_thr_;
+            uav_measurements_.lidar_ok = current_time_sec - last_uav_lidar_time_sec_ <= measurement_sync_thr_;
+            uav_measurements_.radar_ok = current_time_sec - last_uav_radar_time_sec_ <= measurement_sync_thr_;
+            uav_measurements_.radar_velocity_ok = current_time_sec - last_uav_egovel_time_sec_ <= measurement_sync_thr_;
 
             RadarMeasurements radar_uav;
             radar_uav.KF_id = uav_id_;
@@ -1048,8 +1051,8 @@ private:
 
         //////////////// MANAGE ENCOUNTERS ///////////////
 
-        //Check if there is a new relative position available
-        uwb_transform_available_ = relative_pose_initialized_ && isRecent(current_time, latest_relative_pose_.header.stamp, 1.0);
+        //Check if there is a new relative position available //TODO: second condition would be new value has arrived
+        uwb_transform_available_ = relative_pose_initialized_;
 
         if(uwb_transform_available_){
 
@@ -1886,11 +1889,13 @@ private:
     Eigen::Matrix<double, 6, 6> uav_odom_covariance_, agv_odom_covariance_ ;  // UAV and AGV odometry covariance
     Eigen::Quaterniond uav_quaternion_;
 
-    nav_msgs::msg::Odometry last_agv_odom_msg_, last_uav_odom_msg_;
     // last‐seen timestamps for each topic
-    sensor_msgs::msg::PointCloud2 last_agv_lidar_msg_, last_agv_radar_msg_;
-    sensor_msgs::msg::PointCloud2 last_uav_lidar_msg_, last_uav_radar_msg_;
-    rclcpp::Time last_agv_velocity_stamp_, last_uav_velocity_stamp_;
+    double measurement_sync_thr_ = 0.25;
+    double last_agv_odom_time_sec_, last_uav_odom_time_sec_;
+    double last_agv_radar_time_sec_, last_uav_radar_time_sec_;
+    double last_agv_egovel_time_sec_, last_uav_egovel_time_sec_;
+    double last_agv_lidar_time_sec_, last_uav_lidar_time_sec_;
+    double last_relative_pose_time_sec_;
 
     bool last_agv_odom_initialized_, last_uav_odom_initialized_;
     bool relative_pose_initialized_;

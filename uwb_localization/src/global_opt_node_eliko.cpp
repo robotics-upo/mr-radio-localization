@@ -2,6 +2,7 @@
 
 #include <std_msgs/msg/float32.hpp>
 #include <geometry_msgs/msg/transform_stamped.hpp>
+#include <geometry_msgs/msg/pose_stamped.hpp>
 #include <tf2_ros/transform_broadcaster.h>
 #include <tf2_ros/buffer.h>
 #include <tf2_ros/transform_listener.h>
@@ -58,11 +59,22 @@ public:
 
     rclcpp::SensorDataQoS qos; // Use a QoS profile compatible with sensor data
 
-    agv_odom_sub_ = this->create_subscription<nav_msgs::msg::Odometry>(
-    odom_topic_agv_, qos, std::bind(&ElikoGlobalOptNode::agvOdomCb, this, std::placeholders::_1));
-    
-    uav_odom_sub_ = this->create_subscription<nav_msgs::msg::Odometry>(
-        odom_topic_uav_, qos, std::bind(&ElikoGlobalOptNode::uavOdomCb, this, std::placeholders::_1));
+    if(dll_odom_){
+
+        dll_agv_sub_ = this->create_subscription<geometry_msgs::msg::PoseStamped>(
+        "/dll_node_arco/pose_estimation", qos, std::bind(&ElikoGlobalOptNode::agvDllCb, this, std::placeholders::_1));
+
+        dll_uav_sub_ = this->create_subscription<geometry_msgs::msg::PoseStamped>(
+        "/dll_node/pose_estimation", qos, std::bind(&ElikoGlobalOptNode::uavDllCb, this, std::placeholders::_1));
+
+    }
+    else{
+        agv_odom_sub_ = this->create_subscription<nav_msgs::msg::Odometry>(
+        odom_topic_agv_, qos, std::bind(&ElikoGlobalOptNode::agvOdomCb, this, std::placeholders::_1));
+        
+        uav_odom_sub_ = this->create_subscription<nav_msgs::msg::Odometry>(
+            odom_topic_uav_, qos, std::bind(&ElikoGlobalOptNode::uavOdomCb, this, std::placeholders::_1));
+    }
     
     // Create publisher/broadcaster for optimized transformation
     tf_publisher_ = this->create_publisher<geometry_msgs::msg::PoseWithCovarianceStamped>("eliko_optimization_node/optimized_T", 10);
@@ -141,6 +153,7 @@ private:
         this->declare_parameter<double>("measurement_stdev", 0.1);         // in meters
         this->declare_parameter<double>("odom_error_position", 2.0);
         this->declare_parameter<double>("odom_error_angle", 2.0);
+        this->declare_parameter<bool>("dll_odom", true);
         this->declare_parameter<bool>("use_prior", true);
         this->declare_parameter<bool>("moving_average", true);
         this->declare_parameter<int>("moving_average_max_samples", 10);
@@ -175,6 +188,7 @@ private:
         this->get_parameter("measurement_stdev", measurement_stdev_);
         this->get_parameter("odom_error_position", odom_error_distance_);
         this->get_parameter("odom_error_angle", odom_error_angle_);
+        this->get_parameter("dll_odom", dll_odom_);
         this->get_parameter("use_prior", use_prior_);
         this->get_parameter("moving_average", moving_average_);
         this->get_parameter("moving_average_max_samples", moving_average_max_samples_);
@@ -272,7 +286,7 @@ private:
 
         // If this is the first message, simply store it and return.
         if (!last_uav_odom_initialized_) {
-            last_uav_odom_msg_ = *msg;
+            last_uav_odom_time_sec_ = rclcpp::Time(msg->header.stamp).seconds();
             last_uav_odom_initialized_ = true;
             last_uav_odom_pose_ = uav_odom_pose_;
 
@@ -308,7 +322,7 @@ private:
         }
         uav_odom_covariance_ = cov;
         last_uav_odom_pose_ = uav_odom_pose_;
-        last_uav_odom_msg_ = *msg;
+        last_uav_odom_time_sec_ = rclcpp::Time(msg->header.stamp).seconds();
     
     }
 
@@ -336,7 +350,7 @@ private:
 
         // If this is the first message, simply store it and return.
         if (!last_agv_odom_initialized_) {
-            last_agv_odom_msg_ = *msg;
+            last_agv_odom_time_sec_ = rclcpp::Time(msg->header.stamp).seconds();
             last_agv_odom_initialized_ = true;
             last_agv_odom_pose_ = agv_odom_pose_;
 
@@ -373,14 +387,122 @@ private:
         }
         agv_odom_covariance_ = cov;
         last_agv_odom_pose_ = agv_odom_pose_;
-        last_agv_odom_msg_ = *msg;
+        last_agv_odom_time_sec_ = rclcpp::Time(msg->header.stamp).seconds();
     
+    }
+
+    /*********DLL callbacks: used instead of odometry when you want accurate poses **********/
+
+    void agvDllCb(const geometry_msgs::msg::PoseStamped::SharedPtr msg) {
+        Eigen::Quaterniond q(
+            msg->pose.orientation.w,
+            msg->pose.orientation.x,
+            msg->pose.orientation.y,
+            msg->pose.orientation.z
+        );
+        Eigen::Vector3d t(
+            msg->pose.position.x,
+            msg->pose.position.y,
+            msg->pose.position.z
+        );
+        agv_odom_pose_ = Sophus::SE3d(q, t);
+
+        if (!last_agv_odom_initialized_) {
+            last_agv_odom_initialized_ = true;
+            last_agv_odom_pose_ = agv_odom_pose_;
+            last_agv_odom_time_sec_ = rclcpp::Time(msg->header.stamp).seconds();
+            return;
+        }
+
+        for (const auto& kv : anchor_positions_) {
+            const std::string& id = kv.first;
+            const Eigen::Vector3d& offset = kv.second;
+            anchor_positions_odom_[id] = agv_odom_pose_ * offset;
+        }
+
+        auto log = (last_agv_odom_pose_.inverse() * agv_odom_pose_).log();
+        agv_delta_translation_ += log.head<3>().norm();
+        agv_total_translation_ += log.head<3>().norm();
+        agv_delta_rotation_ += log.tail<3>().norm();
+        agv_total_rotation_ += log.tail<3>().norm();
+
+        // No covariance in PoseStamped
+        agv_odom_covariance_ = Eigen::Matrix<double, 6, 6>::Identity() * 1e-6;  // near-zero covariance
+
+        last_agv_odom_pose_ = agv_odom_pose_; 
+        last_agv_odom_time_sec_ = rclcpp::Time(msg->header.stamp).seconds();
+    }
+
+    void uavDllCb(const geometry_msgs::msg::PoseStamped::SharedPtr msg) {
+        Eigen::Quaterniond q(
+            msg->pose.orientation.w,
+            msg->pose.orientation.x,
+            msg->pose.orientation.y,
+            msg->pose.orientation.z
+        );
+        Eigen::Vector3d t(
+            msg->pose.position.x,
+            msg->pose.position.y,
+            msg->pose.position.z
+        );
+        uav_odom_pose_ = Sophus::SE3d(q, t);
+
+        if (!last_uav_odom_initialized_) {
+            last_uav_odom_initialized_ = true;
+            last_uav_odom_pose_ = uav_odom_pose_;
+            last_uav_odom_time_sec_ = rclcpp::Time(msg->header.stamp).seconds();
+
+            return;
+        }
+
+        for (const auto& kv : tag_positions_) {
+            const std::string& id = kv.first;
+            const Eigen::Vector3d& offset = kv.second;
+            tag_positions_odom_[id] = uav_odom_pose_ * offset;
+        }
+
+        auto log = (last_uav_odom_pose_.inverse() * uav_odom_pose_).log();
+        uav_delta_translation_ += log.head<3>().norm();
+        uav_total_translation_ += log.head<3>().norm();
+        uav_delta_rotation_ += log.tail<3>().norm();
+        uav_total_rotation_ += log.tail<3>().norm();
+
+        uav_odom_covariance_ = Eigen::Matrix<double, 6, 6>::Identity() * 1e-6;
+
+        last_uav_odom_pose_ = uav_odom_pose_;
+        last_uav_odom_time_sec_ = rclcpp::Time(msg->header.stamp).seconds();
     }
 
 
 
     void distancesCoordsCb(const eliko_messages::msg::DistancesList::SharedPtr msg) {
-    
+
+        // Check if both odometry messages are initialized
+        if (!last_agv_odom_initialized_ || !last_uav_odom_initialized_) {
+            RCLCPP_WARN(this->get_logger(), "[Eliko global_opt node] Odometry not yet initialized. Skipping UWB data.");
+            return;
+        }
+
+        // Synchronization check: see if we have recent enough odometry
+        double uwb_time_sec = rclcpp::Time(msg->header.stamp).seconds();
+        // Time difference checks
+        double dt_agv = std::abs(uwb_time_sec - last_agv_odom_time_sec_);
+        double dt_uav = std::abs(uwb_time_sec - last_uav_odom_time_sec_);
+
+        double max_age_sec = 0.25;
+        if (dt_agv > max_age_sec || dt_uav > max_age_sec) {
+            RCLCPP_DEBUG(this->get_logger(),
+            "[Eliko global_opt node] Skipping UWB data due to stale odometry.\n"
+            "  - UWB stamp   : %.9f\n"
+            "  - AGV stamp   : %.9f (Δ = %.3fs)\n"
+            "  - UAV stamp   : %.9f (Δ = %.3fs)\n"
+            "  - Max allowed : %.3fs",
+            uwb_time_sec,
+            last_agv_odom_time_sec_, dt_agv,
+            last_uav_odom_time_sec_, dt_uav,
+            max_age_sec);
+            return;
+        }
 
         for (const auto& distance_msg : msg->anchor_distances) {
             UWBMeasurement measurement;
@@ -418,7 +540,7 @@ private:
 
         // Remove very old measurements
         while (!global_measurements_.empty() &&
-              (current_time - global_measurements_.front().timestamp).seconds() > 30.0) {
+              (current_time - global_measurements_.front().timestamp).seconds() > 60.0) {
             global_measurements_.pop_front();
         }
 
@@ -431,7 +553,7 @@ private:
             double uav_disp = latest.uav_cumulative_distance - oldest.uav_cumulative_distance;
             double agv_disp = latest.agv_cumulative_distance - oldest.agv_cumulative_distance;
 
-            if(uav_disp < min_traveled_distance_ || agv_disp < min_traveled_distance_){
+            if(uav_disp < min_traveled_distance_*2.0 || agv_disp < min_traveled_distance_*2.0){
                 RCLCPP_INFO_THROTTLE(this->get_logger(), *this->get_clock(), 1000, "Insufficient displacement in window. UAV displacement = [%.2f], AGV displacement = [%.2f]",
                 uav_disp, agv_disp);
                 return;
@@ -766,6 +888,7 @@ private:
     // Subscriptions
     rclcpp::Subscription<eliko_messages::msg::DistancesList>::SharedPtr eliko_distances_sub_;
     rclcpp::Subscription<nav_msgs::msg::Odometry>::SharedPtr agv_odom_sub_, uav_odom_sub_;
+    rclcpp::Subscription<geometry_msgs::msg::PoseStamped>::SharedPtr dll_agv_sub_, dll_uav_sub_;
 
     // Timers
     rclcpp::TimerBase::SharedPtr global_optimization_timer_;
@@ -785,6 +908,7 @@ private:
     size_t moving_average_max_samples_;
     bool moving_average_;
     bool use_prior_;
+    bool dll_odom_;
     std::unordered_map<std::string, Eigen::Vector3d> anchor_positions_;
     std::unordered_map<std::string, Eigen::Vector3d> tag_positions_;
 
@@ -800,7 +924,7 @@ private:
     Sophus::SE3d uav_odom_pose_, last_uav_odom_pose_;         // Current UAV odometry position and last used for optimization
     Sophus::SE3d agv_odom_pose_, last_agv_odom_pose_;        // Current AGV odometry position and last used for optimization
     Eigen::Matrix<double, 6, 6> uav_odom_covariance_, agv_odom_covariance_;  // UAV odometry covariance
-    nav_msgs::msg::Odometry last_agv_odom_msg_, last_uav_odom_msg_;
+    double last_agv_odom_time_sec_, last_uav_odom_time_sec_;
     bool last_agv_odom_initialized_, last_uav_odom_initialized_;
 
     double uav_delta_translation_, agv_delta_translation_, uav_delta_rotation_, agv_delta_rotation_;
