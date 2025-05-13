@@ -14,6 +14,11 @@
 #include <tf2_ros/transform_broadcaster.h>
 #include <sophus/se3.hpp>
 
+#include <pcl_conversions/pcl_conversions.h>
+#include <pcl/point_cloud.h>
+#include <pcl/point_types.h>
+#include <pcl/common/transforms.h>
+
 
 namespace uwb_localization
 {
@@ -229,6 +234,16 @@ namespace uwb_localization
                     T(1, 0), T(1, 1), T(1, 2), T(1, 3),
                     T(2, 0), T(2, 1), T(2, 2), T(2, 3),
                     T(3, 0), T(3, 1), T(3, 2), T(3, 3));
+    }
+
+    inline pcl::PointCloud<pcl::PointXYZ>::Ptr transformCloudToBody(
+    const pcl::PointCloud<pcl::PointXYZ>::ConstPtr &cloud,
+    const Sophus::SE3d &T_sensor_to_body)
+    {
+        pcl::PointCloud<pcl::PointXYZ>::Ptr output(new pcl::PointCloud<pcl::PointXYZ>);
+        Eigen::Matrix4f T = T_sensor_to_body.matrix().cast<float>();
+        pcl::transformPointCloud(*cloud, *output, T);
+        return output;
     }
 
 }

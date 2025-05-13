@@ -78,6 +78,8 @@ public:
     
     // Create publisher/broadcaster for optimized transformation
     tf_publisher_ = this->create_publisher<geometry_msgs::msg::PoseWithCovarianceStamped>("eliko_optimization_node/optimized_T", 10);
+    tf_ransac_publisher_ = this->create_publisher<geometry_msgs::msg::PoseWithCovarianceStamped>("eliko_optimization_node/ransac_optimized_T", 10);
+
     tf_broadcaster_ = std::make_shared<tf2_ros::TransformBroadcaster>(this);
 
     anchor_positions_odom_ = anchor_positions_;
@@ -151,6 +153,8 @@ private:
         this->declare_parameter<double>("min_traveled_angle", 0.524);      // in radians (0.524 rad ~ 30 deg)
         this->declare_parameter<double>("max_traveled_distance", 10.0);    // in meters
         this->declare_parameter<double>("measurement_stdev", 0.1);         // in meters
+        this->declare_parameter<bool>("use_ransac", true);
+
         this->declare_parameter<double>("odom_error_position", 2.0);
         this->declare_parameter<double>("odom_error_angle", 2.0);
         this->declare_parameter<bool>("dll_odom", true);
@@ -186,6 +190,8 @@ private:
         this->get_parameter("min_traveled_angle", min_traveled_angle_);
         this->get_parameter("max_traveled_distance", max_traveled_distance_);
         this->get_parameter("measurement_stdev", measurement_stdev_);
+        this->get_parameter("use_ransac", use_ransac_);
+
         this->get_parameter("odom_error_position", odom_error_distance_);
         this->get_parameter("odom_error_angle", odom_error_angle_);
         this->get_parameter("dll_odom", dll_odom_);
@@ -207,6 +213,8 @@ private:
         RCLCPP_INFO(this->get_logger(), "  odom_error_angle: %f", odom_error_angle_);
         RCLCPP_INFO(this->get_logger(), "  moving_average: %s", moving_average_ ? "true" : "false");
         RCLCPP_INFO(this->get_logger(), "  use_prior: %s", use_prior_ ? "true" : "false");
+        RCLCPP_INFO(this->get_logger(), "  use_ransac: %s", use_ransac_ ? "true" : "false");
+
         RCLCPP_INFO(this->get_logger(), "  moving_average_max_samples: %zu", moving_average_max_samples_);
     
         // Initialize anchors from parameters.
@@ -553,7 +561,7 @@ private:
             double uav_disp = latest.uav_cumulative_distance - oldest.uav_cumulative_distance;
             double agv_disp = latest.agv_cumulative_distance - oldest.agv_cumulative_distance;
 
-            if(uav_disp < min_traveled_distance_*2.0 || agv_disp < min_traveled_distance_*2.0){
+            if(uav_disp < 2.0 || agv_disp < 2.0){
                 RCLCPP_INFO_THROTTLE(this->get_logger(), *this->get_clock(), 1000, "Insufficient displacement in window. UAV displacement = [%.2f], AGV displacement = [%.2f]",
                 uav_disp, agv_disp);
                 return;
@@ -583,16 +591,6 @@ private:
 
         RCLCPP_WARN(this->get_logger(), "[Eliko global_opt node] Movement UAV = [%.2fm %.2fº], AGV= [%.2fm %.2fº].", uav_delta_translation_, uav_delta_rotation_ * 180.0/M_PI, agv_delta_translation_, agv_delta_rotation_ * 180.0/M_PI);
 
-        //*****************Calculate initial solution ****************************/
-
-        Eigen::MatrixXd M;
-        Eigen::VectorXd b;
-        bool init_prior = false;
-        if(use_prior_){
-            init_prior = solveMartelLinearSystem(global_measurements_, M, b, init_state_, true); //false: use full stack of measurements true: subset of 30% measurements
-        }
-        //*****************Nonlinear WLS refinement with all measurements ****************************/
-
         // Compute odometry covariance based on distance increments from step to step 
         Eigen::Matrix4d predicted_motion_covariance = Eigen::Matrix4d::Zero();
         double predicted_drift_translation = (odom_error_distance_ / 100.0) * (uav_total_translation_ + agv_total_translation_);
@@ -602,6 +600,20 @@ private:
         predicted_motion_covariance(2,2) = std::pow(predicted_drift_translation, 2.0);
         predicted_motion_covariance(3,3) = std::pow(predicted_drift_rotation, 2.0);
 
+        
+        //*****************Calculate initial solution ****************************/
+
+        Eigen::MatrixXd M;
+        Eigen::VectorXd b;
+        bool init_prior = false;
+        if(use_prior_){
+            init_prior = solveMartelLinearSystem(global_measurements_, M, b, init_state_, use_ransac_);
+            if(init_prior){
+                geometry_msgs::msg::PoseWithCovarianceStamped msg = buildPoseMsg(init_state_.pose, init_state_.covariance + predicted_motion_covariance, current_time, uav_odom_frame_id_);
+                tf_ransac_publisher_->publish(msg);
+            }
+        }
+        //*****************Nonlinear WLS refinement with all measurements ****************************/
 
         //Update odom for next optimization
         uav_delta_translation_ = agv_delta_translation_ = uav_delta_rotation_ = agv_delta_rotation_ = 0.0;
@@ -631,49 +643,44 @@ private:
 
     }
 
-// This function builds the linear system M*x = b based on the current measurements window.
-    bool solveMartelLinearSystem(const std::deque<UWBMeasurement>& measurements,
-            Eigen::MatrixXd &M,
-            Eigen::VectorXd &b, State &init_state, bool useSubset = false)
+    double predictDistanceFromMartel(const Eigen::VectorXd& x, const UWBMeasurement& meas)
     {
+        double u = x[0], v = x[1], w = x[2];
+        double cos_alpha = x[3], sin_alpha = x[4];
 
-        std::vector<UWBMeasurement> finalSet;
-        if (useSubset) {
-            // Define a desired subset size (30% of the total set)
-            size_t subsetSize = 0.3 * measurements.size();
-            finalSet = getRandomSubset(measurements, subsetSize);
-        }
-        else {
-            // Use all measurements by copying the deque into a vector.
-            finalSet = std::vector<UWBMeasurement>(measurements.begin(), measurements.end());
-        }
-        // Number of measurements in the window
-        const int numMeasurements = finalSet.size();
-        // Our unknown vector x has 8 elements:
-        // [ u, v, w, cos(α), sin(α), L1, L2, L3 ]
-        M.resize(numMeasurements, 8);
-        b.resize(numMeasurements);
+        Eigen::Matrix3d R;
+        R << cos_alpha, -sin_alpha, 0,
+            sin_alpha,  cos_alpha, 0,
+                0,          0,    1;
 
-        for (int i = 0; i < numMeasurements; ++i) {
-            const UWBMeasurement &meas = finalSet[i];
+        Eigen::Vector3d t(u, v, w);
+        Eigen::Vector3d transformed = R * meas.tag_odom_pose + t;
 
-            // Anchor coordinates from AGV odometry frame
+        return (transformed - meas.anchor_odom_pose).norm();
+    }
+
+    bool buildMartelSystem(const std::vector<UWBMeasurement>& data,
+                       Eigen::MatrixXd &M,
+                       Eigen::VectorXd &b)
+    {
+        const int n = data.size();
+        M.resize(n, 8);
+        b.resize(n);
+
+        for (int i = 0; i < n; ++i) {
+            const auto& meas = data[i];
+
             double x = meas.anchor_odom_pose(0);
             double y = meas.anchor_odom_pose(1);
             double z = meas.anchor_odom_pose(2);
 
-            // Tag coordinates from UAV odometry frame
             double A = meas.tag_odom_pose(0);
             double B = meas.tag_odom_pose(1);
             double C = meas.tag_odom_pose(2);
 
-            // Measured distance (already converted to meters)
             double d = meas.distance;
+            double bi = d * d - (A * A + B * B + C * C) - (x * x + y * y + z * z) + 2.0 * C * z;
 
-            // Compute the right-hand side term b_i (following Equation (14) in the paper)
-            double bi = d*d - (A*A + B*B + C*C) - (x*x + y*y + z*z) + 2.0 * C * z;
-
-            // Compute the coefficients β_i1 through β_i7
             double beta1 = -2.0 * A;
             double beta2 = -2.0 * B;
             double beta3 = 2.0 * z - 2.0 * C;
@@ -682,8 +689,6 @@ private:
             double beta6 = 2.0 * x;
             double beta7 = 2.0 * y;
 
-            // Form the i-th row of the matrix M:
-            // [ β_i1, β_i2, β_i3, β_i4, β_i5, β_i6, β_i7, 1 ]
             M(i, 0) = beta1;
             M(i, 1) = beta2;
             M(i, 2) = beta3;
@@ -696,37 +701,92 @@ private:
             b(i) = bi;
         }
 
-        // Compute the SVD of M
-        Eigen::JacobiSVD<Eigen::MatrixXd> svd(M, Eigen::ComputeThinU | Eigen::ComputeThinV);
-        auto singularValues = svd.singularValues();
+        return true;
+    }
 
-        // Determine effective rank: a common approach is to compare each singular value with tol:
-        int rank = 0;
-        double tol = std::max(M.rows(), M.cols()) * singularValues(0) * std::numeric_limits<double>::epsilon();
-        for (int i = 0; i < singularValues.size(); ++i) {
-            if (singularValues(i) > tol)
-                ++rank;
-        }
 
-        if (rank < 7) {
-            RCLCPP_WARN(this->get_logger(), "Unfavourable configuration: rank(%d) < 7", rank);
-            // Here you may choose to return a default state or handle the situation accordingly.
-            init_state.state = Eigen::Vector4d::Zero();
-            init_state.covariance = Eigen::Matrix4d::Identity();
+    bool solveMartelLinearSystem(const std::deque<UWBMeasurement>& measurements,
+                             Eigen::MatrixXd &M,
+                             Eigen::VectorXd &b,
+                             State &init_state,
+                             bool useRANSAC = true)
+    {
+        if (measurements.size() < 10) {
+            RCLCPP_WARN(rclcpp::get_logger("eliko_global_opt_node"), "Not enough measurements for linear system.");
             return false;
         }
 
-        // Solve for x using the computed SVD (least-squares solution)
+        if (useRANSAC) {
+            size_t num_iters = 100;
+            size_t min_samples = 10;
+            double inlier_threshold = 0.5;  // meters
+            size_t best_inliers = 0;
+            Eigen::Vector4d best_state;
+            double inlier_ratio = 0.0;
+            double min_inlier_ratio = 0.7;
+            bool found_valid = false;
+
+            for (size_t iter = 0; iter < num_iters; ++iter) {
+                std::vector<UWBMeasurement> sample = getRandomSubset(measurements, min_samples);
+
+                Eigen::MatrixXd M_local;
+                Eigen::VectorXd b_local;
+                if (!buildMartelSystem(sample, M_local, b_local)) continue;
+
+                Eigen::JacobiSVD<Eigen::MatrixXd> svd(M_local, Eigen::ComputeThinU | Eigen::ComputeThinV);
+                Eigen::VectorXd solution = svd.solve(b_local);
+
+                size_t inliers = 0;
+                for (const auto& meas : measurements) {
+                    double pred = predictDistanceFromMartel(solution, meas);
+                    double err = std::abs(pred - meas.distance);
+                    if (err < inlier_threshold) inliers++;
+                }
+
+                if (inliers > best_inliers) {
+                    best_inliers = inliers;
+                    inlier_ratio = static_cast<double>(best_inliers) / measurements.size();
+                    best_state = Eigen::Vector4d(solution[0], solution[1], solution[2], std::atan2(solution[4], solution[3]));
+                    if (inlier_ratio > min_inlier_ratio) {
+                        found_valid = true;
+                        break;
+                    }
+                }
+            }
+
+            if (!found_valid) {
+                RCLCPP_WARN(rclcpp::get_logger("eliko_global_opt_node"), "RANSAC failed to find a valid model. Inlier ratio: %f", inlier_ratio);
+                return false;
+            }
+
+            init_state.state = best_state;
+            init_state.pose = buildTransformationSE3(init_state.roll, init_state.pitch, init_state.state);
+            init_state.covariance = Eigen::Matrix4d::Identity()*0.1;  // placeholder
+
+            RCLCPP_INFO_STREAM(rclcpp::get_logger("eliko_global_opt_node"),
+            "RANSAC: selected solution with " << inlier_ratio << " ratio of inliers from "
+            << measurements.size() << " total measurements.\n"
+            << "State: [x=" << best_state[0] << ", y=" << best_state[1]
+            << ", z=" << best_state[2] << ", yaw=" << best_state[3] * 180.0 / M_PI << " deg]");
+            
+            return true;
+        }
+
+        // Else: normal least squares with full data
+        std::vector<UWBMeasurement> finalSet(measurements.begin(), measurements.end());
+        if (!buildMartelSystem(finalSet, M, b)) return false;
+
+        Eigen::JacobiSVD<Eigen::MatrixXd> svd(M, Eigen::ComputeThinU | Eigen::ComputeThinV);
         Eigen::VectorXd solution = svd.solve(b);
-        // The solution vector is:
-        // x = [ u, v, w, cos(α), sin(α), L1, L2, L3 ]ᵀ
 
         init_state.state[0] = solution[0];
         init_state.state[1] = solution[1];
         init_state.state[2] = solution[2];
         init_state.state[3] = std::atan2(solution[4], solution[3]);
 
-        RCLCPP_INFO_STREAM(this->get_logger(), "Initial solution: " << init_state.state.transpose());
+        init_state.covariance = Eigen::Matrix4d::Identity();  // or something more meaningful
+
+        RCLCPP_INFO_STREAM(rclcpp::get_logger("eliko_global_opt_node"), "Initial solution: " << init_state.state.transpose());
 
         return true;
     }
@@ -793,8 +853,9 @@ private:
             ceres::Problem problem;
 
             State opt_state;
-  
-            opt_state = opt_state_;
+
+            if(init_prior) opt_state = init_state_;
+            else opt_state = opt_state_;
             
             //Update the timestamp
             opt_state.timestamp = current_time;
@@ -808,8 +869,9 @@ private:
             problem.SetManifold(opt_state.state.data(), state_manifold);
 
             // Define a robust kernel
-            double huber_threshold = 2.5; // = residuals higher than 2.5 times sigma are outliers
-            ceres::LossFunction* robust_loss = new ceres::HuberLoss(huber_threshold);
+            double loss_threshold = 2.5; // = residuals higher than 2.5 times sigma are outliers
+            // ceres::LossFunction* robust_loss = new ceres::HuberLoss(loss_threshold);
+            ceres::LossFunction* robust_loss = new ceres::CauchyLoss(loss_threshold);
 
             //Set prior using linear initial solution
             if(init_prior){
@@ -836,9 +898,11 @@ private:
             // Configure solver options
             ceres::Solver::Options options;
             options.linear_solver_type = ceres::DENSE_QR; // ceres::SPARSE_NORMAL_CHOLESKY,  ceres::DENSE_QR
-
+            options.num_threads = 4;
+            options.use_nonmonotonic_steps = true;  // Help escape plateaus
+            options.max_num_iterations = 100;
             // Logging
-            //options.minimizer_progress_to_stdout = true;
+            // options.minimizer_progress_to_stdout = true;
 
             // Solve
             ceres::Solver::Summary summary;
@@ -896,7 +960,7 @@ private:
     std::deque<UWBMeasurement> global_measurements_;
     
     // Publishers/Broadcasters
-    rclcpp::Publisher<geometry_msgs::msg::PoseWithCovarianceStamped>::SharedPtr tf_publisher_;
+    rclcpp::Publisher<geometry_msgs::msg::PoseWithCovarianceStamped>::SharedPtr tf_publisher_, tf_ransac_publisher_;
     std::shared_ptr<tf2_ros::TransformBroadcaster> tf_broadcaster_;
 
     //Parameters
@@ -908,6 +972,7 @@ private:
     size_t moving_average_max_samples_;
     bool moving_average_;
     bool use_prior_;
+    bool use_ransac_;
     bool dll_odom_;
     std::unordered_map<std::string, Eigen::Vector3d> anchor_positions_;
     std::unordered_map<std::string, Eigen::Vector3d> tag_positions_;

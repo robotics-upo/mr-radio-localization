@@ -515,6 +515,7 @@ private:
         // If this is the first message, simply store it and return.
         if (!relative_pose_initialized_) {
             relative_pose_initialized_ = true;
+            last_relative_pose_used_time_sec_ = last_relative_pose_time_sec_;
             return;
         }
 
@@ -549,6 +550,10 @@ private:
         bool send_visualization = false,
         const Eigen::Matrix4f* initial_guess = nullptr)
     {
+
+        //Transform the point clouds to the body frame of the robot
+        auto source_scan_body = transformCloudToBody(source_scan, T_source_sensor);
+        auto target_scan_body = transformCloudToBody(target_scan, T_target_sensor);
         // Use the provided initial guess or default to identity.
         Eigen::Matrix4f T_icp = (initial_guess != nullptr) ? *initial_guess : Eigen::Matrix4f::Identity();
 
@@ -556,7 +561,7 @@ private:
         // Run ICP using the member function run_icp.
         pcl::PointCloud<pcl::PointXYZ>::Ptr aligned(new pcl::PointCloud<pcl::PointXYZ>);
         double fitness = 0.0;
-        bool success = run_icp(source_scan, target_scan, aligned, T_icp, sigma, fitness, icp_type, final_hessian);
+        bool success = run_icp(source_scan_body, target_scan_body, aligned, T_icp, sigma, fitness, icp_type, final_hessian);
         if (!success)
             return false;
 
@@ -569,7 +574,15 @@ private:
         constraint.id_begin = id_source;
         constraint.id_end = id_target;
         constraint.t_T_s = T_icp_robot;
-        if(icp_type == 2) constraint.covariance = sigma * reduceCovarianceMatrix(final_hessian.inverse());
+        if(icp_type == 2) {
+            double weight = 1.0 / (fitness * 2 + 1e-6);
+            if(weight >= 3.5) return false;
+            //constraint.covariance = sigma * reduceCovarianceMatrix(final_hessian.inverse());
+            constraint.covariance = (1.0/weight) * Eigen::Matrix4d::Identity();
+            RCLCPP_INFO(this->get_logger(), "GICP converged with score: %f, weight %f", fitness, weight);
+            RCLCPP_INFO(this->get_logger(), "Covariance: ");
+            logTransformationMatrix(constraint.covariance, this->get_logger());
+        }
         else constraint.covariance = computeICPCovariance(source_scan, target_scan, T_icp, sigma);
 
         // Add the constraint to the list.
@@ -1052,11 +1065,12 @@ private:
         //////////////// MANAGE ENCOUNTERS ///////////////
 
         //Check if there is a new relative position available //TODO: second condition would be new value has arrived
-        uwb_transform_available_ = relative_pose_initialized_;
+        uwb_transform_available_ = relative_pose_initialized_ && last_relative_pose_time_sec_ > last_relative_pose_used_time_sec_;
 
         if(uwb_transform_available_){
-
-            RCLCPP_INFO(this->get_logger(), "UWB transform available");
+            
+            // RCLCPP_INFO(this->get_logger(), "UWB transform available");
+            last_relative_pose_used_time_sec_ = last_relative_pose_time_sec_;
 
             latest_relative_pose_SE3_ = transformSE3FromPoseMsg(latest_relative_pose_.pose.pose);
             //Unflatten matrix to extract the covariance
@@ -1396,13 +1410,17 @@ private:
             // reg.addCorrespondenceRejector(rejector);
 
             reg.setRegistrationType("GICP");
-            reg.setNumThreads(4);       
+            reg.setNumThreads(4);
+
+            reg.setRANSACIterations(15);
+            reg.setRANSACOutlierRejectionThreshold(1.5);
+
             reg.setCorrespondenceRandomness(20);
             reg.setMaxCorrespondenceDistance(2.5*pointcloud_sigma);
             // Set the maximum number of iterations (criterion 1)
-            reg.setMaximumIterations (64);
+            reg.setMaximumIterations (100);
             // Set the transformation epsilon (criterion 2)
-            reg.setTransformationEpsilon (0.01);
+            reg.setTransformationEpsilon (1e-6);
             // Set the euclidean distance difference epsilon (criterion 3)
             reg.setEuclideanFitnessEpsilon (2.5*pointcloud_sigma);
 
@@ -1430,9 +1448,7 @@ private:
             // ss.str(""); // Clear the stringstream
             // ss << "--- H ---\n" << reg.getFinalHessian();
             // RCLCPP_INFO(this->get_logger(), "%s", ss.str().c_str());
- 
-            // RCLCPP_INFO(this->get_logger(), "GICP converged with score: %f", fitness);
- 
+  
 
             return true;
         }
@@ -1661,8 +1677,9 @@ private:
         ceres::Manifold* state_manifold_3d = new StateManifold3D();
 
         // Define a robust kernel
-        double huber_threshold = 2.5; // = residuals higher than 2.5 times sigma are outliers
-        ceres::LossFunction* robust_loss = new ceres::HuberLoss(huber_threshold);
+        double loss_threshold = 2.5; // = residuals higher than 2.0 times sigma are outliers
+        // ceres::LossFunction* robust_loss = new ceres::HuberLoss(loss_threshold);
+        ceres::LossFunction* robust_loss = new ceres::CauchyLoss(loss_threshold);
 
         //Add the anchor nodes
         problem.AddParameterBlock(anchor_node_uav_.state.data(), 4);
@@ -1736,6 +1753,8 @@ private:
         ceres::Solver::Options options;
         options.linear_solver_type = ceres::SPARSE_NORMAL_CHOLESKY; // ceres::SPARSE_NORMAL_CHOLESKY,  ceres::DENSE_QR
         options.num_threads = 4;
+        options.use_nonmonotonic_steps = true;  // Help escape plateaus
+        options.max_num_iterations = 100;
         // Logging
         options.minimizer_progress_to_stdout = false;
 
@@ -1895,7 +1914,7 @@ private:
     double last_agv_radar_time_sec_, last_uav_radar_time_sec_;
     double last_agv_egovel_time_sec_, last_uav_egovel_time_sec_;
     double last_agv_lidar_time_sec_, last_uav_lidar_time_sec_;
-    double last_relative_pose_time_sec_;
+    double last_relative_pose_time_sec_, last_relative_pose_used_time_sec_;
 
     bool last_agv_odom_initialized_, last_uav_odom_initialized_;
     bool relative_pose_initialized_;
