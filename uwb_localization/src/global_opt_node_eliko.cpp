@@ -512,6 +512,18 @@ private:
             return;
         }
 
+        if (!global_measurements_.empty()) {
+            const auto& last = global_measurements_.back();
+
+            bool uav_static = std::abs(uav_total_translation_ - last.uav_cumulative_distance) < 1e-2;
+            bool agv_static = std::abs(agv_total_translation_ - last.agv_cumulative_distance) < 1e-2;
+
+            if (uav_static || agv_static) {
+                RCLCPP_DEBUG(this->get_logger(), "[Eliko global_opt node] Skipping UWB data: both AGV and UAV are static.");
+                return;
+            }
+        }
+
         for (const auto& distance_msg : msg->anchor_distances) {
             UWBMeasurement measurement;
             measurement.timestamp = msg->header.stamp;
@@ -519,12 +531,12 @@ private:
             measurement.anchor_id = distance_msg.anchor_sn;
             measurement.distance = distance_msg.distance / 100.0; // Convert to meters
 
+            measurement.uav_cumulative_distance = uav_total_translation_;
+            measurement.agv_cumulative_distance = agv_total_translation_;
+
             //Positions of tags and anchors according to odometry
             measurement.tag_odom_pose = tag_positions_odom_[measurement.tag_id];
             measurement.anchor_odom_pose = anchor_positions_odom_[measurement.anchor_id];
-
-            measurement.uav_cumulative_distance = uav_total_translation_;
-            measurement.agv_cumulative_distance = agv_total_translation_;
 
             global_measurements_.push_back(measurement);
         }
@@ -737,18 +749,42 @@ private:
                 Eigen::VectorXd solution = svd.solve(b_local);
 
                 size_t inliers = 0;
+                std::vector<UWBMeasurement> inlier_set;
+
                 for (const auto& meas : measurements) {
                     double pred = predictDistanceFromMartel(solution, meas);
                     double err = std::abs(pred - meas.distance);
-                    if (err < inlier_threshold) inliers++;
+                    if (err < inlier_threshold) {
+                        inliers++;
+                        inlier_set.push_back(meas);
+                    }
                 }
 
                 if (inliers > best_inliers) {
+
                     best_inliers = inliers;
                     inlier_ratio = static_cast<double>(best_inliers) / measurements.size();
-                    best_state = Eigen::Vector4d(solution[0], solution[1], solution[2], std::atan2(solution[4], solution[3]));
+
                     if (inlier_ratio > min_inlier_ratio) {
+
                         found_valid = true;
+
+                        Eigen::MatrixXd M_final;
+                        Eigen::VectorXd b_final;
+                        buildMartelSystem(inlier_set, M_final, b_final);
+                        Eigen::JacobiSVD<Eigen::MatrixXd> svd(M_final, Eigen::ComputeThinU | Eigen::ComputeThinV);
+                        Eigen::VectorXd refined_solution = svd.solve(b_final);
+                        init_state.state[0] = refined_solution[0];
+                        init_state.state[1] = refined_solution[1];
+                        init_state.state[2] = refined_solution[2];
+                        init_state.state[3] = std::atan2(refined_solution[4], refined_solution[3]);
+                        init_state.pose = buildTransformationSE3(init_state.roll, init_state.pitch, init_state.state);
+                        init_state.covariance = Eigen::Matrix4d::Identity() * 0.1;
+
+                        RCLCPP_INFO_STREAM(rclcpp::get_logger("eliko_global_opt_node"),
+                            "Refined RANSAC solution with " << inlier_set.size() << " inliers:\n"
+                            << "State: [x=" << init_state.state[0] << ", y=" << init_state.state[1]
+                            << ", z=" << init_state.state[2] << ", yaw=" << init_state.state[3] * 180.0 / M_PI << " deg]");
                         break;
                     }
                 }
@@ -758,16 +794,6 @@ private:
                 RCLCPP_WARN(rclcpp::get_logger("eliko_global_opt_node"), "RANSAC failed to find a valid model. Inlier ratio: %f", inlier_ratio);
                 return false;
             }
-
-            init_state.state = best_state;
-            init_state.pose = buildTransformationSE3(init_state.roll, init_state.pitch, init_state.state);
-            init_state.covariance = Eigen::Matrix4d::Identity()*0.1;  // placeholder
-
-            RCLCPP_INFO_STREAM(rclcpp::get_logger("eliko_global_opt_node"),
-            "RANSAC: selected solution with " << inlier_ratio << " ratio of inliers from "
-            << measurements.size() << " total measurements.\n"
-            << "State: [x=" << best_state[0] << ", y=" << best_state[1]
-            << ", z=" << best_state[2] << ", yaw=" << best_state[3] * 180.0 / M_PI << " deg]");
             
             return true;
         }
@@ -900,6 +926,7 @@ private:
             options.linear_solver_type = ceres::DENSE_QR; // ceres::SPARSE_NORMAL_CHOLESKY,  ceres::DENSE_QR
             options.num_threads = 4;
             options.use_nonmonotonic_steps = true;  // Help escape plateaus
+            options.max_consecutive_nonmonotonic_steps = 10; //default is 5
             options.max_num_iterations = 100;
             // Logging
             // options.minimizer_progress_to_stdout = true;

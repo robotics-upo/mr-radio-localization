@@ -110,8 +110,8 @@ private:
         // Build a 6x6 covariance matrix.
         // Here we assume translation and rotation uncertainties are uncorrelated.
         uav_odom_covariance_ = Eigen::Matrix<double, 6, 6>::Zero();
-        double pos_variance = 1e-6;  // Example variance for x, y, z (m^2)
-        double rot_variance = 1e-6;  // Example variance for roll, pitch, yaw (rad^2)
+        double pos_variance = 0.1;  // Example variance for x, y, z (m^2)
+        double rot_variance = 0.1;  // Example variance for roll, pitch, yaw (rad^2)
         uav_odom_covariance_.block<3,3>(0,0) = pos_variance * Eigen::Matrix3d::Identity();
         uav_odom_covariance_.block<3,3>(3,3) = rot_variance * Eigen::Matrix3d::Identity();
     }

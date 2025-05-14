@@ -6,11 +6,11 @@ eliko_global_opt_node:
     opt_timer_rate: 10.0 #Hz
     min_measurements: 50
     min_traveled_distance: 0.5 #m
-    min_traveled_angle: 0.524 #radians
+    min_traveled_angle: 0.262 #radians 15 deg approx
     max_traveled_distance: 10.0 #m
     measurement_stdev: 0.1 #m
-    odom_error_position: 0.0 # %,  meters for every 100 meters traveled
-    odom_error_angle: 0.0 # % degrees for every 100 degrees
+    odom_error_position: 2.0 # %,  meters for every 100 meters traveled
+    odom_error_angle: 2.0 # % degrees for every 100 degrees
     dll_odom: false #set this to true to subscribe to the poses estimated by dll, instead of odometry
     use_prior: true
     use_ransac: true # use ransac algorithm with the prior
@@ -50,9 +50,9 @@ fusion_optimization_node:
     radar_egovel_topic_uav: "/uav/Ego_Vel_Twist"
     opt_timer_rate: 10.0 #Hz
     min_traveled_distance: 0.5 #m
-    min_traveled_angle: 0.524 #radians
+    min_traveled_angle: 0.262 #radians
     min_keyframes: 3
-    max_keyframes: 8
+    max_keyframes: 7
     using_odom: true
     using_lidar: false
     using_radar: true
@@ -62,10 +62,14 @@ fusion_optimization_node:
     icp_type_radar: 2
     radar_history_size: 3 #history of radar keyframes to compare against
     anchor_prior: [13.694, 25.197, 0.58, 0.001, 0.001, 3.09] #[13.694, 25.197, 0.58, 0.001, 0.001, 3.09] #prior for the AGV anchor node (initial pose wrt global map frame)
+    imu_agv: 
+        position: [0.0, 0.0, 0.165, 0.0, 0.0, 0.0] # x y z r p y 
+    imu_uav: 
+        position: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0] # x y z r p y 
     lidar_uav:
         position: [0.21, 0.0, 0.25, 0.0, 0.0, 0.0]  #[0.21, 0.0, 0.25, 0.0, 0.0, 0.0]
     radar_uav:
-        position: [-0.385, -0.02, -0.225, 0.0, 2.417, 3.14]   #OR [-0.385, -0.02, -0.225, 0.0, 2.417, 3.14]
+        position: [-0.385, -0.02, -0.225, 0.0, 0.725, 3.142]    #OR [-0.385, -0.02, -0.225, 0.0, 2.417, 3.14]
     lidar_agv:
         position: [0.3, 0.0, 0.45, 3.14, 0.0, 0.0]  #[0.3, 0.0, 0.45, 3.14, 0.0, 0.0]
     radar_agv:
