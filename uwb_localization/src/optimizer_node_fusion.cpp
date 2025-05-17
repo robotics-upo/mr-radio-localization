@@ -216,8 +216,18 @@ private:
 
         //Initial position of AGV wrt map frame - needed prior for one of the anchors:
         //[tx, ty, tz, roll, pitch, yaw].
-        this->declare_parameter<std::vector<double>>("anchor_prior",
+        this->declare_parameter<std::vector<double>>("agv_anchor_prior",
                         std::vector<double>{13.694, 25.197, 0.22, 0.001, 0.001, 3.04});
+
+        this->declare_parameter<std::vector<double>>("uav_anchor_prior",
+                        std::vector<double>{15.925, 22.978, 0.91, 0.0, 0.0, 0.028});
+
+        //Initial local poses of robots
+        this->declare_parameter<std::vector<double>>("agv_init_pose",
+                        std::vector<double>{0.0, 0.0, 0.0, 0.0, 0.0, 0.0});
+
+        this->declare_parameter<std::vector<double>>("uav_init_pose",
+                        std::vector<double>{0.0, 0.0, 0.0, 0.0, 0.0, 0.0});
 
         // Sensor placement parameters:
         //[tx, ty, tz, roll, pitch, yaw].
@@ -262,11 +272,26 @@ private:
         this->get_parameter("min_keyframes", min_keyframes_);
         this->get_parameter("max_keyframes", max_keyframes_);
         this->get_parameter("radar_history_size", radar_history_size_);
-        std::vector<double> anchor_prior;
-        this->get_parameter("anchor_prior", anchor_prior);
+        std::vector<double> agv_anchor_prior, uav_anchor_prior, uav_init_pose, agv_init_pose;
+        this->get_parameter("agv_anchor_prior", agv_anchor_prior);
+        this->get_parameter("uav_anchor_prior", uav_anchor_prior);
+        this->get_parameter("agv_init_pose", agv_init_pose);
+        this->get_parameter("uav_init_pose", uav_init_pose);
 
-        T_anchor_prior_ = buildTransformationSE3(anchor_prior[3], anchor_prior[4],
-                                  Eigen::Vector4d(anchor_prior[0], anchor_prior[1], anchor_prior[2], anchor_prior[5]));
+        //Set anchor priors
+        T_agv_anchor_prior_ = buildTransformationSE3(agv_anchor_prior[3], agv_anchor_prior[4],
+                                  Eigen::Vector4d(agv_anchor_prior[0], agv_anchor_prior[1], agv_anchor_prior[2], agv_anchor_prior[5]));
+
+
+        T_uav_anchor_prior_ = buildTransformationSE3(uav_anchor_prior[3], uav_anchor_prior[4],
+                                  Eigen::Vector4d(uav_anchor_prior[0], uav_anchor_prior[1], uav_anchor_prior[2], uav_anchor_prior[5]));
+        
+        //Initialize odometry
+        agv_init_pose_ = buildTransformationSE3(agv_init_pose[3], agv_init_pose[4],
+                                  Eigen::Vector4d(agv_init_pose[0], agv_init_pose[1], agv_init_pose[2], agv_init_pose[5]));
+
+        uav_init_pose_ = buildTransformationSE3(uav_init_pose[3], uav_init_pose[4],
+                                  Eigen::Vector4d(uav_init_pose[0], uav_init_pose[1], uav_init_pose[2], uav_init_pose[5]));
 
         // Retrieve sensor placement vectors.
         std::vector<double> lidar_uav_pos, radar_uav_pos, lidar_agv_pos, radar_agv_pos, imu_uav_pos, imu_agv_pos;
@@ -278,7 +303,6 @@ private:
         this->get_parameter("radar_agv.position", radar_agv_pos);
 
         // Now, build sensor transforms.
-
 
         T_uav_imu_ = buildTransformationSE3(imu_uav_pos[3], imu_uav_pos[4],
                                   Eigen::Vector4d(imu_uav_pos[0], imu_uav_pos[1], imu_uav_pos[2], imu_uav_pos[5]));
@@ -313,8 +337,17 @@ private:
         RCLCPP_INFO(this->get_logger(), "  icp_type_lidar: %d, icp_type_radar: %d", icp_type_lidar_, icp_type_radar_);
         RCLCPP_INFO(this->get_logger(), "  radar_history_size: %d", radar_history_size_);
         
-        RCLCPP_INFO(this->get_logger(), "T_anchor_prior:\n");
-        logTransformationMatrix(T_anchor_prior_.matrix(), this->get_logger());
+        RCLCPP_INFO(this->get_logger(), "T_agv_anchor_prior:\n");
+        logTransformationMatrix(T_agv_anchor_prior_.matrix(), this->get_logger());
+
+        RCLCPP_INFO(this->get_logger(), "T_uav_anchor_prior:\n");
+        logTransformationMatrix(T_uav_anchor_prior_.matrix(), this->get_logger());
+
+         RCLCPP_INFO(this->get_logger(), "AGV initial pose:\n");
+        logTransformationMatrix(agv_init_pose_.matrix(), this->get_logger());
+
+        RCLCPP_INFO(this->get_logger(), "UAV initial pose:\n");
+        logTransformationMatrix(uav_init_pose_.matrix(), this->get_logger());
 
         RCLCPP_INFO(this->get_logger(), "T_uav_imu:\n");
         logTransformationMatrix(T_uav_imu_.matrix(), this->get_logger());
@@ -350,7 +383,8 @@ private:
             msg->pose.pose.position.z
         );
         
-        agv_odom_pose_ = Sophus::SE3d(q, t);
+        Sophus::SE3d current_pose(q, t);
+        agv_odom_pose_ = agv_init_pose_ * current_pose;
         
         // If this is the first message, simply store it and return.
         if (!last_agv_odom_initialized_) {
@@ -402,7 +436,8 @@ private:
             msg->pose.pose.position.z
         );
         
-        uav_odom_pose_ = Sophus::SE3d(q, t);
+        Sophus::SE3d current_pose(q, t);
+        uav_odom_pose_ = uav_init_pose_ * current_pose;
 
         // If this is the first message, simply store it and return.
         if (!last_uav_odom_initialized_) {
@@ -701,7 +736,7 @@ private:
 
             //Anchor node for AGV
             anchor_node_agv_.timestamp = current_time;
-            anchor_node_agv_.state = transformSE3ToState(T_anchor_prior_);
+            anchor_node_agv_.state = transformSE3ToState(T_agv_anchor_prior_);
             anchor_node_agv_.roll = 0.0;
             anchor_node_agv_.pitch = 0.0;
             anchor_node_agv_.pose = buildTransformationSE3(anchor_node_agv_.roll, anchor_node_agv_.pitch, anchor_node_agv_.state);
@@ -759,7 +794,7 @@ private:
 
             //Create anchor node for UAV
             anchor_node_uav_.timestamp = current_time;
-            anchor_node_uav_.state = Eigen::Vector4d(0.0, 0.0, 0.0, 0.0);
+            anchor_node_uav_.state = transformSE3ToState(T_uav_anchor_prior_);
             anchor_node_uav_.roll = 0.0;
             anchor_node_uav_.pitch = 0.0;
             anchor_node_uav_.pose = buildTransformationSE3(anchor_node_uav_.roll, anchor_node_uav_.pitch, anchor_node_uav_.state);
@@ -776,7 +811,7 @@ private:
             prior_agv_.covariance = Eigen::Matrix4d::Identity() * 1e-6;
 
             //Anchor AGV prior - we use this one
-            prior_anchor_agv_.pose = T_anchor_prior_;
+            prior_anchor_agv_.pose = T_agv_anchor_prior_;
             prior_anchor_agv_.covariance = Eigen::Matrix4d::Identity() * 1e-6;
 
             //UAV local trajectory prior
@@ -784,8 +819,8 @@ private:
             prior_uav_.covariance = Eigen::Matrix4d::Identity() * 1e-6;
 
             //Anchor UAV prior - not used currently
-            prior_anchor_uav_.pose = init_state_uav_.pose;
-            prior_anchor_uav_.covariance = Eigen::Matrix4d::Identity();
+            prior_anchor_uav_.pose = T_uav_anchor_prior_;
+            prior_anchor_uav_.covariance = Eigen::Matrix4d::Identity() * 1e-6;
 
             graph_initialized_ = true;
 
@@ -856,9 +891,9 @@ private:
                 new_agv.covariance = agv_map_[agv_id_ - 1].covariance;
             }
             else{
-               new_agv.state = Eigen::Vector4d(t_odom_agv[0], t_odom_agv[1], t_odom_agv[2], euler_agv[0]);
-               new_agv.pose = buildTransformationSE3(new_agv.roll, new_agv.pitch, new_agv.state);
-               new_agv.covariance = Eigen::Matrix4d::Identity();
+            new_agv.state = Eigen::Vector4d(t_odom_agv[0], t_odom_agv[1], t_odom_agv[2], euler_agv[0]);
+            new_agv.pose = buildTransformationSE3(new_agv.roll, new_agv.pitch, new_agv.state);
+            new_agv.covariance = Eigen::Matrix4d::Identity();
             }
             
             agv_map_[agv_id_] = new_agv;
@@ -1020,9 +1055,9 @@ private:
                 new_uav.covariance = uav_map_[uav_id_ - 1].covariance;
             }
             else{
-                new_uav.state = Eigen::Vector4d(t_odom_uav[0], t_odom_uav[1], t_odom_uav[2], euler_uav[0]);
-                new_uav.pose = buildTransformationSE3(new_uav.roll, new_uav.pitch, new_uav.state);
-                new_uav.covariance = Eigen::Matrix4d::Identity();
+            new_uav.state = Eigen::Vector4d(t_odom_uav[0], t_odom_uav[1], t_odom_uav[2], euler_uav[0]);
+            new_uav.pose = buildTransformationSE3(new_uav.roll, new_uav.pitch, new_uav.state);
+            new_uav.covariance = Eigen::Matrix4d::Identity();
             }
 
             uav_map_[uav_id_] = new_uav;
@@ -1148,8 +1183,8 @@ private:
 
             double covariance_multiplier = 1.0;
 
-            Sophus::SE3d w_That_target = T_anchor_prior_ * latest_relative_pose_SE3_.inverse() * uav_measurements_.odom_pose;
-            Sophus::SE3d w_That_source = T_anchor_prior_ * agv_measurements_.odom_pose;
+            Sophus::SE3d w_That_target = T_agv_anchor_prior_ * latest_relative_pose_SE3_.inverse() * uav_measurements_.odom_pose;
+            Sophus::SE3d w_That_source = T_agv_anchor_prior_ * agv_measurements_.odom_pose;
             Sophus::SE3d That_t_s = w_That_target.inverse() * w_That_source;
             
             MeasurementConstraint uwb_constraint;
@@ -1670,8 +1705,8 @@ private:
                 State &target = itt->second;
 
                 // Use odometry poses to transform the UWB estimate
-                Sophus::SE3d w_That_target = T_anchor_prior_ * latest_relative_pose_SE3_.inverse() * target.pose;
-                Sophus::SE3d w_That_source = T_anchor_prior_ * source.pose;
+                Sophus::SE3d w_That_target = T_agv_anchor_prior_ * latest_relative_pose_SE3_.inverse() * target.pose;
+                Sophus::SE3d w_That_source = T_agv_anchor_prior_ * source.pose;
                 Sophus::SE3d That_t_s = w_That_target.inverse() * w_That_source;
 
                 // Create cost function
@@ -1777,9 +1812,9 @@ private:
 
         // Add encounter constraints.
         bool encounter_uwb_available = false;
-        //new version, apply constraint to all nodes in window
+        //**new version, apply constraint to all nodes in window**//
         // if(uwb_transform_available_) encounter_uwb_available = addEncounterTrajectoryConstraints(problem, agv_map, uav_map, agv_id_, uav_id_, max_keyframes_, robust_loss);
-        //previous version
+        //**previous version**//
         encounter_uwb_available = addEncounterConstraints(problem, encounter_constraints_uwb, agv_map, uav_map, agv_id_, uav_id_, max_keyframes_, robust_loss);
         bool encounter_pointcloud_available = addEncounterConstraints(problem, encounter_constraints_pointcloud, agv_map, uav_map, agv_id_, uav_id_, max_keyframes_, robust_loss);
 
@@ -1790,9 +1825,14 @@ private:
         }
         else{
             // Add a prior residual for the AGV anchor node (ALWAYS THERE IS AN ANCOUNTER)
-            ceres::CostFunction *prior_cost_anchor = PriorCostFunction::Create(prior_anchor_agv_.pose, 
+            ceres::CostFunction *prior_cost_anchor_agv = PriorCostFunction::Create(prior_anchor_agv_.pose, 
                 anchor_node_agv_.roll, anchor_node_agv_.pitch, prior_anchor_agv_.covariance);
-            problem.AddResidualBlock(prior_cost_anchor, nullptr, anchor_node_agv_.state.data());
+            problem.AddResidualBlock(prior_cost_anchor_agv, nullptr, anchor_node_agv_.state.data());
+
+            //ONLY FOR DEBUGGING
+            // ceres::CostFunction *prior_cost_anchor_uav = PriorCostFunction::Create(prior_anchor_uav_.pose, 
+            //     anchor_node_uav_.roll, anchor_node_uav_.pitch, prior_anchor_uav_.covariance);
+            // problem.AddResidualBlock(prior_cost_anchor_uav, nullptr, anchor_node_uav_.state.data());
         }
         
         // Configure solver options
@@ -1905,7 +1945,7 @@ private:
     Sophus::SE3d T_uav_lidar_, T_agv_lidar_;
     Sophus::SE3d T_uav_radar_, T_agv_radar_;
     Sophus::SE3d T_uav_imu_, T_agv_imu_;
-    Sophus::SE3d T_anchor_prior_;
+    Sophus::SE3d T_agv_anchor_prior_, T_uav_anchor_prior_;
     double pointcloud_lidar_sigma_, pointcloud_radar_sigma_;
     std::string odom_topic_agv_, odom_topic_uav_;
     std::string pcl_topic_lidar_agv_, pcl_topic_lidar_uav_;
@@ -1949,6 +1989,7 @@ private:
 
     Sophus::SE3d uav_odom_pose_, last_uav_odom_pose_;         // Current UAV odometry position and last used for optimization
     Sophus::SE3d agv_odom_pose_, last_agv_odom_pose_;        // Current AGV odometry position and last used for optimization
+    Sophus::SE3d agv_init_pose_, uav_init_pose_;
     Sophus::SE3d uav_lidar_odom_pose_, agv_lidar_odom_pose_;         // Current UAV Lidar odometry position
     Sophus::SE3d uav_radar_odom_pose_, agv_radar_odom_pose_;         // Current UAV Lidar odometry position
 

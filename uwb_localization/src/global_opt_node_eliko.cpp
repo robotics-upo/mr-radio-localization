@@ -93,7 +93,7 @@ public:
     agv_opt_frame_id_ = "agv_opt"; 
 
     //Initial values for state
-    init_state_.state = Eigen::Vector4d(0.0, 0.0, 0.0, 0.0);
+    // init_state_.state = Eigen::Vector4d(0.0, 0.0, 0.0, 0.0);
     init_state_.covariance = Eigen::Matrix4d::Identity(); //
     init_state_.roll = 0.0;
     init_state_.pitch = 0.0;
@@ -159,8 +159,20 @@ private:
         this->declare_parameter<double>("odom_error_angle", 2.0);
         this->declare_parameter<bool>("dll_odom", true);
         this->declare_parameter<bool>("use_prior", true);
+
         this->declare_parameter<bool>("moving_average", true);
         this->declare_parameter<int>("moving_average_max_samples", 10);
+
+        //initial solution
+        this->declare_parameter<std::vector<double>>("init_solution",
+                        std::vector<double>{0.0, 0.0, 0.0, 0.0});
+
+        //Initial local poses of robots
+        this->declare_parameter<std::vector<double>>("agv_init_pose",
+                        std::vector<double>{0.0, 0.0, 0.0, 0.0, 0.0, 0.0});
+
+        this->declare_parameter<std::vector<double>>("uav_init_pose",
+                        std::vector<double>{0.0, 0.0, 0.0, 0.0, 0.0, 0.0});
 
         // Declare the anchors parameters.
         this->declare_parameter<std::string>("anchors.a1.id", "0x0009D6");
@@ -196,8 +208,23 @@ private:
         this->get_parameter("odom_error_angle", odom_error_angle_);
         this->get_parameter("dll_odom", dll_odom_);
         this->get_parameter("use_prior", use_prior_);
+        std::vector<double> init_state, agv_init_pose, uav_init_pose;
+        this->get_parameter("init_solution", init_state);
+        this->get_parameter("agv_init_pose", agv_init_pose);
+        this->get_parameter("uav_init_pose", uav_init_pose);
+
         this->get_parameter("moving_average", moving_average_);
         this->get_parameter("moving_average_max_samples", moving_average_max_samples_);
+
+        //Set initial solution
+        init_state_.state = Eigen::Vector4d(init_state[0], init_state[1], init_state[2], init_state[3]);
+
+        //Initialize odometry
+        agv_init_pose_ = buildTransformationSE3(agv_init_pose[3], agv_init_pose[4],
+                                  Eigen::Vector4d(agv_init_pose[0], agv_init_pose[1], agv_init_pose[2], agv_init_pose[5]));
+
+        uav_init_pose_ = buildTransformationSE3(uav_init_pose[3], uav_init_pose[4],
+                                  Eigen::Vector4d(uav_init_pose[0], uav_init_pose[1], uav_init_pose[2], uav_init_pose[5]));
 
         // Log the read parameters.
         RCLCPP_INFO(this->get_logger(), "Parameters read:");
@@ -214,8 +241,15 @@ private:
         RCLCPP_INFO(this->get_logger(), "  moving_average: %s", moving_average_ ? "true" : "false");
         RCLCPP_INFO(this->get_logger(), "  use_prior: %s", use_prior_ ? "true" : "false");
         RCLCPP_INFO(this->get_logger(), "  use_ransac: %s", use_ransac_ ? "true" : "false");
-
         RCLCPP_INFO(this->get_logger(), "  moving_average_max_samples: %zu", moving_average_max_samples_);
+
+        RCLCPP_INFO(this->get_logger(), "  Init solution: [%f, %f, %f, %f]", init_state_.state[0], init_state_.state[1], init_state_.state[2], init_state_.state[3]);
+
+        RCLCPP_INFO(this->get_logger(), "AGV initial pose:\n");
+        logTransformationMatrix(agv_init_pose_.matrix(), this->get_logger());
+
+        RCLCPP_INFO(this->get_logger(), "UAV initial pose:\n");
+        logTransformationMatrix(uav_init_pose_.matrix(), this->get_logger());
     
         // Initialize anchors from parameters.
         std::string a1_id, a2_id, a3_id, a4_id;
@@ -290,7 +324,8 @@ private:
             msg->pose.pose.position.z
         );
         
-        uav_odom_pose_ = Sophus::SE3d(q, t);
+        Sophus::SE3d current_pose(q, t);
+        uav_odom_pose_ = uav_init_pose_ * current_pose;
 
         // If this is the first message, simply store it and return.
         if (!last_uav_odom_initialized_) {
@@ -353,8 +388,8 @@ private:
             msg->pose.pose.position.z
         );
         
-        agv_odom_pose_ = Sophus::SE3d(q, t);
-
+        Sophus::SE3d current_pose(q, t);
+        agv_odom_pose_ = agv_init_pose_ * current_pose;
 
         // If this is the first message, simply store it and return.
         if (!last_agv_odom_initialized_) {
@@ -518,7 +553,7 @@ private:
             bool uav_static = std::abs(uav_total_translation_ - last.uav_cumulative_distance) < 1e-2;
             bool agv_static = std::abs(agv_total_translation_ - last.agv_cumulative_distance) < 1e-2;
 
-            if (uav_static || agv_static) {
+            if (uav_static && agv_static) {
                 RCLCPP_DEBUG(this->get_logger(), "[Eliko global_opt node] Skipping UWB data: both AGV and UAV are static.");
                 return;
             }
@@ -1015,6 +1050,7 @@ private:
 
     Sophus::SE3d uav_odom_pose_, last_uav_odom_pose_;         // Current UAV odometry position and last used for optimization
     Sophus::SE3d agv_odom_pose_, last_agv_odom_pose_;        // Current AGV odometry position and last used for optimization
+    Sophus::SE3d agv_init_pose_, uav_init_pose_;
     Eigen::Matrix<double, 6, 6> uav_odom_covariance_, agv_odom_covariance_;  // UAV odometry covariance
     double last_agv_odom_time_sec_, last_uav_odom_time_sec_;
     bool last_agv_odom_initialized_, last_uav_odom_initialized_;
