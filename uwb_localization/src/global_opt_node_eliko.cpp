@@ -1,47 +1,46 @@
 #include <rclcpp/rclcpp.hpp>
+
 #include <std_msgs/msg/float32.hpp>
 #include <geometry_msgs/msg/transform_stamped.hpp>
+#include <geometry_msgs/msg/pose_stamped.hpp>
 #include <tf2_ros/transform_broadcaster.h>
-
+#include <tf2_ros/buffer.h>
+#include <tf2_ros/transform_listener.h>
 #include <tf2/LinearMath/Quaternion.h>
 #include <tf2/LinearMath/Matrix3x3.h>
 #include <tf2_geometry_msgs/tf2_geometry_msgs.hpp>
 #include "geometry_msgs/msg/quaternion_stamped.hpp"
+#include "geometry_msgs/msg/vector3_stamped.hpp"
 #include <nav_msgs/msg/odometry.hpp>
 
 #include "eliko_messages/msg/distances_list.hpp"
 #include "eliko_messages/msg/anchor_coords_list.hpp"
 #include "eliko_messages/msg/tag_coords_list.hpp"
-
-#include "eliko_messages/msg/covariance_matrix_with_header.hpp"
+#include "geometry_msgs/msg/pose_with_covariance_stamped.hpp"
 
 #include <ceres/ceres.h>
 #include <ceres/rotation.h>
+#include <ceres/manifold.h>
+
+#include <sophus/se3.hpp>   // Include Sophus for SE(3) operations
+
 #include <Eigen/Core>
 #include <vector>
 #include <sstream>
 #include <deque>
 #include <Eigen/Dense>
+#include <algorithm>
+#include <random>
+
 #include <utility>
 #include <unordered_map>
 #include <chrono>
 
+#include "uwb_localization/utils.hpp"
+#include "uwb_localization/CostFunctions.hpp"
+#include "uwb_localization/manifolds.hpp"
 
-struct Measurement {
-    rclcpp::Time timestamp;   // Time of the measurement
-    std::string tag_id;       // ID of the tag
-    std::string anchor_id;    // ID of the anchor
-    double distance;          // Measured distance (in meters)
-};
-
-
-struct State {
-    Eigen::Vector4d state; // [x,y,z,yaw]
-    Eigen::Matrix4d covariance;
-    double roll;
-    double pitch;
-    rclcpp::Time timestamp;  // e.g., seconds since epoch
-};
+using namespace uwb_localization;
 
 
 class ElikoGlobalOptNode : public rclcpp::Node {
@@ -49,171 +48,584 @@ class ElikoGlobalOptNode : public rclcpp::Node {
 public:
 
     ElikoGlobalOptNode() : Node("eliko_global_opt_node") {
-    
+
+    declareParams();
+
+    getParams();
 
     //Subscribe to distances publisher
     eliko_distances_sub_ = this->create_subscription<eliko_messages::msg::DistancesList>(
-                "/eliko/Distances", 10, std::bind(&ElikoGlobalOptNode::distances_coords_cb_, this, std::placeholders::_1));
+                "/eliko/Distances", 10, std::bind(&ElikoGlobalOptNode::distancesCoordsCb, this, std::placeholders::_1));
+
+    rclcpp::SensorDataQoS qos; // Use a QoS profile compatible with sensor data
+
+    if(dll_odom_){
+
+        dll_agv_sub_ = this->create_subscription<geometry_msgs::msg::PoseStamped>(
+        "/dll_node_arco/pose_estimation", qos, std::bind(&ElikoGlobalOptNode::agvDllCb, this, std::placeholders::_1));
+
+        dll_uav_sub_ = this->create_subscription<geometry_msgs::msg::PoseStamped>(
+        "/dll_node/pose_estimation", qos, std::bind(&ElikoGlobalOptNode::uavDllCb, this, std::placeholders::_1));
+
+    }
+    else{
+        agv_odom_sub_ = this->create_subscription<nav_msgs::msg::Odometry>(
+        odom_topic_agv_, qos, std::bind(&ElikoGlobalOptNode::agvOdomCb, this, std::placeholders::_1));
+        
+        uav_odom_sub_ = this->create_subscription<nav_msgs::msg::Odometry>(
+            odom_topic_uav_, qos, std::bind(&ElikoGlobalOptNode::uavOdomCb, this, std::placeholders::_1));
+    }
     
-    dji_attitude_sub_ = this->create_subscription<geometry_msgs::msg::QuaternionStamped>(
-                "/dji_sdk/attitude", 10, std::bind(&ElikoGlobalOptNode::attitude_cb_, this, std::placeholders::_1));
-
-    uav_odom_sub_ = this->create_subscription<nav_msgs::msg::Odometry>(
-    "/uav/odom", 10, std::bind(&ElikoGlobalOptNode::uav_odom_cb_, this, std::placeholders::_1));
-
-    agv_odom_sub_ = this->create_subscription<nav_msgs::msg::Odometry>(
-    "/agv/odom", 10, std::bind(&ElikoGlobalOptNode::agv_odom_cb_, this, std::placeholders::_1));
-
     // Create publisher/broadcaster for optimized transformation
-    tf_publisher_ = this->create_publisher<geometry_msgs::msg::TransformStamped>("eliko_optimization_node/optimized_T", 10);
+    tf_publisher_ = this->create_publisher<geometry_msgs::msg::PoseWithCovarianceStamped>("eliko_optimization_node/optimized_T", 10);
+    tf_ransac_publisher_ = this->create_publisher<geometry_msgs::msg::PoseWithCovarianceStamped>("eliko_optimization_node/ransac_optimized_T", 10);
+
     tf_broadcaster_ = std::make_shared<tf2_ros::TransformBroadcaster>(this);
 
-    covariance_publisher_ = this->create_publisher<eliko_messages::msg::CovarianceMatrixWithHeader>("eliko_optimization_node/covariance", 10);
+    anchor_positions_odom_ = anchor_positions_;
+    tag_positions_odom_ = tag_positions_;
 
-    global_opt_window_s_ = 5.0; //size of the sliding window in seconds
-    global_opt_rate_s_ = 0.1 * global_opt_window_s_; //rate of the optimization -> displace the window 10% of its size
-    min_measurements_ = (global_opt_window_s_ / 2.0) * 80.0; //min number of measurements for running optimizer
-    measurement_stdev_ = 0.1; //10 cm measurement noise
-    measurement_covariance_ = measurement_stdev_ * measurement_stdev_;
+    agv_odom_frame_id_ = "agv/odom"; //frame of the eliko system-> arco/eliko, for simulation use "agv_gt" for ground truth, "agv_odom" for odometry w/ errors
+    uav_odom_frame_id_ = "uav/odom"; //frame of the UAV system-> uav_gt for ground truth, "uav_odom" for odometry w/ errors
+    agv_body_frame_id_ = "agv/base_link";
+    uav_body_frame_id_ = "uav/base_link";
+    uav_opt_frame_id_ = "uav_opt"; 
+    agv_opt_frame_id_ = "agv_opt"; 
 
-    global_optimization_timer_ = this->create_wall_timer(
-            std::chrono::milliseconds(int(global_opt_rate_s_*1000)), std::bind(&ElikoGlobalOptNode::global_opt_cb_, this));
-
-    // window_opt_timer_ = this->create_wall_timer(
-    //         std::chrono::milliseconds(int(global_opt_window_s_*1000)), std::bind(&ElikoGlobalOptNode::window_opt_cb_, this));
-
-
-    anchor_positions_ = {
-        {"0x0009D6", {-0.32, 0.3, 0.875}}, {"0x0009E5", {0.32, -0.3, 0.875}},
-        {"0x0016FA", {0.32, 0.3, 0.33}}, {"0x0016CF", {-0.32, -0.3, 0.33}}
-    };
-    
-    tag_positions_ = {
-        {"0x001155", {-0.24, -0.24, -0.06}}, {"0x001397", {0.24, 0.24, -0.06}}  //{"0x001155", {-0.24, -0.24, -0.06}}, {"0x001397", {0.24, 0.24, -0.06}}
-    };
-
-    eliko_frame_id_ = "agv_odom"; //frame of the eliko system-> arco/eliko, for simulation use "agv_gt" for ground truth, "agv_odom" for odometry w/ errors
-    uav_frame_id_ = "uav_opt"; //frame of the uav -> "base_link", for simulation use "uav_opt"
-
-   
     //Initial values for state
-    init_state_.state = Eigen::Vector4d(0.0, 0.0, 0.0, 0.0);
+    // init_state_.state = Eigen::Vector4d(0.0, 0.0, 0.0, 0.0);
     init_state_.covariance = Eigen::Matrix4d::Identity(); //
     init_state_.roll = 0.0;
     init_state_.pitch = 0.0;
+    init_state_.pose = buildTransformationSE3(init_state_.roll, init_state_.pitch, init_state_.state);
     init_state_.timestamp = this->get_clock()->now();
 
     opt_state_ = init_state_;
 
-    moving_average_ = true;
-    moving_average_window_s_ = global_opt_window_s_ / 2.0;
+    last_agv_odom_initialized_ = false;
+    last_uav_odom_initialized_ = false;
 
-    // Initialize odometry positions and errors
-    uav_odom_pos_ = Eigen::Vector4d::Zero();
-    uav_last_odom_pos_ = Eigen::Vector4d::Zero();
-    agv_odom_pos_ = Eigen::Vector4d::Zero();
-    agv_last_odom_pos_ = Eigen::Vector4d::Zero();
-    min_traveled_distance_ = 0.25;
-    odom_error_distance_ = 2.0;
-    odom_error_angle_ = 2.0;
+    uav_delta_translation_ = agv_delta_translation_ = uav_delta_rotation_ = agv_delta_rotation_ = 0.0;
+    uav_total_translation_ = agv_total_translation_ = uav_total_rotation_ = agv_total_rotation_ = 0.0;
+
+    total_solves_ = 0;
+    total_solver_time_ = 0.0;
+
+    // Calculate the optimization timer period from opt_timer_rate_ (Hz).
+    double opt_timer_period_s = 1.0 / opt_timer_rate_;
+    global_optimization_timer_ = this->create_wall_timer(
+        std::chrono::milliseconds(int(opt_timer_period_s*1000)), std::bind(&ElikoGlobalOptNode::globalOptCb, this));
     
     RCLCPP_INFO(this->get_logger(), "Eliko Optimization Node initialized.");
   }
 
+  void getMetrics() const
+  {
+    if (total_solves_ > 0)
+    {
+      double avg = total_solver_time_ / static_cast<double>(total_solves_);
+      RCLCPP_INFO(this->get_logger(),
+                  "===== Ceres Solver Metrics =====\n"
+                  "Total runs: %d\n"
+                  "Total time: %.6f s\n"
+                  "Average time per solve: %.6f s",
+                  total_solves_, total_solver_time_, avg);
+    }
+    else
+    {
+      RCLCPP_WARN(this->get_logger(), "No solver runs have completed yet.");
+    }
+  }
+
 private:
 
+    void declareParams() {
 
-    void uav_odom_cb_(const nav_msgs::msg::Odometry::SharedPtr msg) {
-        
-        // Extract quaternion components.
-        double qx = msg->pose.pose.orientation.x;
-        double qy = msg->pose.pose.orientation.y;
-        double qz = msg->pose.pose.orientation.z;
-        double qw = msg->pose.pose.orientation.w;
+         // Declare parameters with their default values.
+        // Topics and update rate
+        this->declare_parameter<std::string>("odom_topic_agv", "/arco/idmind_motors/odom");
+        this->declare_parameter<std::string>("odom_topic_uav", "/uav/odom");
+        this->declare_parameter<double>("opt_timer_rate_", 10.0);  // in Hz
 
-        // Compute yaw.
-        double siny_cosp = 2.0 * (qw * qz + qx * qy);
-        double cosy_cosp = 1.0 - 2.0 * (qy * qy + qz * qz);
-        double yaw = std::atan2(siny_cosp, cosy_cosp);
+        // Optimization settings
+        this->declare_parameter<int>("min_measurements", 50);
+        this->declare_parameter<double>("min_traveled_distance", 0.5);   // in meters
+        this->declare_parameter<double>("min_traveled_angle", 0.524);      // in radians (0.524 rad ~ 30 deg)
+        this->declare_parameter<double>("max_traveled_distance", 10.0);    // in meters
+        this->declare_parameter<double>("measurement_stdev", 0.1);         // in meters
+        this->declare_parameter<bool>("use_ransac", true);
 
-        // Assign the position and yaw to a 4D vector.
-        uav_odom_pos_ = Eigen::Vector4d(
-            msg->pose.pose.position.x,
-            msg->pose.pose.position.y,
-            msg->pose.pose.position.z,
-            yaw
-        );
+        this->declare_parameter<double>("odom_error_position", 2.0);
+        this->declare_parameter<double>("odom_error_angle", 2.0);
+        this->declare_parameter<bool>("dll_odom", true);
+        this->declare_parameter<bool>("use_prior", true);
 
-        // Extract covariance from the odometry message and store it in Eigen::Matrix4d
-        uav_odom_covariance_ = Eigen::Matrix4d::Zero();
-        uav_odom_covariance_(0, 0) = msg->pose.covariance[0];  // x variance
-        uav_odom_covariance_(1, 1) = msg->pose.covariance[7];  // y variance
-        uav_odom_covariance_(2, 2) = msg->pose.covariance[14]; // z variance
-        uav_odom_covariance_(3, 3) = msg->pose.covariance[35]; // yaw variance
+        this->declare_parameter<bool>("moving_average", true);
+        this->declare_parameter<int>("moving_average_max_samples", 10);
+
+        //initial solution
+        this->declare_parameter<std::vector<double>>("init_solution",
+                        std::vector<double>{0.0, 0.0, 0.0, 0.0});
+
+        //Initial local poses of robots
+        this->declare_parameter<std::vector<double>>("agv_init_pose",
+                        std::vector<double>{0.0, 0.0, 0.0, 0.0, 0.0, 0.0});
+
+        this->declare_parameter<std::vector<double>>("uav_init_pose",
+                        std::vector<double>{0.0, 0.0, 0.0, 0.0, 0.0, 0.0});
+
+        // Declare the anchors parameters.
+        this->declare_parameter<std::string>("anchors.a1.id", "0x0009D6");
+        this->declare_parameter<std::vector<double>>("anchors.a1.position", std::vector<double>{-0.32, 0.3, 0.875});
+        this->declare_parameter<std::string>("anchors.a2.id", "0x0009E5");
+        this->declare_parameter<std::vector<double>>("anchors.a2.position", std::vector<double>{0.32, -0.3, 0.875});
+        this->declare_parameter<std::string>("anchors.a3.id", "0x0016FA");
+        this->declare_parameter<std::vector<double>>("anchors.a3.position", std::vector<double>{0.32, 0.3, 0.33});
+        this->declare_parameter<std::string>("anchors.a4.id", "0x0016CF");
+        this->declare_parameter<std::vector<double>>("anchors.a4.position", std::vector<double>{-0.32, -0.3, 0.33});
+
+        // Declare the tags parameters.
+        this->declare_parameter<std::string>("tags.t1.id", "0x001155");
+        this->declare_parameter<std::vector<double>>("tags.t1.position", std::vector<double>{-0.24, -0.24, -0.06});
+        this->declare_parameter<std::string>("tags.t2.id", "0x001397");
+        this->declare_parameter<std::vector<double>>("tags.t2.position", std::vector<double>{0.24, 0.24, -0.06});
     }
 
-    void agv_odom_cb_(const nav_msgs::msg::Odometry::SharedPtr msg) {
-        
-        // Extract quaternion components.
-        double qx = msg->pose.pose.orientation.x;
-        double qy = msg->pose.pose.orientation.y;
-        double qz = msg->pose.pose.orientation.z;
-        double qw = msg->pose.pose.orientation.w;
+    void getParams() {
 
-        // Compute yaw.
-        double siny_cosp = 2.0 * (qw * qz + qx * qy);
-        double cosy_cosp = 1.0 - 2.0 * (qy * qy + qz * qz);
-        double yaw = std::atan2(siny_cosp, cosy_cosp);
+        this->get_parameter("odom_topic_agv", odom_topic_agv_);
+        this->get_parameter("odom_topic_uav", odom_topic_uav_);
+        this->get_parameter("opt_timer_rate_", opt_timer_rate_);
+        this->get_parameter("min_measurements", min_measurements_);
+        this->get_parameter("min_traveled_distance", min_traveled_distance_);
+        // Convert angle from degrees to radians.
+        this->get_parameter("min_traveled_angle", min_traveled_angle_);
+        this->get_parameter("max_traveled_distance", max_traveled_distance_);
+        this->get_parameter("measurement_stdev", measurement_stdev_);
+        this->get_parameter("use_ransac", use_ransac_);
 
-        // Assign the position and yaw to a 4D vector.
-        agv_odom_pos_ = Eigen::Vector4d(
-            msg->pose.pose.position.x,
-            msg->pose.pose.position.y,
-            msg->pose.pose.position.z,
-            yaw
-        );
+        this->get_parameter("odom_error_position", odom_error_distance_);
+        this->get_parameter("odom_error_angle", odom_error_angle_);
+        this->get_parameter("dll_odom", dll_odom_);
+        this->get_parameter("use_prior", use_prior_);
+        std::vector<double> init_state, agv_init_pose, uav_init_pose;
+        this->get_parameter("init_solution", init_state);
+        this->get_parameter("agv_init_pose", agv_init_pose);
+        this->get_parameter("uav_init_pose", uav_init_pose);
 
-        // Extract covariance from the odometry message and store it in Eigen::Matrix4d
-        agv_odom_covariance_ = Eigen::Matrix4d::Zero();
-        agv_odom_covariance_(0, 0) = msg->pose.covariance[0];  // x variance
-        agv_odom_covariance_(1, 1) = msg->pose.covariance[7];  // y variance
-        agv_odom_covariance_(2, 2) = msg->pose.covariance[14]; // z variance
-        agv_odom_covariance_(3, 3) = msg->pose.covariance[35]; // yaw variance
-    }
+        this->get_parameter("moving_average", moving_average_);
+        this->get_parameter("moving_average_max_samples", moving_average_max_samples_);
 
-    void distances_coords_cb_(const eliko_messages::msg::DistancesList::SharedPtr msg) {
+        //Set initial solution
+        init_state_.state = Eigen::Vector4d(init_state[0], init_state[1], init_state[2], init_state[3]);
+
+        //Initialize odometry
+        agv_init_pose_ = buildTransformationSE3(agv_init_pose[3], agv_init_pose[4],
+                                  Eigen::Vector4d(agv_init_pose[0], agv_init_pose[1], agv_init_pose[2], agv_init_pose[5]));
+
+        uav_init_pose_ = buildTransformationSE3(uav_init_pose[3], uav_init_pose[4],
+                                  Eigen::Vector4d(uav_init_pose[0], uav_init_pose[1], uav_init_pose[2], uav_init_pose[5]));
+
+        // Log the read parameters.
+        RCLCPP_INFO(this->get_logger(), "Parameters read:");
+        RCLCPP_INFO(this->get_logger(), "  odom_topic_agv: %s", odom_topic_agv_.c_str());
+        RCLCPP_INFO(this->get_logger(), "  odom_topic_uav: %s", odom_topic_uav_.c_str());
+        RCLCPP_INFO(this->get_logger(), "  opt_timer_rate_: %f Hz", opt_timer_rate_);
+        RCLCPP_INFO(this->get_logger(), "  min_measurements: %zu", min_measurements_);
+        RCLCPP_INFO(this->get_logger(), "  min_traveled_distance: %f m", min_traveled_distance_);
+        RCLCPP_INFO(this->get_logger(), "  min_traveled_angle: %f rad", min_traveled_angle_);
+        RCLCPP_INFO(this->get_logger(), "  max_traveled_distance: %f m", max_traveled_distance_);
+        RCLCPP_INFO(this->get_logger(), "  measurement_stdev: %f m", measurement_stdev_);
+        RCLCPP_INFO(this->get_logger(), "  odom_error_position: %f", odom_error_distance_);
+        RCLCPP_INFO(this->get_logger(), "  odom_error_angle: %f", odom_error_angle_);
+        RCLCPP_INFO(this->get_logger(), "  moving_average: %s", moving_average_ ? "true" : "false");
+        RCLCPP_INFO(this->get_logger(), "  use_prior: %s", use_prior_ ? "true" : "false");
+        RCLCPP_INFO(this->get_logger(), "  use_ransac: %s", use_ransac_ ? "true" : "false");
+        RCLCPP_INFO(this->get_logger(), "  moving_average_max_samples: %zu", moving_average_max_samples_);
+
+        RCLCPP_INFO(this->get_logger(), "  Init solution: [%f, %f, %f, %f]", init_state_.state[0], init_state_.state[1], init_state_.state[2], init_state_.state[3]);
+
+        RCLCPP_INFO(this->get_logger(), "AGV initial pose:\n");
+        logTransformationMatrix(agv_init_pose_.matrix(), this->get_logger());
+
+        RCLCPP_INFO(this->get_logger(), "UAV initial pose:\n");
+        logTransformationMatrix(uav_init_pose_.matrix(), this->get_logger());
     
+        // Initialize anchors from parameters.
+        std::string a1_id, a2_id, a3_id, a4_id;
+        std::vector<double> a1_pos, a2_pos, a3_pos, a4_pos;
+        
+        {
+            // Anchor A1
+            this->get_parameter("anchors.a1.id", a1_id);
+            this->get_parameter("anchors.a1.position", a1_pos);
+            anchor_positions_[a1_id] = Eigen::Vector3d(a1_pos[0], a1_pos[1], a1_pos[2]);
+    
+            this->get_parameter("anchors.a2.id", a2_id);
+            this->get_parameter("anchors.a2.position", a2_pos);
+            anchor_positions_[a2_id] = Eigen::Vector3d(a2_pos[0], a2_pos[1], a2_pos[2]);
+    
+            this->get_parameter("anchors.a3.id", a3_id);
+            this->get_parameter("anchors.a3.position", a3_pos);
+            anchor_positions_[a3_id] = Eigen::Vector3d(a3_pos[0], a3_pos[1], a3_pos[2]);
+    
+            this->get_parameter("anchors.a4.id", a4_id);
+            this->get_parameter("anchors.a4.position", a4_pos);
+            anchor_positions_[a4_id] = Eigen::Vector3d(a4_pos[0], a4_pos[1], a4_pos[2]);
+    
+        }
+    
+        // Initialize anchors from parameters.
+        std::string t1_id, t2_id;
+        std::vector<double> t1_pos, t2_pos;
+    
+        // Initialize tags from parameters.
+        {
+            this->get_parameter("tags.t1.id", t1_id);
+            this->get_parameter("tags.t1.position", t1_pos);
+            tag_positions_[t1_id] = Eigen::Vector3d(t1_pos[0], t1_pos[1], t1_pos[2]);
+    
+            this->get_parameter("tags.t2.id", t2_id);
+            this->get_parameter("tags.t2.position", t2_pos);
+            tag_positions_[t2_id] = Eigen::Vector3d(t2_pos[0], t2_pos[1], t2_pos[2]);
+        }
+
+ 
+        // Log anchors.
+        for (const auto& kv : anchor_positions_) {
+            const auto &id = kv.first;
+            const auto &pos = kv.second;
+            RCLCPP_INFO(this->get_logger(), "  Anchor '%s': [%f, %f, %f]", id.c_str(), pos.x(), pos.y(), pos.z());
+        }
+    
+        // Log tags.
+        for (const auto& kv : tag_positions_) {
+            const auto &id = kv.first;
+            const auto &pos = kv.second;
+            RCLCPP_INFO(this->get_logger(), "  Tag '%s': [%f, %f, %f]", id.c_str(), pos.x(), pos.y(), pos.z());
+        }
+   }
+
+    void uavOdomCb(const nav_msgs::msg::Odometry::SharedPtr msg) {
+        
+        //******************Method 1: Just extract pose from odom*********************//
+
+        Eigen::Quaterniond q(
+            msg->pose.pose.orientation.w,
+            msg->pose.pose.orientation.x,
+            msg->pose.pose.orientation.y,
+            msg->pose.pose.orientation.z
+        );
+        
+        // Create a 3D translation vector.
+        Eigen::Vector3d t(
+            msg->pose.pose.position.x,
+            msg->pose.pose.position.y,
+            msg->pose.pose.position.z
+        );
+        
+        Sophus::SE3d current_pose(q, t);
+        uav_odom_pose_ = uav_init_pose_ * current_pose;
+
+        // If this is the first message, simply store it and return.
+        if (!last_uav_odom_initialized_) {
+            last_uav_odom_time_sec_ = rclcpp::Time(msg->header.stamp).seconds();
+            last_uav_odom_initialized_ = true;
+            last_uav_odom_pose_ = uav_odom_pose_;
+
+            return;
+        }
+
+
+        // Compute the incremental movement of the UAV tag sensors.
+        for (const auto& kv : tag_positions_) {
+            const std::string& tag_id = kv.first;
+            const Eigen::Vector3d& tag_offset = kv.second;  // mounting offset in UAV body frame
+            Eigen::Vector3d current_tag_pos = uav_odom_pose_ * tag_offset;
+            tag_positions_odom_[tag_id] = current_tag_pos;
+        }
+        
+        // Update displacement, via logarithmic map
+        Eigen::Matrix<double, 6, 1> log = (last_uav_odom_pose_.inverse() * uav_odom_pose_).log();
+
+        Eigen::Vector3d delta_translation = log.head<3>(); // first three elements
+        Eigen::Vector3d delta_rotation    = log.tail<3>(); // last three elements
+
+        uav_delta_translation_+=delta_translation.norm();
+        uav_total_translation_+=delta_translation.norm();
+        uav_delta_rotation_+=delta_rotation.norm();  
+        uav_total_rotation_+=delta_rotation.norm(); 
+            
+        //Read covariance
+        Eigen::Matrix<double,6,6> cov;
+        for (int i = 0; i < 6; i++) {
+            for (int j = 0; j < 6; j++) {
+                cov(i, j) = msg->pose.covariance[i * 6 + j];
+            }
+        }
+        uav_odom_covariance_ = cov;
+        last_uav_odom_pose_ = uav_odom_pose_;
+        last_uav_odom_time_sec_ = rclcpp::Time(msg->header.stamp).seconds();
+    
+    }
+
+
+    void agvOdomCb(const nav_msgs::msg::Odometry::SharedPtr msg) {
+        
+        //******************Method 1: Just extract pose from odom*********************//
+
+        Eigen::Quaterniond q(
+            msg->pose.pose.orientation.w,
+            msg->pose.pose.orientation.x,
+            msg->pose.pose.orientation.y,
+            msg->pose.pose.orientation.z
+        );
+        
+        // Create a 3D translation vector.
+        Eigen::Vector3d t(
+            msg->pose.pose.position.x,
+            msg->pose.pose.position.y,
+            msg->pose.pose.position.z
+        );
+        
+        Sophus::SE3d current_pose(q, t);
+        agv_odom_pose_ = agv_init_pose_ * current_pose;
+
+        // If this is the first message, simply store it and return.
+        if (!last_agv_odom_initialized_) {
+            last_agv_odom_time_sec_ = rclcpp::Time(msg->header.stamp).seconds();
+            last_agv_odom_initialized_ = true;
+            last_agv_odom_pose_ = agv_odom_pose_;
+
+            return;
+        }
+
+
+        // Update anchor sensor positions.
+        for (const auto& kv : anchor_positions_) {
+            const std::string& anchor_id = kv.first;
+            const Eigen::Vector3d& anchor_offset = kv.second;  // mounting offset in AGV body frame
+            Eigen::Vector3d current_anchor_pos = agv_odom_pose_ * anchor_offset;
+            anchor_positions_odom_[anchor_id] = current_anchor_pos;
+        }
+        
+        // Update displacement, via logarithmic map
+
+        Eigen::Matrix<double, 6, 1> log = (last_agv_odom_pose_.inverse() * agv_odom_pose_).log();
+
+        Eigen::Vector3d delta_translation = log.head<3>(); // first three elements
+        Eigen::Vector3d delta_rotation    = log.tail<3>(); // last three elements  
+        
+        agv_delta_translation_+= delta_translation.norm();
+        agv_delta_rotation_ += delta_rotation.norm();
+        agv_total_translation_+=delta_translation.norm();
+        agv_total_rotation_+=delta_rotation.norm();
+
+        //Read covariance
+        Eigen::Matrix<double,6,6> cov;
+        for (int i = 0; i < 6; i++) {
+            for (int j = 0; j < 6; j++) {
+                cov(i, j) = msg->pose.covariance[i * 6 + j];
+            }
+        }
+        agv_odom_covariance_ = cov;
+        last_agv_odom_pose_ = agv_odom_pose_;
+        last_agv_odom_time_sec_ = rclcpp::Time(msg->header.stamp).seconds();
+    
+    }
+
+    /*********DLL callbacks: used instead of odometry when you want accurate poses **********/
+
+    void agvDllCb(const geometry_msgs::msg::PoseStamped::SharedPtr msg) {
+        Eigen::Quaterniond q(
+            msg->pose.orientation.w,
+            msg->pose.orientation.x,
+            msg->pose.orientation.y,
+            msg->pose.orientation.z
+        );
+        Eigen::Vector3d t(
+            msg->pose.position.x,
+            msg->pose.position.y,
+            msg->pose.position.z
+        );
+        agv_odom_pose_ = Sophus::SE3d(q, t);
+
+        if (!last_agv_odom_initialized_) {
+            last_agv_odom_initialized_ = true;
+            last_agv_odom_pose_ = agv_odom_pose_;
+            last_agv_odom_time_sec_ = rclcpp::Time(msg->header.stamp).seconds();
+            return;
+        }
+
+        for (const auto& kv : anchor_positions_) {
+            const std::string& id = kv.first;
+            const Eigen::Vector3d& offset = kv.second;
+            anchor_positions_odom_[id] = agv_odom_pose_ * offset;
+        }
+
+        auto log = (last_agv_odom_pose_.inverse() * agv_odom_pose_).log();
+        agv_delta_translation_ += log.head<3>().norm();
+        agv_total_translation_ += log.head<3>().norm();
+        agv_delta_rotation_ += log.tail<3>().norm();
+        agv_total_rotation_ += log.tail<3>().norm();
+
+        // No covariance in PoseStamped
+        agv_odom_covariance_ = Eigen::Matrix<double, 6, 6>::Identity() * 1e-6;  // near-zero covariance
+
+        last_agv_odom_pose_ = agv_odom_pose_; 
+        last_agv_odom_time_sec_ = rclcpp::Time(msg->header.stamp).seconds();
+    }
+
+    void uavDllCb(const geometry_msgs::msg::PoseStamped::SharedPtr msg) {
+        Eigen::Quaterniond q(
+            msg->pose.orientation.w,
+            msg->pose.orientation.x,
+            msg->pose.orientation.y,
+            msg->pose.orientation.z
+        );
+        Eigen::Vector3d t(
+            msg->pose.position.x,
+            msg->pose.position.y,
+            msg->pose.position.z
+        );
+        uav_odom_pose_ = Sophus::SE3d(q, t);
+
+        if (!last_uav_odom_initialized_) {
+            last_uav_odom_initialized_ = true;
+            last_uav_odom_pose_ = uav_odom_pose_;
+            last_uav_odom_time_sec_ = rclcpp::Time(msg->header.stamp).seconds();
+
+            return;
+        }
+
+        for (const auto& kv : tag_positions_) {
+            const std::string& id = kv.first;
+            const Eigen::Vector3d& offset = kv.second;
+            tag_positions_odom_[id] = uav_odom_pose_ * offset;
+        }
+
+        auto log = (last_uav_odom_pose_.inverse() * uav_odom_pose_).log();
+        uav_delta_translation_ += log.head<3>().norm();
+        uav_total_translation_ += log.head<3>().norm();
+        uav_delta_rotation_ += log.tail<3>().norm();
+        uav_total_rotation_ += log.tail<3>().norm();
+
+        uav_odom_covariance_ = Eigen::Matrix<double, 6, 6>::Identity() * 1e-6;
+
+        last_uav_odom_pose_ = uav_odom_pose_;
+        last_uav_odom_time_sec_ = rclcpp::Time(msg->header.stamp).seconds();
+    }
+
+
+
+    void distancesCoordsCb(const eliko_messages::msg::DistancesList::SharedPtr msg) {
+
+        // Check if both odometry messages are initialized
+        if (!last_agv_odom_initialized_ || !last_uav_odom_initialized_) {
+            RCLCPP_WARN(this->get_logger(), "[Eliko global_opt node] Odometry not yet initialized. Skipping UWB data.");
+            return;
+        }
+
+        // Synchronization check: see if we have recent enough odometry
+        double uwb_time_sec = rclcpp::Time(msg->header.stamp).seconds();
+        // Time difference checks
+        double dt_agv = std::abs(uwb_time_sec - last_agv_odom_time_sec_);
+        double dt_uav = std::abs(uwb_time_sec - last_uav_odom_time_sec_);
+
+        double max_age_sec = 0.25;
+        if (dt_agv > max_age_sec || dt_uav > max_age_sec) {
+            RCLCPP_DEBUG(this->get_logger(),
+            "[Eliko global_opt node] Skipping UWB data due to stale odometry.\n"
+            "  - UWB stamp   : %.9f\n"
+            "  - AGV stamp   : %.9f (Δ = %.3fs)\n"
+            "  - UAV stamp   : %.9f (Δ = %.3fs)\n"
+            "  - Max allowed : %.3fs",
+            uwb_time_sec,
+            last_agv_odom_time_sec_, dt_agv,
+            last_uav_odom_time_sec_, dt_uav,
+            max_age_sec);
+            return;
+        }
+
+        if (!global_measurements_.empty()) {
+            const auto& last = global_measurements_.back();
+
+            bool uav_static = std::abs(uav_total_translation_ - last.uav_cumulative_distance) < 1e-2;
+            bool agv_static = std::abs(agv_total_translation_ - last.agv_cumulative_distance) < 1e-2;
+
+            if (uav_static && agv_static) {
+                RCLCPP_DEBUG(this->get_logger(), "[Eliko global_opt node] Skipping UWB data: both AGV and UAV are static.");
+                return;
+            }
+        }
 
         for (const auto& distance_msg : msg->anchor_distances) {
-            Measurement measurement;
+            UWBMeasurement measurement;
             measurement.timestamp = msg->header.stamp;
             measurement.tag_id = distance_msg.tag_sn;
             measurement.anchor_id = distance_msg.anchor_sn;
             measurement.distance = distance_msg.distance / 100.0; // Convert to meters
 
+            measurement.uav_cumulative_distance = uav_total_translation_;
+            measurement.agv_cumulative_distance = agv_total_translation_;
+
+            //Positions of tags and anchors according to odometry
+            measurement.tag_odom_pose = tag_positions_odom_[measurement.tag_id];
+            measurement.anchor_odom_pose = anchor_positions_odom_[measurement.anchor_id];
+
             global_measurements_.push_back(measurement);
         }
 
-        RCLCPP_INFO(this->get_logger(), "[Eliko global node] Added %ld measurements. Total size: %ld", 
-                    msg->anchor_distances.size(), global_measurements_.size());
+        // RCLCPP_INFO(this->get_logger(), "[Eliko global node] Added %ld measurements. Total size: %ld", 
+        //             msg->anchor_distances.size(), global_measurements_.size());
     }
 
 
-    void global_opt_cb_() {
+    void globalOptCb() {
 
         rclcpp::Time current_time = this->get_clock()->now();
 
-        // Remove measurements older than the size of the sliding window
-        while (!global_measurements_.empty() && (current_time - global_measurements_.front().timestamp).seconds() > global_opt_window_s_) {
+        /*Check the robots have moved enough between optimizations*/
+        bool uav_enough_movement = uav_delta_translation_ >= min_traveled_distance_ || uav_delta_rotation_ >= min_traveled_angle_;
+        bool agv_enough_movement = agv_delta_translation_ >= min_traveled_distance_ || agv_delta_rotation_ >= min_traveled_angle_;
+        if (!uav_enough_movement || !agv_enough_movement) {
+            RCLCPP_WARN_THROTTLE(this->get_logger(), *this->get_clock(), 1000, "[Eliko global_opt node] Insufficient movement UAV = [%.2fm %.2fº], AGV= [%.2fm %.2fº]. Skipping optimization.", uav_delta_translation_, uav_delta_rotation_ * 180.0/M_PI, agv_delta_translation_, agv_delta_rotation_ * 180.0/M_PI);
+            return;
+        }
+
+        // Remove very old measurements
+        while (!global_measurements_.empty() &&
+              (current_time - global_measurements_.front().timestamp).seconds() > 60.0) {
             global_measurements_.pop_front();
         }
 
-        // Ensure we have enough measurements
+        //*****************Displace window based on distance traveled ****************************/
+        while (!global_measurements_.empty()) {
+            // Get the oldest measurement.
+            const UWBMeasurement &oldest = global_measurements_.front();
+            const UWBMeasurement &latest = global_measurements_.back();
+             // Compute the net displacement over the window using the stored cumulative distances.
+            double uav_disp = latest.uav_cumulative_distance - oldest.uav_cumulative_distance;
+            double agv_disp = latest.agv_cumulative_distance - oldest.agv_cumulative_distance;
+
+            if(uav_disp < 2.0 || agv_disp < 2.0){
+                RCLCPP_INFO_THROTTLE(this->get_logger(), *this->get_clock(), 1000, "Insufficient displacement in window. UAV displacement = [%.2f], AGV displacement = [%.2f]",
+                uav_disp, agv_disp);
+                return;
+            }
+            // Prune the oldest measurement if the displacement exceeds the threshold.
+            else if (uav_disp > max_traveled_distance_ || agv_disp > max_traveled_distance_) {
+                global_measurements_.pop_front();
+            } else {
+                break;
+            }
+        }
+
+        // Then, check if there are enough measurements remaining.
         if (global_measurements_.size() < min_measurements_) {
             RCLCPP_WARN(this->get_logger(), "[Eliko global_opt node] Not enough data to run optimization.");
             return;
         }
-
 
         // Check for measurements from both tags
         std::unordered_set<std::string> observed_tags;
@@ -221,98 +633,233 @@ private:
             observed_tags.insert(measurement.tag_id);
         }
         if (observed_tags.size() < 2) {
-            RCLCPP_WARN(this->get_logger(), "[Eliko global_opt node] Only one tag available. Optimization skipped.");
-            return;
+            RCLCPP_WARN(this->get_logger(), "[Eliko global_opt node] Only one tag available. YAW IS NOT RELIABLE.");
         }
 
-
-        /*Check enough translation in the window*/
-
-        // Compute UAV translational distance using only [x, y, z]
-        double uav_distance = (uav_odom_pos_.head<3>() - uav_last_odom_pos_.head<3>()).norm();
-        // Compute UAV yaw difference and normalize it to [-pi, pi]
-        double uav_angle = normalize_angle(uav_odom_pos_[3] - uav_last_odom_pos_[3]);
-
-        // Similarly, compute AGV translation using only [x, y, z]
-        double agv_distance = (agv_odom_pos_.head<3>() - agv_last_odom_pos_.head<3>()).norm();
-
-
-        if (uav_distance < min_traveled_distance_ || agv_distance < min_traveled_distance_) {
-            RCLCPP_WARN(this->get_logger(), "[Eliko global_opt node] Insufficient movement by UAV or AGV. Skipping optimization.");
-            return;
-        }
+        RCLCPP_WARN(this->get_logger(), "[Eliko global_opt node] Movement UAV = [%.2fm %.2fº], AGV= [%.2fm %.2fº].", uav_delta_translation_, uav_delta_rotation_ * 180.0/M_PI, agv_delta_translation_, agv_delta_rotation_ * 180.0/M_PI);
 
         // Compute odometry covariance based on distance increments from step to step 
         Eigen::Matrix4d predicted_motion_covariance = Eigen::Matrix4d::Zero();
-        predicted_motion_covariance(0,0) = std::pow((2.0 * odom_error_distance_ / 100.0) * uav_distance, 2.0);
-        predicted_motion_covariance(1,1) = std::pow((2.0 * odom_error_distance_ / 100.0) * uav_distance, 2.0);
-        predicted_motion_covariance(2,2) = std::pow((2.0 * odom_error_distance_ / 100.0) * uav_distance, 2.0);
-        predicted_motion_covariance(3,3) = std::pow(((2.0 * odom_error_angle_ / 100.0) * M_PI / 180.0) * uav_angle, 2.0);
+        double predicted_drift_translation = (odom_error_distance_ / 100.0) * (uav_total_translation_ + agv_total_translation_);
+        double predicted_drift_rotation = (odom_error_angle_ / 100.0) * (uav_total_rotation_ + agv_total_rotation_);
+        predicted_motion_covariance(0,0) = std::pow(predicted_drift_translation, 2.0);
+        predicted_motion_covariance(1,1) = std::pow(predicted_drift_translation, 2.0);
+        predicted_motion_covariance(2,2) = std::pow(predicted_drift_translation, 2.0);
+        predicted_motion_covariance(3,3) = std::pow(predicted_drift_rotation, 2.0);
+
+        
+        //*****************Calculate initial solution ****************************/
+
+        Eigen::MatrixXd M;
+        Eigen::VectorXd b;
+        bool init_prior = false;
+        if(use_prior_){
+            init_prior = solveMartelLinearSystem(global_measurements_, M, b, init_state_, use_ransac_);
+            if(init_prior){
+                geometry_msgs::msg::PoseWithCovarianceStamped msg = buildPoseMsg(init_state_.pose, init_state_.covariance + predicted_motion_covariance, current_time, uav_odom_frame_id_);
+                tf_ransac_publisher_->publish(msg);
+            }
+        }
+        //*****************Nonlinear WLS refinement with all measurements ****************************/
+
+        //Update odom for next optimization
+        uav_delta_translation_ = agv_delta_translation_ = uav_delta_rotation_ = agv_delta_rotation_ = 0.0;
 
         //Optimize    
         RCLCPP_INFO(this->get_logger(), "[Eliko global_opt node] Optimizing trajectory of %ld measurements", global_measurements_.size());
         //Update transforms after convergence
-        if(run_optimization(current_time, predicted_motion_covariance)){
-        
+        if(runOptimization(current_time, predicted_motion_covariance, init_prior)){
+            
             if(moving_average_){
                 // /*Run moving average*/
-                auto smoothed_state = moving_average(opt_state_);
+                auto smoothed_state = movingAverage(opt_state_, moving_average_max_samples_);
                 //Update for initial estimation of following step
                 opt_state_.state = smoothed_state;
             }
 
-            Eigen::Matrix4d That_ts = build_transformation_matrix(opt_state_.roll, opt_state_.pitch, opt_state_.state);
+            opt_state_.pose = buildTransformationSE3(opt_state_.roll, opt_state_.pitch, opt_state_.state);
+            
+            geometry_msgs::msg::PoseWithCovarianceStamped msg = buildPoseMsg(opt_state_.pose, opt_state_.covariance + predicted_motion_covariance, opt_state_.timestamp, uav_odom_frame_id_);
+            tf_publisher_->publish(msg);
 
-            publish_transform(That_ts, opt_state_.timestamp);
-            publish_covariance_with_timestamp(opt_state_.covariance + predicted_motion_covariance, opt_state_.timestamp);
-            //publish_covariance_with_timestamp(opt_state_.covariance, opt_state_.timestamp);
-
-            //Update odom for next optimization
-            uav_last_odom_pos_ = uav_odom_pos_;
-            agv_last_odom_pos_ = agv_odom_pos_;
         }
 
         else{
             RCLCPP_INFO(this->get_logger(), "[Eliko global_opt node] Optimizer did not converge");
         }
-        
 
     }
 
-    void window_opt_cb_() {
-        
-        init_state_ = opt_state_; 
+    double predictDistanceFromMartel(const Eigen::VectorXd& x, const UWBMeasurement& meas)
+    {
+        double u = x[0], v = x[1], w = x[2];
+        double cos_alpha = x[3], sin_alpha = x[4];
 
+        Eigen::Matrix3d R;
+        R << cos_alpha, -sin_alpha, 0,
+            sin_alpha,  cos_alpha, 0,
+                0,          0,    1;
+
+        Eigen::Vector3d t(u, v, w);
+        Eigen::Vector3d transformed = R * meas.tag_odom_pose + t;
+
+        return (transformed - meas.anchor_odom_pose).norm();
+    }
+
+    bool buildMartelSystem(const std::vector<UWBMeasurement>& data,
+                       Eigen::MatrixXd &M,
+                       Eigen::VectorXd &b)
+    {
+        const int n = data.size();
+        M.resize(n, 8);
+        b.resize(n);
+
+        for (int i = 0; i < n; ++i) {
+            const auto& meas = data[i];
+
+            double x = meas.anchor_odom_pose(0);
+            double y = meas.anchor_odom_pose(1);
+            double z = meas.anchor_odom_pose(2);
+
+            double A = meas.tag_odom_pose(0);
+            double B = meas.tag_odom_pose(1);
+            double C = meas.tag_odom_pose(2);
+
+            double d = meas.distance;
+            double bi = d * d - (A * A + B * B + C * C) - (x * x + y * y + z * z) + 2.0 * C * z;
+
+            double beta1 = -2.0 * A;
+            double beta2 = -2.0 * B;
+            double beta3 = 2.0 * z - 2.0 * C;
+            double beta4 = -2.0 * (A * x + B * y);
+            double beta5 = 2.0 * (A * y - B * x);
+            double beta6 = 2.0 * x;
+            double beta7 = 2.0 * y;
+
+            M(i, 0) = beta1;
+            M(i, 1) = beta2;
+            M(i, 2) = beta3;
+            M(i, 3) = beta4;
+            M(i, 4) = beta5;
+            M(i, 5) = beta6;
+            M(i, 6) = beta7;
+            M(i, 7) = 1.0;
+
+            b(i) = bi;
+        }
+
+        return true;
     }
 
 
-
-    void attitude_cb_(const geometry_msgs::msg::QuaternionStamped::SharedPtr msg) {
-
-            const auto& q = msg->quaternion;
-            // Convert the quaternion to roll, pitch, yaw
-            tf2::Quaternion tf_q(q.x, q.y, q.z, q.w);
-            tf2::Matrix3x3 m(tf_q);
-            double yaw;
-            m.getRPY(opt_state_.roll, opt_state_.pitch, yaw);  // Get roll and pitch, but ignore yaw as we optimize it separately
+    bool solveMartelLinearSystem(const std::deque<UWBMeasurement>& measurements,
+                             Eigen::MatrixXd &M,
+                             Eigen::VectorXd &b,
+                             State &init_state,
+                             bool useRANSAC = true)
+    {
+        if (measurements.size() < 10) {
+            RCLCPP_WARN(rclcpp::get_logger("eliko_global_opt_node"), "Not enough measurements for linear system.");
+            return false;
         }
 
-        // Normalize an angle to the range [-pi, pi]
-    double normalize_angle(double angle) {
-        while (angle > M_PI) angle -= 2.0 * M_PI;
-        while (angle < -M_PI) angle += 2.0 * M_PI;
-        return angle;
+        if (useRANSAC) {
+            size_t num_iters = 100;
+            size_t min_samples = 10;
+            double inlier_threshold = 0.5;  // meters
+            size_t best_inliers = 0;
+            Eigen::Vector4d best_state;
+            double inlier_ratio = 0.0;
+            double min_inlier_ratio = 0.7;
+            bool found_valid = false;
+
+            for (size_t iter = 0; iter < num_iters; ++iter) {
+                std::vector<UWBMeasurement> sample = getRandomSubset(measurements, min_samples);
+
+                Eigen::MatrixXd M_local;
+                Eigen::VectorXd b_local;
+                if (!buildMartelSystem(sample, M_local, b_local)) continue;
+
+                Eigen::JacobiSVD<Eigen::MatrixXd> svd(M_local, Eigen::ComputeThinU | Eigen::ComputeThinV);
+                Eigen::VectorXd solution = svd.solve(b_local);
+
+                size_t inliers = 0;
+                std::vector<UWBMeasurement> inlier_set;
+
+                for (const auto& meas : measurements) {
+                    double pred = predictDistanceFromMartel(solution, meas);
+                    double err = std::abs(pred - meas.distance);
+                    if (err < inlier_threshold) {
+                        inliers++;
+                        inlier_set.push_back(meas);
+                    }
+                }
+
+                if (inliers > best_inliers) {
+
+                    best_inliers = inliers;
+                    inlier_ratio = static_cast<double>(best_inliers) / measurements.size();
+
+                    if (inlier_ratio > min_inlier_ratio) {
+
+                        found_valid = true;
+
+                        Eigen::MatrixXd M_final;
+                        Eigen::VectorXd b_final;
+                        buildMartelSystem(inlier_set, M_final, b_final);
+                        Eigen::JacobiSVD<Eigen::MatrixXd> svd(M_final, Eigen::ComputeThinU | Eigen::ComputeThinV);
+                        Eigen::VectorXd refined_solution = svd.solve(b_final);
+                        init_state.state[0] = refined_solution[0];
+                        init_state.state[1] = refined_solution[1];
+                        init_state.state[2] = refined_solution[2];
+                        init_state.state[3] = std::atan2(refined_solution[4], refined_solution[3]);
+                        init_state.pose = buildTransformationSE3(init_state.roll, init_state.pitch, init_state.state);
+                        init_state.covariance = Eigen::Matrix4d::Identity() * 0.1;
+
+                        RCLCPP_INFO_STREAM(rclcpp::get_logger("eliko_global_opt_node"),
+                            "Refined RANSAC solution with " << inlier_set.size() << " inliers:\n"
+                            << "State: [x=" << init_state.state[0] << ", y=" << init_state.state[1]
+                            << ", z=" << init_state.state[2] << ", yaw=" << init_state.state[3] * 180.0 / M_PI << " deg]");
+                        break;
+                    }
+                }
+            }
+
+            if (!found_valid) {
+                RCLCPP_WARN(rclcpp::get_logger("eliko_global_opt_node"), "RANSAC failed to find a valid model. Inlier ratio: %f", inlier_ratio);
+                return false;
+            }
+            
+            return true;
         }
 
+        // Else: normal least squares with full data
+        std::vector<UWBMeasurement> finalSet(measurements.begin(), measurements.end());
+        if (!buildMartelSystem(finalSet, M, b)) return false;
 
-    Eigen::Vector4d moving_average(const State &sample) {
+        Eigen::JacobiSVD<Eigen::MatrixXd> svd(M, Eigen::ComputeThinU | Eigen::ComputeThinV);
+        Eigen::VectorXd solution = svd.solve(b);
+
+        init_state.state[0] = solution[0];
+        init_state.state[1] = solution[1];
+        init_state.state[2] = solution[2];
+        init_state.state[3] = std::atan2(solution[4], solution[3]);
+
+        init_state.covariance = Eigen::Matrix4d::Identity();  // or something more meaningful
+
+        RCLCPP_INFO_STREAM(rclcpp::get_logger("eliko_global_opt_node"), "Initial solution: " << init_state.state.transpose());
+
+        return true;
+    }
+
+    Eigen::Vector4d movingAverage(const State &sample, const size_t &max_samples) {
         
             // Add the new sample with timestamp
             moving_average_states_.push_back(sample);
 
             // Remove samples that are too old or if we exceed the window size
             while (!moving_average_states_.empty() &&
-                (sample.timestamp - moving_average_states_.front().timestamp > rclcpp::Duration::from_seconds(global_opt_window_s_))) {
+                moving_average_states_.size() > max_samples) {
                 moving_average_states_.pop_front();
             }
 
@@ -355,159 +902,80 @@ private:
 
                 // Calculate weighted average yaw using the weighted sine and cosine
                 smoothed_state[3] = std::atan2(sum_sin / total_weight, sum_cos / total_weight);
-                smoothed_state[3] = normalize_angle(smoothed_state[3]);
+                smoothed_state[3] = normalizeAngle(smoothed_state[3]);
             }
 
             return smoothed_state;
     }
 
-
-    void publish_covariance_with_timestamp(const Eigen::Matrix4d& covariance, const rclcpp::Time& timestamp) {
-
-        auto msg = eliko_messages::msg::CovarianceMatrixWithHeader();
-        msg.header.stamp = timestamp;
-        msg.header.frame_id = "accumulated_covariance";  // Adjust as necessary
-        msg.matrix.layout.dim.resize(2);
-        msg.matrix.layout.dim[0].label = "rows";
-        msg.matrix.layout.dim[0].size = 4;
-        msg.matrix.layout.dim[0].stride = 4 * 4;
-        msg.matrix.layout.dim[1].label = "cols";
-        msg.matrix.layout.dim[1].size = 4;
-        msg.matrix.layout.dim[1].stride = 4;
-        msg.matrix.data.resize(4 * 4);
-
-        // Flatten the matrix
-        for (size_t i = 0; i < 4; ++i) {
-            for (size_t j = 0; j < 4; ++j) {
-                msg.matrix.data[i * 4 + j] = covariance(i, j);
-            }
-        }
-
-        covariance_publisher_->publish(msg);
-}
-
-    void publish_transform(const Eigen::Matrix4d& T, const rclcpp::Time &current_time) {
-
-
-        geometry_msgs::msg::TransformStamped that_ts_msg;
-        that_ts_msg.header.stamp = current_time;
-
-        // Extract translation
-        that_ts_msg.transform.translation.x = T(0, 3);
-        that_ts_msg.transform.translation.y = T(1, 3);
-        that_ts_msg.transform.translation.z = T(2, 3);
-
-        // Extract rotation (Convert Eigen rotation matrix to quaternion)
-        Eigen::Matrix3d rotation_matrix_that_ts = T.block<3, 3>(0, 0);
-
-        Eigen::Quaterniond q_that_ts(rotation_matrix_that_ts);
-
-        that_ts_msg.transform.rotation.x = q_that_ts.x();
-        that_ts_msg.transform.rotation.y = q_that_ts.y();
-        that_ts_msg.transform.rotation.z = q_that_ts.z();
-        that_ts_msg.transform.rotation.w = q_that_ts.w();
-        
-        /*Create the inverse to publish to tf tree*/
-        
-        Eigen::Matrix4d That_st = T.inverse();
-
-        geometry_msgs::msg::TransformStamped that_st_msg;
-        that_st_msg.header.stamp = that_ts_msg.header.stamp;
-        that_st_msg.header.frame_id = eliko_frame_id_;  // Adjust frame_id as needed
-        that_st_msg.child_frame_id = uav_frame_id_;            // Adjust child_frame_id as needed
-
-        // Extract translation
-        that_st_msg.transform.translation.x = That_st(0, 3);
-        that_st_msg.transform.translation.y = That_st(1, 3);
-        that_st_msg.transform.translation.z = That_st(2, 3);
-
-        // Convert Eigen rotation matrix of inverse transform to tf2 Matrix3x3
-        Eigen::Matrix3d rotation_matrix_that_st = That_st.block<3, 3>(0, 0);
-
-        Eigen::Quaterniond q_that_st(rotation_matrix_that_st);
-
-        that_st_msg.transform.rotation.x = q_that_st.x();
-        that_st_msg.transform.rotation.y = q_that_st.y();
-        that_st_msg.transform.rotation.z = q_that_st.z();
-        that_st_msg.transform.rotation.w = q_that_st.w();
-
-
-        // Publish the estimated transform
-        tf_publisher_->publish(that_ts_msg);
-        // Broadcast the inverse transform
-        tf_broadcaster_->sendTransform(that_st_msg);
-    }
-
-
-  // Build transformation matrix from roll, pitch, optimized yaw, and translation vector
-    Eigen::Matrix4d build_transformation_matrix(double roll, double pitch, const Eigen::Vector4d& s) {
-        Eigen::Matrix3d R;
-        R = Eigen::AngleAxisd(s[3], Eigen::Vector3d::UnitZ()) *
-            Eigen::AngleAxisd(pitch, Eigen::Vector3d::UnitY()) *
-            Eigen::AngleAxisd(roll, Eigen::Vector3d::UnitX());
-
-        R = Eigen::Quaterniond(R).normalized().toRotationMatrix();
-        
-        Eigen::Matrix4d T = Eigen::Matrix4d::Identity();
-        T.block<3, 3>(0, 0) = R;
-        T(0, 3) = s[0];
-        T(1, 3) = s[1];
-        T(2, 3) = s[2];
-
-        return T;
-    }
-
-
     // Run the optimization once all measurements are received
-    bool run_optimization(const rclcpp::Time &current_time, const Eigen::Matrix4d& motion_covariance) {
+    bool runOptimization(const rclcpp::Time &current_time, const Eigen::Matrix4d& motion_covariance, const bool& init_prior) {
 
             ceres::Problem problem;
 
-            //Initial conditions
-            State opt_state = opt_state_;
+            State opt_state;
+
+            if(init_prior) opt_state = init_state_;
+            else opt_state = opt_state_;
             
             //Update the timestamp
             opt_state.timestamp = current_time;
 
+            // Create an instance of our custom manifold.
+            ceres::Manifold* state_manifold = new StateManifold4D();
+            // Attach it to the parameter block.
+            problem.AddParameterBlock(opt_state.state.data(), 4);
+
+            //Tell the optimizer to perform updates in the manifold space
+            problem.SetManifold(opt_state.state.data(), state_manifold);
+
             // Define a robust kernel
-            double huber_threshold = 2.5; // = residuals higher than 2.5 times sigma are outliers
-            ceres::LossFunction* robust_loss = new ceres::HuberLoss(huber_threshold);
+            double loss_threshold = 2.5; // = residuals higher than 2.5 times sigma are outliers
+            // ceres::LossFunction* robust_loss = new ceres::HuberLoss(loss_threshold);
+            ceres::LossFunction* robust_loss = new ceres::CauchyLoss(loss_threshold);
 
-            Eigen::Matrix4d prior_covariance = opt_state_.covariance + motion_covariance;
+            //Set prior using linear initial solution
+            if(init_prior){
+                Eigen::Matrix4d prior_covariance = motion_covariance + Eigen::Matrix4d::Identity() * std::pow(measurement_stdev_,2.0);
+                Sophus::SE3d prior_T = buildTransformationSE3(init_state_.roll, init_state_.pitch, init_state_.state);
+                //Add the prior residual with the full covariance
+                ceres::CostFunction* prior_cost = PriorCostFunction::Create(prior_T, opt_state.roll, opt_state.pitch, prior_covariance);
+                problem.AddResidualBlock(prior_cost, robust_loss, opt_state.state.data());
+            }
 
-            // Add the prior residual with the full covariance
-            ceres::CostFunction* prior_cost = PriorResidual::Create(opt_state_.state, prior_covariance);
 
-            problem.AddResidualBlock(prior_cost, nullptr, opt_state.state.data());
+            for (const auto& measurement : global_measurements_) {                   
+                
+                // //Use positions of anchors and tags in each robot odometry frame
+                Eigen::Vector3d anchor_pos = measurement.anchor_odom_pose;
+                Eigen::Vector3d tag_pos = measurement.tag_odom_pose;
 
-            for (const auto& measurement : global_measurements_) {
-                if (anchor_positions_.count(measurement.anchor_id) > 0 &&
-                    tag_positions_.count(measurement.tag_id) > 0) {
-                    Eigen::Vector3d anchor_pos = anchor_positions_[measurement.anchor_id];
-                    Eigen::Vector3d tag_pos = tag_positions_[measurement.tag_id];
-
-                    ceres::CostFunction* cost_function = UWBResidual::Create(
-                        anchor_pos, tag_pos, measurement.distance, opt_state.roll, opt_state.pitch, measurement_stdev_);
-                    problem.AddResidualBlock(cost_function, robust_loss, opt_state.state.data());
-                }
+                ceres::CostFunction* cost_function = UWBCostFunction::Create(
+                    anchor_pos, tag_pos, measurement.distance, opt_state.roll, opt_state.pitch, measurement_stdev_);
+                problem.AddResidualBlock(cost_function, robust_loss, opt_state.state.data());
             }
 
 
             // Configure solver options
             ceres::Solver::Options options;
             options.linear_solver_type = ceres::DENSE_QR; // ceres::SPARSE_NORMAL_CHOLESKY,  ceres::DENSE_QR
-
+            options.num_threads = 4;
+            options.use_nonmonotonic_steps = true;  // Help escape plateaus
+            options.max_consecutive_nonmonotonic_steps = 10; //default is 5
+            options.max_num_iterations = 100;
             // Logging
-            //options.minimizer_progress_to_stdout = true;
+            // options.minimizer_progress_to_stdout = true;
 
             // Solve
             ceres::Solver::Summary summary;
             ceres::Solve(options, &problem, &summary);
-            //RCLCPP_INFO(this->get_logger(), summary.BriefReport().c_str());
+            RCLCPP_INFO(this->get_logger(), summary.BriefReport().c_str());
 
             // Notify and update values if optimization converged
             if (summary.termination_type == ceres::CONVERGENCE){
                 
+                total_solves_++;
+                total_solver_time_ += summary.total_time_in_seconds;
                 // Compute Covariance
                 ceres::Covariance::Options cov_options;
                 ceres::Covariance covariance(cov_options);
@@ -522,13 +990,6 @@ private:
                 if (covariance.Compute(covariance_blocks, &problem)) {
                     // Extract the full covariance matrix
                     covariance.GetCovarianceBlock(opt_state.state.data(), opt_state.state.data(), opt_covariance.data());
-                    
-                    RCLCPP_INFO_THROTTLE(this->get_logger(), *this->get_clock(), 1000, "State covariance:\n"
-                        "[%f, %f, %f, %f]\n[%f, %f, %f, %f]\n[%f, %f, %f, %f]\n[%f, %f, %f, %f]",
-                        opt_covariance(0, 0), opt_covariance(0, 1), opt_covariance(0, 2), opt_covariance(0, 3),
-                        opt_covariance(1, 0), opt_covariance(1, 1), opt_covariance(1, 2), opt_covariance(1, 3),
-                        opt_covariance(2, 0), opt_covariance(2, 1), opt_covariance(2, 2), opt_covariance(2, 3),
-                        opt_covariance(3, 0), opt_covariance(3, 1), opt_covariance(3, 2), opt_covariance(3, 3));
                     
                     // Optionally, store covariance for further use
                     opt_state.covariance = opt_covariance;  // Add this to your State struct if needed
@@ -549,170 +1010,61 @@ private:
             return false; 
             
     }
-
-  // Residual struct for Ceres
-  struct UWBResidual {
-        UWBResidual(const Eigen::Vector3d& anchor, const Eigen::Vector3d& tag, double measured_distance, double roll, double pitch, double measurement_stdev)
-            : anchor_(anchor), tag_(tag), measured_distance_(measured_distance), roll_(roll), pitch_(pitch), measurement_stdev_inv_(1.0 / measurement_stdev) {}
-
-        template <typename T>
-        bool operator()(const T* const state, T* residual) const {
-
-                // Extract state variables
-                T x = state[0];
-                T y = state[1];
-                T z = state[2];
-                T yaw = state[3];
-
-                // Build the 4x4 transformation matrix
-                Eigen::Matrix<T, 4, 4> T_transform = build_transformation_matrix(roll_, pitch_, yaw, x, y, z);
-
-                 // Transform the anchor point (as a homogeneous vector)
-                Eigen::Matrix<T, 4, 1> anchor_h;
-                anchor_h << T(anchor_(0)), T(anchor_(1)), T(anchor_(2)), T(1.0);
-                Eigen::Matrix<T, 4, 1> anchor_transformed_h = T_transform * anchor_h;
-
-                // Calculate the predicted distance
-                T dx = T(tag_(0)) - anchor_transformed_h(0);
-                T dy = T(tag_(1)) - anchor_transformed_h(1);
-                T dz = T(tag_(2)) - anchor_transformed_h(2);
-                T predicted_distance = ceres::sqrt(dx * dx + dy * dy + dz * dz);
-
-                // Residual as (measured - predicted)
-                residual[0] = T(measured_distance_) - predicted_distance;
-                residual[0] *= T(measurement_stdev_inv_);  // Scale residual
-
-                //std::cout << "Measurement residual: " << residual[0] << std::endl;
-
-                return true;
-        }
-
-      static ceres::CostFunction* Create(const Eigen::Vector3d& anchor, const Eigen::Vector3d& tag, double measured_distance, double roll, double pitch, double measurement_stdev) {
-            return (new ceres::AutoDiffCostFunction<UWBResidual, 1, 4>(
-                new UWBResidual(anchor, tag, measured_distance, roll, pitch, measurement_stdev)));
-        }
-
-        // Build a 4x4 transformation matrix
-        template <typename T>
-        static Eigen::Matrix<T, 4, 4> build_transformation_matrix(double roll, double pitch, T yaw, T x, T y, T z) {
-            Eigen::Matrix<T, 3, 3> R;
-            R = Eigen::AngleAxis<T>(yaw, Eigen::Matrix<T, 3, 1>::UnitZ()) *
-                Eigen::AngleAxis<T>(T(pitch), Eigen::Matrix<T, 3, 1>::UnitY()) *
-                Eigen::AngleAxis<T>(T(roll), Eigen::Matrix<T, 3, 1>::UnitX());
-
-            // Normalize rotation
-            R = Eigen::Quaternion<T>(R).normalized().toRotationMatrix();
-
-            Eigen::Matrix<T, 4, 4> T_transform = Eigen::Matrix<T, 4, 4>::Identity();
-            // Assign rotation matrix to top-left block
-            T_transform.template block<3, 3>(0, 0) = R;            
-            T_transform(0, 3) = x;
-            T_transform(1, 3) = y;
-            T_transform(2, 3) = z;
-
-            return T_transform;
-        }
-
-        const Eigen::Vector3d anchor_;
-        const Eigen::Vector3d tag_;
-        const double measured_distance_;
-        const double roll_;
-        const double pitch_;
-        const double measurement_stdev_inv_;
-  };
-
-  struct PriorResidual {
-    PriorResidual(const Eigen::Vector4d& prior_state, const Eigen::Matrix4d& state_covariance)
-        : prior_state_(prior_state), state_covariance_(state_covariance) {}
-
-    template <typename T>
-    bool operator()(const T* const state, T* residual) const {
-        // Combine translation and yaw into a single residual vector
-        Eigen::Matrix<T, 4, 1> delta_state;
-        delta_state << state[0] - T(prior_state_(0)),
-                       state[1] - T(prior_state_(1)),
-                       state[2] - T(prior_state_(2)),
-                       normalize_angle(state[3] - T(prior_state_(3)));
-
-        
-        // Scale by the square root of the inverse covariance matrix
-        Eigen::LLT<Eigen::Matrix4d> chol(state_covariance_);
-        Eigen::Matrix4d sqrt_inv_covariance = Eigen::Matrix4d(chol.matrixL().transpose()).inverse();
-        //Eigen::Matrix4d sqrt_covariance = Eigen::Matrix4d(chol.matrixL());
-
-        Eigen::Matrix<T, 4, 1> weighted_residual = sqrt_inv_covariance.cast<T>() * delta_state;
-
-        // Assign to residual
-        residual[0] = weighted_residual[0];
-        residual[1] = weighted_residual[1];
-        residual[2] = weighted_residual[2];
-        residual[3] = weighted_residual[3];
-
-        std::cout << "Prior residual: ["
-          << residual[0] << ", " << residual[1] << ", " 
-          << residual[2] << ", " << residual[3] << "]" 
-          << std::endl;
-
-        return true;
-    }
-
-    static ceres::CostFunction* Create(const Eigen::Vector4d& prior_state, const Eigen::Matrix4d& state_covariance) {
-        return new ceres::AutoDiffCostFunction<PriorResidual, 4, 4>(
-            new PriorResidual(prior_state, state_covariance));
-    }
-
-private:
-    template <typename T>
-    T normalize_angle(const T& angle) const {
-        T normalized_angle = angle;
-        while (normalized_angle > T(M_PI)) normalized_angle -= T(2.0 * M_PI);
-        while (normalized_angle < T(-M_PI)) normalized_angle += T(2.0 * M_PI);
-        return normalized_angle;
-    }
-
-    const Eigen::Vector4d prior_state_;
-    const Eigen::Matrix4d state_covariance_;
-};
-
-    
+  
     // Subscriptions
     rclcpp::Subscription<eliko_messages::msg::DistancesList>::SharedPtr eliko_distances_sub_;
-    rclcpp::Subscription<geometry_msgs::msg::QuaternionStamped>::SharedPtr dji_attitude_sub_;
-    rclcpp::Subscription<nav_msgs::msg::Odometry>::SharedPtr uav_odom_sub_;
-    rclcpp::Subscription<nav_msgs::msg::Odometry>::SharedPtr agv_odom_sub_;
-    
+    rclcpp::Subscription<nav_msgs::msg::Odometry>::SharedPtr agv_odom_sub_, uav_odom_sub_;
+    rclcpp::Subscription<geometry_msgs::msg::PoseStamped>::SharedPtr dll_agv_sub_, dll_uav_sub_;
+
     // Timers
-    rclcpp::TimerBase::SharedPtr global_optimization_timer_, window_opt_timer_;
+    rclcpp::TimerBase::SharedPtr global_optimization_timer_;
 
-
-    std::deque<Measurement> global_measurements_;
+    std::deque<UWBMeasurement> global_measurements_;
     
     // Publishers/Broadcasters
-    rclcpp::Publisher<geometry_msgs::msg::TransformStamped>::SharedPtr tf_publisher_;
+    rclcpp::Publisher<geometry_msgs::msg::PoseWithCovarianceStamped>::SharedPtr tf_publisher_, tf_ransac_publisher_;
     std::shared_ptr<tf2_ros::TransformBroadcaster> tf_broadcaster_;
-    rclcpp::Publisher<eliko_messages::msg::CovarianceMatrixWithHeader>::SharedPtr covariance_publisher_;
 
+    //Parameters
+    std::string odom_topic_agv_, odom_topic_uav_;
+    double opt_timer_rate_;
+    size_t min_measurements_;
+    double min_traveled_distance_, min_traveled_angle_, max_traveled_distance_;
+    double measurement_stdev_;
+    size_t moving_average_max_samples_;
+    bool moving_average_;
+    bool use_prior_;
+    bool use_ransac_;
+    bool dll_odom_;
     std::unordered_map<std::string, Eigen::Vector3d> anchor_positions_;
     std::unordered_map<std::string, Eigen::Vector3d> tag_positions_;
 
-    std::string eliko_frame_id_, uav_frame_id_;
+
+    std::string agv_odom_frame_id_, uav_odom_frame_id_;
+    std::string agv_body_frame_id_, uav_body_frame_id_;
+    std::string uav_opt_frame_id_, agv_opt_frame_id_;
 
     State opt_state_;
     State init_state_;
     std::deque<State> moving_average_states_;
 
-    bool moving_average_;
-    size_t min_measurements_;
-    double global_opt_window_s_, global_opt_rate_s_;
-    double measurement_stdev_, measurement_covariance_;
-    double moving_average_window_s_;
+    Sophus::SE3d uav_odom_pose_, last_uav_odom_pose_;         // Current UAV odometry position and last used for optimization
+    Sophus::SE3d agv_odom_pose_, last_agv_odom_pose_;        // Current AGV odometry position and last used for optimization
+    Sophus::SE3d agv_init_pose_, uav_init_pose_;
+    Eigen::Matrix<double, 6, 6> uav_odom_covariance_, agv_odom_covariance_;  // UAV odometry covariance
+    double last_agv_odom_time_sec_, last_uav_odom_time_sec_;
+    bool last_agv_odom_initialized_, last_uav_odom_initialized_;
 
-    Eigen::Vector4d uav_odom_pos_, uav_last_odom_pos_;         // Current UAV odometry position and last used for optimization
-    Eigen::Vector4d agv_odom_pos_, agv_last_odom_pos_;        // Current AGV odometry position and last used for optimization
-    Eigen::Matrix4d uav_odom_covariance_;  // UAV odometry covariance
-    Eigen::Matrix4d agv_odom_covariance_;  // AGV odometry covariance
-    double min_traveled_distance_;
+    double uav_delta_translation_, agv_delta_translation_, uav_delta_rotation_, agv_delta_rotation_;
+    double uav_total_translation_, agv_total_translation_, uav_total_rotation_, agv_total_rotation_;
+
+    std::unordered_map<std::string, Eigen::Vector3d> anchor_positions_odom_, tag_positions_odom_;
+
     double odom_error_distance_, odom_error_angle_;
+
+    //Timing metrics
+    int total_solves_;
+    double total_solver_time_;
 
 };
 int main(int argc, char** argv) {
@@ -720,6 +1072,10 @@ int main(int argc, char** argv) {
     auto node = std::make_shared<ElikoGlobalOptNode>();
     node->set_parameter(rclcpp::Parameter("use_sim_time", true));
     rclcpp::spin(node);
+
+    // Once spin() returns (e.g. on SIGINT), dump out metrics:
+    node->getMetrics();
+
     rclcpp::shutdown();
     return 0;
 }
