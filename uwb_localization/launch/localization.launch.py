@@ -19,15 +19,22 @@ def generate_launch_description():
                 name='uav_odometry_node',
                 parameters=[config]
     )
-           
+
     node2 = Node(
+                package='uwb_localization',
+                executable='agv_odometry_node',
+                name='agv_odometry_node',
+                parameters=[config]
+    )
+           
+    node3 = Node(
                 package='uwb_localization',
                 executable='global_opt_node_eliko',
                 name='eliko_global_opt_node',
                 parameters=[config]
                 )
                 
-    node3 = Node(
+    node4 = Node(
         package='uwb_localization',
         executable='optimizer_node_fusion',
         name='fusion_optimization_node',
@@ -39,6 +46,6 @@ def generate_launch_description():
         FrontendLaunchDescriptionSource(dll_launch_file)
     )
 
-    nodes_to_execute = [node1, node2, node3, dll_launch]
+    nodes_to_execute = [node1, node2, node3, node4, dll_launch]
     
     return LaunchDescription(nodes_to_execute)

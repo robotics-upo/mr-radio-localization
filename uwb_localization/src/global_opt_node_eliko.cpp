@@ -59,14 +59,14 @@ public:
 
     rclcpp::SensorDataQoS qos; // Use a QoS profile compatible with sensor data
 
-    if(dll_odom_){
-
+    if(debug_){
         dll_agv_sub_ = this->create_subscription<geometry_msgs::msg::PoseStamped>(
         "/dll_node_arco/pose_estimation", qos, std::bind(&ElikoGlobalOptNode::agvDllCb, this, std::placeholders::_1));
 
         dll_uav_sub_ = this->create_subscription<geometry_msgs::msg::PoseStamped>(
         "/dll_node/pose_estimation", qos, std::bind(&ElikoGlobalOptNode::uavDllCb, this, std::placeholders::_1));
 
+        range_pub_ = this->create_publisher<std_msgs::msg::Float32>("eliko_optimization_node/dll_odom_range", 10);
     }
     else{
         agv_odom_sub_ = this->create_subscription<nav_msgs::msg::Odometry>(
@@ -157,7 +157,7 @@ private:
 
         this->declare_parameter<double>("odom_error_position", 2.0);
         this->declare_parameter<double>("odom_error_angle", 2.0);
-        this->declare_parameter<bool>("dll_odom", true);
+        this->declare_parameter<bool>("debug", true);
         this->declare_parameter<bool>("use_prior", true);
 
         this->declare_parameter<bool>("moving_average", true);
@@ -206,7 +206,7 @@ private:
 
         this->get_parameter("odom_error_position", odom_error_distance_);
         this->get_parameter("odom_error_angle", odom_error_angle_);
-        this->get_parameter("dll_odom", dll_odom_);
+        this->get_parameter("debug", debug_);
         this->get_parameter("use_prior", use_prior_);
         std::vector<double> init_state, agv_init_pose, uav_init_pose;
         this->get_parameter("init_solution", init_state);
@@ -437,6 +437,7 @@ private:
     /*********DLL callbacks: used instead of odometry when you want accurate poses **********/
 
     void agvDllCb(const geometry_msgs::msg::PoseStamped::SharedPtr msg) {
+
         Eigen::Quaterniond q(
             msg->pose.orientation.w,
             msg->pose.orientation.x,
@@ -532,9 +533,9 @@ private:
         double dt_agv = std::abs(uwb_time_sec - last_agv_odom_time_sec_);
         double dt_uav = std::abs(uwb_time_sec - last_uav_odom_time_sec_);
 
-        double max_age_sec = 0.25;
+        double max_age_sec = 1.0;
         if (dt_agv > max_age_sec || dt_uav > max_age_sec) {
-            RCLCPP_DEBUG(this->get_logger(),
+            RCLCPP_INFO(this->get_logger(),
             "[Eliko global_opt node] Skipping UWB data due to stale odometry.\n"
             "  - UWB stamp   : %.9f\n"
             "  - AGV stamp   : %.9f (Δ = %.3fs)\n"
@@ -576,6 +577,18 @@ private:
             global_measurements_.push_back(measurement);
         }
 
+        if(debug_){
+            // Compute the distance between AGV and UAV poses
+            Eigen::Vector3d agv_pos = agv_odom_pose_.translation();
+            Eigen::Vector3d uav_pos = uav_odom_pose_.translation();
+            float range = 100.0 * static_cast<float>((agv_pos - uav_pos).norm());
+
+            std_msgs::msg::Float32 range_msg;
+            range_msg.data = range;
+
+            range_pub_->publish(range_msg);
+        }
+
         // RCLCPP_INFO(this->get_logger(), "[Eliko global node] Added %ld measurements. Total size: %ld", 
         //             msg->anchor_distances.size(), global_measurements_.size());
     }
@@ -593,11 +606,11 @@ private:
             return;
         }
 
-        // Remove very old measurements
-        while (!global_measurements_.empty() &&
-              (current_time - global_measurements_.front().timestamp).seconds() > 60.0) {
-            global_measurements_.pop_front();
-        }
+        // // Remove very old measurements
+        // while (!global_measurements_.empty() &&
+        //       (current_time - global_measurements_.front().timestamp).seconds() > 60.0) {
+        //     global_measurements_.pop_front();
+        // }
 
         //*****************Displace window based on distance traveled ****************************/
         while (!global_measurements_.empty()) {
@@ -608,7 +621,7 @@ private:
             double uav_disp = latest.uav_cumulative_distance - oldest.uav_cumulative_distance;
             double agv_disp = latest.agv_cumulative_distance - oldest.agv_cumulative_distance;
 
-            if(uav_disp < 2.0 || agv_disp < 2.0){
+            if(uav_disp < 1.0 || agv_disp < 1.0){
                 RCLCPP_INFO_THROTTLE(this->get_logger(), *this->get_clock(), 1000, "Insufficient displacement in window. UAV displacement = [%.2f], AGV displacement = [%.2f]",
                 uav_disp, agv_disp);
                 return;
@@ -623,7 +636,7 @@ private:
 
         // Then, check if there are enough measurements remaining.
         if (global_measurements_.size() < min_measurements_) {
-            RCLCPP_WARN(this->get_logger(), "[Eliko global_opt node] Not enough data to run optimization.");
+            RCLCPP_WARN(this->get_logger(), "[Eliko global_opt node] Got %d range measurements: not enough data to run optimization.", global_measurements_.size());
             return;
         }
 
@@ -915,7 +928,7 @@ private:
 
             State opt_state;
 
-            if(init_prior) opt_state = init_state_;
+            if(use_prior_) opt_state = init_state_;
             else opt_state = opt_state_;
             
             //Update the timestamp
@@ -1015,6 +1028,7 @@ private:
     rclcpp::Subscription<eliko_messages::msg::DistancesList>::SharedPtr eliko_distances_sub_;
     rclcpp::Subscription<nav_msgs::msg::Odometry>::SharedPtr agv_odom_sub_, uav_odom_sub_;
     rclcpp::Subscription<geometry_msgs::msg::PoseStamped>::SharedPtr dll_agv_sub_, dll_uav_sub_;
+    rclcpp::Publisher<std_msgs::msg::Float32>::SharedPtr range_pub_;
 
     // Timers
     rclcpp::TimerBase::SharedPtr global_optimization_timer_;
@@ -1035,7 +1049,7 @@ private:
     bool moving_average_;
     bool use_prior_;
     bool use_ransac_;
-    bool dll_odom_;
+    bool debug_;
     std::unordered_map<std::string, Eigen::Vector3d> anchor_positions_;
     std::unordered_map<std::string, Eigen::Vector3d> tag_positions_;
 

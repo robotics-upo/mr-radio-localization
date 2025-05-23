@@ -625,13 +625,12 @@ private:
         constraint.id_end = id_target;
         constraint.t_T_s = T_icp_d;
         if(icp_type == 2) {
-            double weight = 1.0 / (fitness * 2 + 1e-6);
-            if(weight >= 3.5) return false;
+            if(fitness >= 2.0 || fitness <= 0.0) return false;
             // constraint.covariance = weight * reduceCovarianceMatrix(final_hessian.inverse());
-            constraint.covariance = (1.0/weight) * Eigen::Matrix4d::Identity();
-            RCLCPP_INFO(this->get_logger(), "GICP converged with score: %f, weight %f", fitness, weight);
-            RCLCPP_INFO(this->get_logger(), "Covariance: ");
-            logTransformationMatrix(constraint.covariance, this->get_logger());
+            constraint.covariance = (2.0*fitness + 1e-6) * Eigen::Matrix4d::Identity();
+            RCLCPP_INFO(this->get_logger(), "GICP converged with score: %f", fitness);
+            // RCLCPP_INFO(this->get_logger(), "Covariance: ");
+            logTransformationMatrix(constraint.t_T_s.matrix(), this->get_logger());
         }
         else constraint.covariance = computeICPCovariance(source_scan, target_scan, T_icp, sigma);
 
@@ -694,7 +693,7 @@ private:
             //Get first measurements
             agv_measurements_.timestamp = current_time;
             *(agv_measurements_.lidar_scan) = *(preprocessPointCloud(agv_lidar_cloud_, 50.0, 2.0, pointcloud_lidar_sigma_));
-            *(agv_measurements_.radar_scan) = *(agv_radar_cloud_);
+            *(agv_measurements_.radar_scan) = *(preprocessPointCloud(agv_radar_cloud_, 50.0, 2.0, pointcloud_radar_sigma_));
             // 2) grab latest radar ego-velocity from your subscriber
             agv_measurements_.radar_egovel = Eigen::Vector3d{
                 agv_radar_egovel_.twist.twist.linear.x,
@@ -751,7 +750,7 @@ private:
 
             uav_measurements_.timestamp = current_time;
             *(uav_measurements_.lidar_scan) = *(preprocessPointCloud(uav_lidar_cloud_, 50.0, 2.0, pointcloud_lidar_sigma_));
-            *(uav_measurements_.radar_scan) = *(uav_radar_cloud_);
+            *(uav_measurements_.radar_scan) = *(preprocessPointCloud(uav_radar_cloud_, 50.0, 2.0, pointcloud_radar_sigma_));
             uav_measurements_.radar_egovel = Eigen::Vector3d{
                 uav_radar_egovel_.twist.twist.linear.x,
                 uav_radar_egovel_.twist.twist.linear.y,
@@ -973,29 +972,29 @@ private:
                     }
             }
 
-            //Radar Ego-Velocity constraint
-            if (using_radar_ && agv_measurements_.radar_velocity_ok) {
+            // //Radar Ego-Velocity constraint
+            // if (using_radar_ && agv_measurements_.radar_velocity_ok) {
 
-                Eigen::Matrix4d radar_cov = Eigen::Matrix4d::Identity();
-                double radar_sigma_sq = pointcloud_radar_sigma_ * pointcloud_radar_sigma_;  // reuse existing radar sigma
-                radar_cov(0,0) = radar_sigma_sq; //only
-                radar_cov(1,1) = 1e6;
-                radar_cov(2,2) = radar_sigma_sq;
-                radar_cov(3,3) = 1e6;  // unconstrained yaw
+            //     Eigen::Matrix4d radar_cov = Eigen::Matrix4d::Identity();
+            //     double radar_sigma_sq = pointcloud_radar_sigma_ * pointcloud_radar_sigma_;  // reuse existing radar sigma
+            //     radar_cov(0,0) = radar_sigma_sq; //only
+            //     radar_cov(1,1) = 1e6;
+            //     radar_cov(2,2) = radar_sigma_sq;
+            //     radar_cov(3,3) = 1e6;  // unconstrained yaw
 
-                MeasurementConstraint radar_vel_constraint;
-                radar_vel_constraint.id_begin = agv_id_ - 1;
-                radar_vel_constraint.id_end   = agv_id_;
-                radar_vel_constraint.t_T_s    = integrateEgoVelIntoSE3(
-                                                            agv_measurements_.radar_egovel,
-                                                            prev_agv_measurements_.timestamp,
-                                                            agv_measurements_.timestamp
-                                                        );
-                radar_vel_constraint.covariance = radar_cov;
+            //     MeasurementConstraint radar_vel_constraint;
+            //     radar_vel_constraint.id_begin = agv_id_ - 1;
+            //     radar_vel_constraint.id_end   = agv_id_;
+            //     radar_vel_constraint.t_T_s    = integrateEgoVelIntoSE3(
+            //                                                 agv_measurements_.radar_egovel,
+            //                                                 prev_agv_measurements_.timestamp,
+            //                                                 agv_measurements_.timestamp
+            //                                             );
+            //     radar_vel_constraint.covariance = radar_cov;
 
-                proprioceptive_constraints_agv_.push_back(radar_vel_constraint);
-                RCLCPP_DEBUG(this->get_logger(), "Added AGV radar velocity constraint.");
-            }
+            //     proprioceptive_constraints_agv_.push_back(radar_vel_constraint);
+            //     RCLCPP_DEBUG(this->get_logger(), "Added AGV radar velocity constraint.");
+            // }
 
 
             prev_agv_measurements_ = agv_measurements_;
@@ -1135,29 +1134,29 @@ private:
 
             }
 
-            //Radar Ego-Velocity constraint
-            if (using_radar_ && uav_measurements_.radar_velocity_ok) {
+            // //Radar Ego-Velocity constraint
+            // if (using_radar_ && uav_measurements_.radar_velocity_ok) {
 
-                Eigen::Matrix4d radar_cov = Eigen::Matrix4d::Identity();
-                double radar_sigma_sq = pointcloud_radar_sigma_ * pointcloud_radar_sigma_;  // reuse existing radar sigma
-                radar_cov(0,0) = radar_sigma_sq;
-                radar_cov(1,1) = 1e6;
-                radar_cov(2,2) = radar_sigma_sq;
-                radar_cov(3,3) = 1e6;  // unconstrained yaw
+            //     Eigen::Matrix4d radar_cov = Eigen::Matrix4d::Identity();
+            //     double radar_sigma_sq = pointcloud_radar_sigma_ * pointcloud_radar_sigma_;  // reuse existing radar sigma
+            //     radar_cov(0,0) = radar_sigma_sq;
+            //     radar_cov(1,1) = 1e6;
+            //     radar_cov(2,2) = radar_sigma_sq;
+            //     radar_cov(3,3) = 1e6;  // unconstrained yaw
 
-                MeasurementConstraint radar_vel_constraint;
-                radar_vel_constraint.id_begin = agv_id_ - 1;
-                radar_vel_constraint.id_end   = agv_id_;
-                radar_vel_constraint.t_T_s    = integrateEgoVelIntoSE3(
-                                                    uav_measurements_.radar_egovel,
-                                                    prev_uav_measurements_.timestamp,
-                                                    uav_measurements_.timestamp
-                                                );
-                radar_vel_constraint.covariance = radar_cov;
+            //     MeasurementConstraint radar_vel_constraint;
+            //     radar_vel_constraint.id_begin = agv_id_ - 1;
+            //     radar_vel_constraint.id_end   = agv_id_;
+            //     radar_vel_constraint.t_T_s    = integrateEgoVelIntoSE3(
+            //                                         uav_measurements_.radar_egovel,
+            //                                         prev_uav_measurements_.timestamp,
+            //                                         uav_measurements_.timestamp
+            //                                     );
+            //     radar_vel_constraint.covariance = radar_cov;
 
-                proprioceptive_constraints_uav_.push_back(radar_vel_constraint);
-                RCLCPP_DEBUG(this->get_logger(), "Added AGV radar velocity constraint.");
-            }
+            //     proprioceptive_constraints_uav_.push_back(radar_vel_constraint);
+            //     RCLCPP_DEBUG(this->get_logger(), "Added AGV radar velocity constraint.");
+            // }
 
             prev_uav_measurements_ = uav_measurements_;
             uav_translation_ = uav_rotation_ = 0.0;
