@@ -73,37 +73,6 @@ def plot_experiment_data(path_experiment_data, path_folder, gt_available = "True
     # target_odom_origin = pose_to_matrix(([15.926,22.978,0.901,0.0, 0.0, 0.0028])) #[15.925, 22.976, 0.911, 0.0, 0.0, 0.028]
     
     max_timestamp = None
-
-    ## DLL transformations map -> arco/odom
-    source_odom_gt_x_data = f'/tf/map/{tf_odom_agv}/translation/x'
-    source_odom_gt_y_data = f'/tf/map/{tf_odom_agv}/translation/y'
-    source_odom_gt_z_data = f'/tf/map/{tf_odom_agv}/translation/z'
-    source_odom_gt_q0_data = f'/tf/map/{tf_odom_agv}/rotation/x'
-    source_odom_gt_q1_data = f'/tf/map/{tf_odom_agv}/rotation/y'
-    source_odom_gt_q2_data = f'/tf/map/{tf_odom_agv}/rotation/z'
-    source_odom_gt_q3_data = f'/tf/map/{tf_odom_agv}/rotation/w'
-
-    columns_tf_source_odom_data = [time_data_setpoint, source_odom_gt_x_data, source_odom_gt_y_data, source_odom_gt_z_data, 
-                            source_odom_gt_q0_data, source_odom_gt_q1_data,source_odom_gt_q2_data, source_odom_gt_q3_data  ]
-
-    tf_source_odom_data_df = read_pandas_df(path_experiment_data, columns_tf_source_odom_data, 
-                                           timestamp_col=time_data_setpoint, max_timestamp=max_timestamp)
-    
-    ##transformations arco/odom -> arco/base_link
-    source_baselink_odom_x_data = f'/tf/{tf_odom_agv}/arco/base_link/translation/x'
-    source_baselink_odom_y_data = f'/tf/{tf_odom_agv}/arco/base_link/translation/y'
-    source_baselink_odom_z_data = f'/tf/{tf_odom_agv}/arco/base_link/translation/z'
-    source_baselink_odom_q0_data = f'/tf/{tf_odom_agv}/arco/base_link/rotation/x'
-    source_baselink_odom_q1_data = f'/tf/{tf_odom_agv}/arco/base_link/rotation/y'
-    source_baselink_odom_q2_data = f'/tf/{tf_odom_agv}/arco/base_link/rotation/z'
-    source_baselink_odom_q3_data = f'/tf/{tf_odom_agv}/arco/base_link/rotation/w'
-
-    columns_tf_source_baselink_data = [time_data_setpoint, source_baselink_odom_x_data, source_baselink_odom_y_data, source_baselink_odom_z_data, 
-                            source_baselink_odom_q0_data, source_baselink_odom_q1_data,source_baselink_odom_q2_data, source_baselink_odom_q3_data  ]
-
-    
-    tf_source_baselink_odom_data_df = read_pandas_df(path_experiment_data, columns_tf_source_baselink_data, 
-                                           timestamp_col=time_data_setpoint, max_timestamp=max_timestamp)
     
     ##DLL AGV GT POSES
     source_gt_x_data = f'{agv_gt_topic_name}/pose/position/x'
@@ -190,8 +159,6 @@ def plot_experiment_data(path_experiment_data, path_folder, gt_available = "True
     target_odom_origin = pose_to_matrix(np.concatenate((uav_pos, uav_rpy[::-1])))  # [x, y, z, roll, pitch, yaw]
     print(target_odom_origin)
 
-    df_base_link_in_map = compute_base_link_to_map_df(tf_source_odom_data_df, tf_source_baselink_odom_data_df)
-    cols_base_link_map = ["__time", "position_x", "position_y", "position_z", "orientation_x", "orientation_y", "orientation_z", "orientation_w"]    
     
     #odom-gt AGV
     plot_states_temporal(path_experiment_data, "comparison_odom", source_odom_data_df, columns_source_odom_data, None, None, source_gt_data_df, columns_source_gt_data)
@@ -203,7 +170,6 @@ def plot_experiment_data(path_experiment_data, path_folder, gt_available = "True
     plot_states_temporal(path_experiment_data, "comparison", target_odom_data_df, columns_target_odom_data, None, None, target_gt_data_df, columns_target_gt_data, target_odom_origin) 
     plot_states_3d(path_experiment_data, "3d_odom_trajectory", target_odom_data_df, columns_target_odom_data, None, None, target_gt_data_df, columns_target_gt_data, target_odom_origin)
     
-
 
 def plot_states_3d(path, filename, data, cols_data, radar = None, cols_radar = None, gt=None, cols_gt=None, gt_origin=None):
     """
@@ -274,7 +240,6 @@ def plot_states_temporal(path, filename, data, cols_data, radar = None, cols_rad
 
     # Plot each variable vs. time
     fig, axs = plt.subplots(4, 1, figsize=(10, 12), sharex=True)
-
 
     data_x = np.array(data[cols_data[1]])
     data_y = np.array(data[cols_data[2]])

@@ -98,8 +98,8 @@ private:
     uav_translation_ += linear_vel_local.norm() * dt;
 
     uav_odom_covariance_ = Eigen::Matrix<double, 6, 6>::Zero();
-    double pos_var = 0.05;
-    double rot_var = 0.01;
+    double pos_var = 0.1;
+    double rot_var = 0.1;
     uav_odom_covariance_.block<3, 3>(0, 0) = pos_var * Eigen::Matrix3d::Identity();
     uav_odom_covariance_.block<3, 3>(3, 3) = rot_var * Eigen::Matrix3d::Identity();
   }

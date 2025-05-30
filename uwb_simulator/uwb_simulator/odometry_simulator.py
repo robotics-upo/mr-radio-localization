@@ -545,16 +545,16 @@ class OdometrySimulator(Node):
         ax.plot(uav_positions_gt[:, 0], uav_positions_gt[:, 1], uav_positions_gt[:, 2],
                 label='UAV GT', color='blue')
         ax.plot(uav_positions_odom_world[:, 0], uav_positions_odom_world[:, 1], uav_positions_odom_world[:, 2],
-                label='UAV Odom (transformed)', color='blue', linestyle='--')
+                label='UAV Odom', color='blue', linestyle='--')
 
         ax.plot(agv_positions_gt[:, 0], agv_positions_gt[:, 1], agv_positions_gt[:, 2],
                 label='AGV GT', color='red')
         ax.plot(agv_positions_odom[:, 0], agv_positions_odom[:, 1], agv_positions_odom[:, 2],
                 label='AGV Odom', color='red', linestyle='--')
 
-        ax.set_xlabel('X Position')
-        ax.set_ylabel('Y Position')
-        ax.set_zlabel('Z Position')
+        ax.set_xlabel('X (m)')
+        ax.set_ylabel('Y (m)')
+        ax.set_zlabel('Z (m)')
 
         ax.set_title('UAV and AGV Trajectories')
         ax.legend()

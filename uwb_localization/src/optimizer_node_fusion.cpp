@@ -952,8 +952,9 @@ private:
                         if(using_odom_ && agv_measurements_.odom_ok) T_icp = (radar_agv.odom_pose.inverse() * olderKF.odom_pose).cast<float>().matrix();
 
                         if (agv_measurements_.radar_velocity_ok) {
+                            Eigen::Vector3d radar_vel_body = T_agv_imu_.rotationMatrix() * agv_measurements_.radar_egovel;
                             T_icp = integrateEgoVelIntoSE3(
-                                agv_measurements_.radar_egovel,
+                                radar_vel_body,
                                 prev_agv_measurements_.timestamp,
                                 agv_measurements_.timestamp
                             ).cast<float>().matrix();
@@ -971,31 +972,6 @@ private:
                         }
                     }
             }
-
-            // //Radar Ego-Velocity constraint
-            // if (using_radar_ && agv_measurements_.radar_velocity_ok) {
-
-            //     Eigen::Matrix4d radar_cov = Eigen::Matrix4d::Identity();
-            //     double radar_sigma_sq = pointcloud_radar_sigma_ * pointcloud_radar_sigma_;  // reuse existing radar sigma
-            //     radar_cov(0,0) = radar_sigma_sq; //only
-            //     radar_cov(1,1) = 1e6;
-            //     radar_cov(2,2) = radar_sigma_sq;
-            //     radar_cov(3,3) = 1e6;  // unconstrained yaw
-
-            //     MeasurementConstraint radar_vel_constraint;
-            //     radar_vel_constraint.id_begin = agv_id_ - 1;
-            //     radar_vel_constraint.id_end   = agv_id_;
-            //     radar_vel_constraint.t_T_s    = integrateEgoVelIntoSE3(
-            //                                                 agv_measurements_.radar_egovel,
-            //                                                 prev_agv_measurements_.timestamp,
-            //                                                 agv_measurements_.timestamp
-            //                                             );
-            //     radar_vel_constraint.covariance = radar_cov;
-
-            //     proprioceptive_constraints_agv_.push_back(radar_vel_constraint);
-            //     RCLCPP_DEBUG(this->get_logger(), "Added AGV radar velocity constraint.");
-            // }
-
 
             prev_agv_measurements_ = agv_measurements_;
             agv_translation_ = agv_rotation_ = 0.0;
@@ -1113,8 +1089,10 @@ private:
                         if(using_odom_ && uav_measurements_.odom_ok) T_icp = (radar_uav.odom_pose.inverse() * olderKF.odom_pose).cast<float>().matrix();
                         
                         if (uav_measurements_.radar_velocity_ok) {
+                            // Transform radar velocity vector from IMU frame to body frame
+                            Eigen::Vector3d radar_vel_body = T_uav_imu_.rotationMatrix() * uav_measurements_.radar_egovel;
                             T_icp = integrateEgoVelIntoSE3(
-                                uav_measurements_.radar_egovel,
+                                radar_vel_body,
                                 prev_uav_measurements_.timestamp,
                                 uav_measurements_.timestamp
                             ).cast<float>().matrix();
@@ -1133,30 +1111,6 @@ private:
                     }
 
             }
-
-            // //Radar Ego-Velocity constraint
-            // if (using_radar_ && uav_measurements_.radar_velocity_ok) {
-
-            //     Eigen::Matrix4d radar_cov = Eigen::Matrix4d::Identity();
-            //     double radar_sigma_sq = pointcloud_radar_sigma_ * pointcloud_radar_sigma_;  // reuse existing radar sigma
-            //     radar_cov(0,0) = radar_sigma_sq;
-            //     radar_cov(1,1) = 1e6;
-            //     radar_cov(2,2) = radar_sigma_sq;
-            //     radar_cov(3,3) = 1e6;  // unconstrained yaw
-
-            //     MeasurementConstraint radar_vel_constraint;
-            //     radar_vel_constraint.id_begin = agv_id_ - 1;
-            //     radar_vel_constraint.id_end   = agv_id_;
-            //     radar_vel_constraint.t_T_s    = integrateEgoVelIntoSE3(
-            //                                         uav_measurements_.radar_egovel,
-            //                                         prev_uav_measurements_.timestamp,
-            //                                         uav_measurements_.timestamp
-            //                                     );
-            //     radar_vel_constraint.covariance = radar_cov;
-
-            //     proprioceptive_constraints_uav_.push_back(radar_vel_constraint);
-            //     RCLCPP_DEBUG(this->get_logger(), "Added AGV radar velocity constraint.");
-            // }
 
             prev_uav_measurements_ = uav_measurements_;
             uav_translation_ = uav_rotation_ = 0.0;
@@ -1812,9 +1766,10 @@ private:
         // Add encounter constraints.
         bool encounter_uwb_available = false;
         //**new version, apply constraint to all nodes in window**//
-        // if(uwb_transform_available_) encounter_uwb_available = addEncounterTrajectoryConstraints(problem, agv_map, uav_map, agv_id_, uav_id_, max_keyframes_, robust_loss);
+        if(uwb_transform_available_) encounter_uwb_available = addEncounterTrajectoryConstraints(problem, agv_map, uav_map, agv_id_, uav_id_, max_keyframes_, robust_loss);
         //**previous version**//
-        encounter_uwb_available = addEncounterConstraints(problem, encounter_constraints_uwb, agv_map, uav_map, agv_id_, uav_id_, max_keyframes_, robust_loss);
+        // encounter_uwb_available = addEncounterConstraints(problem, encounter_constraints_uwb, agv_map, uav_map, agv_id_, uav_id_, max_keyframes_, robust_loss);
+        
         bool encounter_pointcloud_available = addEncounterConstraints(problem, encounter_constraints_pointcloud, agv_map, uav_map, agv_id_, uav_id_, max_keyframes_, robust_loss);
 
         if(!encounter_uwb_available && !encounter_pointcloud_available){
@@ -1823,12 +1778,13 @@ private:
             problem.SetParameterBlockConstant(anchor_node_agv_.state.data());
         }
         else{
-            // Add a prior residual for the AGV anchor node (ALWAYS THERE IS AN ANCOUNTER)
+            //ALWAYS COMMENT ONE
+            //ANCHOR THE AGV TRAJECTORY
             ceres::CostFunction *prior_cost_anchor_agv = PriorCostFunction::Create(prior_anchor_agv_.pose, 
                 anchor_node_agv_.roll, anchor_node_agv_.pitch, prior_anchor_agv_.covariance);
             problem.AddResidualBlock(prior_cost_anchor_agv, nullptr, anchor_node_agv_.state.data());
 
-            //ONLY FOR DEBUGGING
+            // //ANCHOR THE UAV TRAJECTORY
             // ceres::CostFunction *prior_cost_anchor_uav = PriorCostFunction::Create(prior_anchor_uav_.pose, 
             //     anchor_node_uav_.roll, anchor_node_uav_.pitch, prior_anchor_uav_.covariance);
             // problem.AddResidualBlock(prior_cost_anchor_uav, nullptr, anchor_node_uav_.state.data());
