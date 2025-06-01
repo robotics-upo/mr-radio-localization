@@ -1,0 +1,82 @@
+eliko_global_opt_node:
+  ros__parameters:
+    use_sim_time: true
+    odom_topic_agv: "/agv/odom" #or "/agv/odom" #"/arco/idmind_motors/odom"
+    odom_topic_uav: "/uav/odom"
+    opt_timer_rate: 10.0 #Hz
+    min_measurements: 50
+    min_traveled_distance: 0.5 #m
+    min_traveled_angle: 0.262 #radians 15 deg approx
+    max_traveled_distance: 10.0 #m
+    measurement_stdev: 0.1 #m
+    odom_error_position: 2.0 # %,  meters for every 100 meters traveled
+    odom_error_angle: 2.0 # % degrees for every 100 degrees
+    debug: true #set this to true to subscribe to the poses estimated by dll and publish gt ranges
+    use_prior: true
+    init_solution: [0.0, 0.0, 0.0, 0.0]
+    use_ransac: true # use ransac algorithm with the prior
+    moving_average: true
+    moving_average_max_samples: 10
+    agv_init_pose: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0] #x y z r p y [-2.805, -1.951, 0.0, 0.0, 0.0, -0.102]
+    uav_init_pose: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0] #x y z r p y
+    anchors:
+      a1:
+        id: "0x0009D6"
+        position: [-0.32, 0.3, 0.875] #[-0.32, 0.3, 0.875]
+      a2:
+        id: "0x0009E5"
+        position: [0.32, -0.3, 0.875] #[0.32, -0.3, 0.875]
+      a3:
+        id: "0x0016FA"
+        position: [0.32, 0.3, 0.33] #[0.32, 0.3, 0.33]
+      a4:
+        id: "0x0016CF"
+        position: [-0.32, -0.3, 0.33] # [-0.32, -0.3, 0.33]
+    tags:
+      t1: 
+        id: "0x001155"
+        position: [-0.24, -0.24, -0.06]  #[-0.24, -0.24, -0.06]
+      t2: 
+        id: "0x001397"
+        position: [0.24, 0.24, -0.06]  #[0.24, 0.24, -0.06]
+
+fusion_optimization_node:
+  ros__parameters:
+    use_sim_time: true
+    odom_topic_agv: "/agv/odom" #or "/agv/odom" #"/arco/idmind_motors/odom"
+    lidar_topic_agv: "/arco/ouster/points"
+    radar_topic_agv: "/agv/filtered_pointcloud" #or /arco/radar/PointCloudDetection OR /agv/filtered_pointcloud
+    radar_egovel_topic_agv: "/agv/Ego_Vel_Twist"
+    odom_topic_uav: "/uav/odom"
+    lidar_topic_uav: "/os1_cloud_node/points_non_dense"
+    radar_topic_uav: "/uav/filtered_pointcloud" #/drone/radar/PointCloudDetection OR /uav/filtered_pointcloud
+    radar_egovel_topic_uav: "/uav/Ego_Vel_Twist"
+    opt_timer_rate: 10.0 #Hz
+    min_traveled_distance: 0.5 #m
+    min_traveled_angle: 0.262 #radians
+    min_keyframes: 3
+    max_keyframes: 7
+    using_odom: true
+    using_lidar: false
+    using_radar: true
+    lidar_stdev: 0.05
+    radar_stdev: 0.2
+    icp_type_lidar: 0   #ICP algorithm variant: 2->Generalized ICP, 1->Point to Plane ICP, else -> basic ICP
+    icp_type_radar: 2
+    radar_history_size: 3 #history of radar keyframes to compare against
+    agv_init_pose: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0] #Local initial pose AGV [xyz rpy] [-2.805, -1.951, 0.0, 0.0, 0.0, -0.102]
+    uav_init_pose: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0] #Local initial pose UAV
+    agv_anchor_prior: [13.351, 27.385, 0.636, 0.001, 0.001, 3.079] #[13.351, 27.385, 0.636, 0.001, 0.001, 3.079] #prior for the AGV anchor node (initial pose wrt global map frame)
+    uav_anchor_prior: [13.351, 27.385, 0.636, 0.001, 0.001, 3.079] #[15.351, 23.385, 0.9, 0.0, 0.0, 0.028] #prior for the UAV anchor node (initial pose wrt global map frame)
+    imu_agv: 
+        position: [0.0, 0.0, 0.165, 0.0, 0.0, 0.0] # x y z r p y 
+    imu_uav: 
+        position: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0] # x y z r p y 
+    lidar_uav:
+        position: [0.21, 0.0, 0.25, 0.0, 0.0, 0.0]  #[0.21, 0.0, 0.25, 0.0, 0.0, 0.0]
+    radar_uav:
+        position: [-0.385, -0.02, -0.225, 0.0, 0.725, 3.142]    #OR [-0.385, -0.02, -0.225, 0.0, 2.417, 3.14]
+    lidar_agv:
+        position: [0.3, 0.0, 0.45, 3.14, 0.0, 0.0]  #[0.3, 0.0, 0.45, 3.14, 0.0, 0.0]
+    radar_agv:
+        position: [0.45, 0.05, 0.5, 0.0, 0.0, 0.0]   #OR [0.45, 0.05, 0.65, 0.0, 0.0, 0.0]
