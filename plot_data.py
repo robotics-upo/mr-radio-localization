@@ -10,6 +10,10 @@ import numpy as np
 from scipy.spatial.transform import Rotation as R
 import re
 from matplotlib.ticker import MultipleLocator
+from scipy.interpolate import interp1d
+from scipy.signal import savgol_filter
+
+
 
 
 # === for paper‐quality bigger fonts ===
@@ -23,90 +27,27 @@ mpl.rcParams.update({
     'figure.titlesize':  18    # overall figure title
 })
 
-def compute_That_w_t(timestamp, target_gt_data_df, target_odom_data_df, t_That_s_data_df, columns_target_gt_data, columns_target_odom_data, columns_t_That_s_data):
-    """
-    Computes poses of the target wrt source (also world) according to the estimated t_That_s estimation and the target odometry poses
 
-    """
-
-    That_w_t_list = []
-
-    # Ensure data is sorted by timestamp
-    target_gt_data_df = target_gt_data_df.sort_values(timestamp).reset_index(drop=True)
-    target_odom_data_df = target_odom_data_df.sort_values(timestamp).reset_index(drop=True)
-    t_That_s_data_df = t_That_s_data_df.sort_values(timestamp).reset_index(drop=True)
-
-    for _, row in t_That_s_data_df.iterrows():
-        # Find the latest source_gt_data_df row with a timestamp <= current t_That_s_data_df timestamp
-        latest_target_idx = target_gt_data_df[target_gt_data_df[timestamp] <= row[timestamp]].index.max()
-        latest_target_odom_idx = target_odom_data_df[target_odom_data_df[timestamp] <= row[timestamp]].index.max()
-
-        if latest_target_idx is not None and latest_target_odom_idx is not None:  # Ensure there's a valid matching source data
-            # Get the corresponding source and t_That_s data
-            target_row = target_gt_data_df.iloc[latest_target_idx]
-            target_odom_row = target_odom_data_df.iloc[latest_target_odom_idx]
-
-            target_row = target_gt_data_df.iloc[latest_target_idx]
-            T_w_t = np.eye(4)
-            T_w_t_odom = np.eye(4)
-            That_t_s = np.eye(4)
-
-            # Populate T_w_t_odom (target positions in odom frame)
-            T_w_t_odom[:3, 3] = target_odom_row[[columns_target_odom_data[1], columns_target_odom_data[2], columns_target_odom_data[3]]].values
-            q_w_t_odom = target_odom_row[[columns_target_odom_data[4], columns_target_odom_data[5], columns_target_odom_data[6], columns_target_odom_data[7]]].values
-            T_w_t_odom[:3, :3] = R.from_quat(q_w_t_odom).as_matrix()
-
-            # Populate T_w_t (target positions in gt frame)
-            T_w_t[:3, 3] = target_row[[columns_target_gt_data[1], columns_target_gt_data[2], columns_target_gt_data[3]]].values
-            q_w_t = target_row[[columns_target_gt_data[4], columns_target_gt_data[5], columns_target_gt_data[6], columns_target_gt_data[7]]].values
-            T_w_t[:3, :3] = R.from_quat(q_w_t).as_matrix()
-
-            # Populate That_t_s
-            That_t_s[:3, 3] = row[[columns_t_That_s_data[1], columns_t_That_s_data[2], columns_t_That_s_data[3]]].values
-            q_hat = row[[columns_t_That_s_data[4], columns_t_That_s_data[5], columns_t_That_s_data[6], columns_t_That_s_data[7]]].values
-            That_t_s[:3, :3] = R.from_quat(q_hat).as_matrix()
-            
-            # Compute That_w_t -> computed from odometry
-            That_w_t = np.linalg.inv(That_t_s) @ T_w_t_odom
-
-            translation = That_w_t[:3, 3]  # Extract the translation part
-            rotation = R.from_matrix(That_w_t[:3, :3]).as_quat()  # Extract rotation as quaternion
-            yaw = R.from_matrix(That_w_t[:3, :3]).as_euler('zyx', degrees=False)[0]  # Extract yaw (rotation around Z-axis)
-
-            That_w_t_list.append([row[timestamp], *translation, *rotation, yaw])  # Include timestamp, translation, and rotation
-
-
-    # Create a DataFrame for That_w_t and metrics
-    That_w_t_df = pd.DataFrame(That_w_t_list, columns=[timestamp, "x", "y", "z", "qx", "qy", "qz", "qw", "yaw"])
+def compute_poses_local_to_world(timestamp_col, poses, anchor_df, anchor_columns, use_last = True, use_gt = False, gt_anchor = None):
     
-    return That_w_t_df
-
-
-def compute_poses_odom_to_world(timestamp_col, poses, anchor_df, anchor_columns):
     """
-    For each pose in poses, find the closest anchor transform in anchor_df (by timestamp),
-    then apply that anchor transform to the pose to obtain a new pose in the world frame.
-    
+    For each pose in poses, apply the anchor transform (either closest in time or last row)
+    to convert it from local to world frame.
+
     Parameters:
         poses (dict): Dictionary of poses. Each entry should have:
-                          - 'timestamp': float (in seconds)
-                          - 'position': np.array of shape (3,)
-                          - 'orientation': np.array of shape (4,) representing a quaternion.
-        anchor_df (pd.DataFrame): DataFrame that contains the anchor transform. It is assumed to
-                          have a timestamp column and then columns for the translation and quaternion.
-        timestamp_col (str): The name of the timestamp column in anchor_target_df.
-        anchor_columns (list): List of column names for the anchor transform.
-                          For example:
-                          [timestamp_col, "anchor_x", "anchor_y", "anchor_z",
-                           "anchor_q0", "anchor_q1", "anchor_q2", "anchor_q3"]
-    
+                      - 'timestamp': float (in seconds)
+                      - 'position': np.array of shape (3,)
+                      - 'orientation': np.array of shape (4,)
+        anchor_df (pd.DataFrame): DataFrame with anchor transform data.
+        timestamp_col (str): Name of timestamp column in anchor_df.
+        anchor_columns (list): Column names for [timestamp, x, y, z, qx, qy, qz, qw].
+        use_last (bool): If True, uses the last anchor transform for all poses.
+        use_gt (bool): If True, uses the ground truth anchor to transform all poses
+
     Returns:
-        dict: A new dictionary (poses_world) with the same keys as poses. For each key the value is a dict
-              containing:
-                - 'timestamp': original timestamp,
-                - 'position': new position in world frame (np.array, shape (3,)),
-                - 'orientation': new quaternion in world frame (np.array, shape (4,)),
-                - 'yaw': yaw angle extracted from the new rotation.
+        dict: Transformed poses with keys:
+              - 'timestamp', 'position', 'orientation', 'yaw'
     """
     poses_world = {}
     
@@ -114,6 +55,14 @@ def compute_poses_odom_to_world(timestamp_col, poses, anchor_df, anchor_columns)
     sorted_anchor_df = anchor_df.sort_values(timestamp_col).reset_index(drop=True)
     sorted_anchor_df[timestamp_col] -= sorted_anchor_df[timestamp_col][0]
 
+    # Precompute last anchor transform if requested
+    if use_gt is False and use_last is True:
+        anchor_row = sorted_anchor_df.iloc[-1]
+        T_anchor_last = np.eye(4)
+        T_anchor_last[:3, 3] = anchor_row[[anchor_columns[1], anchor_columns[2], anchor_columns[3]]].values
+        quat_anchor = anchor_row[[anchor_columns[4], anchor_columns[5], anchor_columns[6], anchor_columns[7]]].values
+        T_anchor_last[:3, :3] = R.from_quat(quat_anchor).as_matrix()
+        print("Last anchor (Transformation from source to target):\n", T_anchor_last)
     
     for key, pose in poses.items():
         if (pose['timestamp'] is None or 
@@ -125,7 +74,7 @@ def compute_poses_odom_to_world(timestamp_col, poses, anchor_df, anchor_columns)
         candidate_df = sorted_anchor_df[sorted_anchor_df[timestamp_col] <= pose['timestamp']]
         if candidate_df.empty:
             continue  # no anchor available for this pose
-        
+
         # Get the row with the largest timestamp that is <= pose['timestamp']
         latest_anchor_idx = candidate_df.index[-1]
         anchor_row = sorted_anchor_df.loc[latest_anchor_idx]
@@ -143,8 +92,13 @@ def compute_poses_odom_to_world(timestamp_col, poses, anchor_df, anchor_columns)
         T_pose[:3, 3] = pose['position']
         T_pose[:3, :3] = R.from_quat(pose['orientation']).as_matrix()
         
-        # Apply the anchor transform: T_world = T_anchor * T_pose.
-        T_world = T_anchor @ T_pose
+        if(use_gt and gt_anchor is not None): T_world = gt_anchor @ T_pose
+        # Apply the anchor transform: T_world = T_anchor * T_pose using last optimized anchor value
+        elif(use_last): T_world = T_anchor_last @ T_pose
+        # Apply the anchor transform: T_world = T_anchor * T_pose using the most recent at the time of this pose
+        else: T_world = T_anchor @ T_pose
+
+        # print("T_w_s (Transformation from robot to world):\n", T_world)
         
         new_translation = T_world[:3, 3]
         new_quat = R.from_matrix(T_world[:3, :3]).as_quat()
@@ -215,22 +169,12 @@ def plot_3d_scatter(path, data_frame_ref, data_frame_ref_odom, data_frame_target
     odom_target_local = data_frame_target_odom[[cols_target_odom[1], cols_target_odom[2], cols_target_odom[3]]].values.T  # shape (3, N)
     T_target = target_odom_origin
     odom_target_world = T_target[:3, :3] @ odom_target_local + T_target[:3, 3:4]
-
-    translation_target = T_target[:3, 3]  # Extract the translation part
-    rotation_target = R.from_matrix(T_target[:3, :3]).as_quat()  # Extract rotation as quaternion
-    yaw_target = R.from_matrix(T_target[:3, :3]).as_euler('zyx', degrees=False)[0]  # Extract yaw (rotation around Z-axis)
-
-    theta_target = yaw_target
-    odom_target_x = translation_target[0] + np.cos(theta_target) * data_frame_target_odom[cols_target_odom[1]] - np.sin(theta_target) * data_frame_target_odom[cols_target_odom[2]]
-    odom_target_y = translation_target[1] + np.sin(theta_target) * data_frame_target_odom[cols_target_odom[1]] + np.cos(theta_target) * data_frame_target_odom[cols_target_odom[2]]
-    odom_target_z = translation_target[2] + data_frame_target_odom[cols_target_odom[3]]
     
-    # odom_target_x = odom_target_world[0, :]
-    # odom_target_y = odom_target_world[1, :]
-    # odom_target_z = odom_target_world[2, :]
+    odom_target_x = odom_target_world[0, :]
+    odom_target_y = odom_target_world[1, :]
+    odom_target_z = odom_target_world[2, :]
     
     ax.plot(odom_target_x, odom_target_y, odom_target_z, c='g', linestyle = '--', label='Odom Target', linewidth=2)
-
 
     # Plot markers
     ax.scatter(data_frame_opt[cols_opt[1]], data_frame_opt[cols_opt[2]], data_frame_opt[cols_opt[3]], c='b', marker='o', label='Optimized', alpha=0.4, s=10)
@@ -248,92 +192,17 @@ def plot_3d_scatter(path, data_frame_ref, data_frame_ref_odom, data_frame_target
 
     plt.show()
 
-def plot_pose_temporal_evolution(path, df_ref, df_experiment, df_covariance, df_covariance_odom, df_odom, cols_ref, cols_experiment, cols_covariance, cols_covariance_odom, cols_odom, t0, target_odom_origin):
-    
-    fig, axes = plt.subplots(3, 1, figsize=(15, 15))
-    plt.suptitle("Temporal Evolution of 3D Pose")
 
-    # Subtract the first element of the timestamp column to start from 0
-    #df_experiment[cols_experiment[0]] -= df_experiment[cols_experiment[0]].iloc[0]
-    df_experiment[cols_experiment[0]] -= t0
-    #df_covariance[cols_experiment[0]] -= df_covariance[cols_experiment[0]].iloc[0]
-    df_covariance[cols_experiment[0]] -= t0
+def plot_transform(path, df_experiment, df_covariance, cols_experiment, cols_covariance, t0, source_odom_origin = None, target_odom_origin = None):
 
-    df_ref[cols_ref[0]] -= t0
-    df_odom[cols_odom[0]] -= t0
-    df_covariance_odom[cols_covariance_odom[0]] -= t0
-
-    # # Subtract the first element of the timestamp column to start from 0
-    # df_experiment[cols_experiment[0]] *= 1e-6
-    # df_ref[cols_ref[0]] *= 1e-6
-
-    # Align timestamps and compute RMSE
-    merged_cov_df = pd.merge_asof(df_covariance, df_covariance_odom, left_on=cols_covariance[0], right_on=cols_covariance_odom[0], direction='nearest')
-
-    # Compute standard deviations (square root of diagonal covariance elements)
-    std_x = np.sqrt(np.array(merged_cov_df[cols_covariance[1]])) + np.sqrt(np.array(merged_cov_df[cols_covariance_odom[1]]))  # Covariance_x
-    std_y = np.sqrt(np.array(merged_cov_df[cols_covariance[2]])) + np.sqrt(np.array(merged_cov_df[cols_covariance_odom[2]])) # Covariance_y
-    std_z = np.sqrt(np.array(merged_cov_df[cols_covariance[3]])) + np.sqrt(np.array(merged_cov_df[cols_covariance_odom[3]])) # Covariance_z
-    
-    #Convert the odom target frame to world frame used gt odometry offset
-
-    odom_target_local = df_odom[[cols_odom[1], cols_odom[2], cols_odom[3]]].values.T  # shape (3, N)
-    T_target = target_odom_origin
-    odom_target_world = T_target[:3, :3] @ odom_target_local + T_target[:3, 3:4]
-    
-    target_odom_x = odom_target_world[0, :]
-    target_odom_y = odom_target_world[1, :]
-    target_odom_z = odom_target_world[2, :]
-  
-    axes[0].scatter(np.array(df_experiment[cols_experiment[0]]), np.array(df_experiment[cols_experiment[1]]), c='b', label = 'pose_opt', alpha=0.4, s=10)
-    axes[0].plot(np.array(df_ref[cols_ref[0]]), np.array(df_ref[cols_ref[1]]), c='r', label = 'target gt')
-    
-    axes[0].plot(np.array(df_odom[cols_odom[0]]), target_odom_x, c='r', linestyle= '--', label = 'target odom')
-
-    axes[0].fill_between(np.array(df_covariance[cols_experiment[0]]),
-                         np.array(df_experiment[cols_experiment[1]]) - 2.0*std_x,
-                         np.array(df_experiment[cols_experiment[1]]) + 2.0*std_x,
-                         color='blue', alpha=0.2, label='±2σ Uncertainty')
-    axes[0].legend()
-    #plt.xlabel("Timestamp")
-    axes[0].set_ylabel("X(m)")
-    axes[0].grid()
-    axes[1].scatter(np.array(df_experiment[cols_experiment[0]]), np.array(df_experiment[cols_experiment[2]]), c='b',alpha=0.4, s=10)
-    axes[1].plot(np.array(df_ref[cols_ref[0]]), np.array(df_ref[cols_ref[2]]), c='r')
-    axes[1].plot(np.array(df_odom[cols_odom[0]]), target_odom_y, c='r',linestyle= '--')
-
-    axes[1].fill_between(np.array(df_experiment[cols_experiment[0]]),
-                         np.array(df_experiment[cols_experiment[2]]) - 2.0*std_y,
-                         np.array(df_experiment[cols_experiment[2]]) + 2.0*std_y,
-                         color='blue', alpha=0.2, label='±2σ Uncertainty')
-    axes[1].set_ylabel("Y(m)")
-    axes[1].grid()
-
-    axes[2].scatter(np.array(df_experiment[cols_experiment[0]]), np.array(abs(df_experiment[cols_experiment[3]])), c='b', alpha=0.4, s=10)
-    axes[2].plot(np.array(df_ref[cols_ref[0]]), np.array(df_ref[cols_ref[3]]), c='r')
-    axes[2].plot(np.array(df_odom[cols_odom[0]]), target_odom_z, c='r', linestyle= '--')
-
-    axes[2].fill_between(np.array(df_experiment[cols_experiment[0]]),
-                         np.array(df_experiment[cols_experiment[3]]) - 2.0*std_z,
-                         np.array(df_experiment[cols_experiment[3]]) + 2.0*std_z,
-                         color='blue', alpha=0.2, label='±2σ Uncertainty')
-    axes[2].set_ylabel("Z(m)")
-    axes[2].grid()
-
-    axes[2].set_xlabel("Time(s)")
-
-    plt.savefig(path + '/pose_t.png', bbox_inches='tight')
-
-    plt.show()
-
-def plot_transform(path, df_experiment, df_covariance, cols_experiment, cols_covariance, t0, source_odom_origin, target_odom_origin):
-
-    T_t_s = np.linalg.inv(target_odom_origin) @ source_odom_origin
-    print("T_t_s (Transformation from source to target):\n", T_t_s)
-
-    # Extract constant ground truth transform from source to target
-    t_t_s_translation = T_t_s[:3, 3]
-    t_t_s_yaw = R.from_matrix(T_t_s[:3, :3]).as_euler('zyx')[0]
+    gt_available = False
+    if(source_odom_origin is not None and target_odom_origin is not None):
+        T_t_s = np.linalg.inv(target_odom_origin) @ source_odom_origin
+        print("T_t_s (Transformation from source to target):\n", T_t_s)
+        # Extract constant ground truth transform from source to target
+        t_t_s_translation = T_t_s[:3, 3]
+        t_t_s_yaw = R.from_matrix(T_t_s[:3, :3]).as_euler('zyx')[0]
+        gt_available = True
 
     fig, axes = plt.subplots(4, 1, figsize=(15, 15))
     plt.suptitle("Temporal Evolution of T_t_s")
@@ -356,9 +225,9 @@ def plot_transform(path, df_experiment, df_covariance, cols_experiment, cols_cov
 
     # Create a constant reference line over the same time span
     timestamps = np.array(df_experiment[cols_experiment[0]])
-    axes[0].plot(timestamps, [t_t_s_translation[0]] * len(timestamps), 'r--', label='GT x')
+    if(gt_available): axes[0].plot(timestamps, [t_t_s_translation[0]] * len(timestamps), 'r--', label='GT x')
 
-    axes[0].plot(timestamps, np.array(df_experiment[cols_experiment[1]]), c='b', label = 'pose_opt')
+    axes[0].plot(timestamps, np.array(df_experiment[cols_experiment[1]]), 'bo', label = 'pose_opt')
 
 
     axes[0].fill_between(timestamps,
@@ -370,8 +239,8 @@ def plot_transform(path, df_experiment, df_covariance, cols_experiment, cols_cov
     axes[0].set_ylabel("X(m)")
     axes[0].grid()
 
-    axes[1].plot(timestamps, [t_t_s_translation[1]] * len(timestamps), 'r--', label='GT y')
-    axes[1].plot(timestamps, np.array(df_experiment[cols_experiment[2]]), c='b')
+    if(gt_available): axes[1].plot(timestamps, [t_t_s_translation[1]] * len(timestamps), 'r--', label='GT y')
+    axes[1].plot(timestamps, np.array(df_experiment[cols_experiment[2]]), 'bo')
 
     axes[1].fill_between(timestamps,
                          np.array(df_experiment[cols_experiment[2]]) - 2.0*std_y,
@@ -380,8 +249,8 @@ def plot_transform(path, df_experiment, df_covariance, cols_experiment, cols_cov
     axes[1].set_ylabel("Y(m)")
     axes[1].grid()
 
-    axes[2].plot(timestamps, [t_t_s_translation[2]] * len(timestamps), 'r--', label='GT z')
-    axes[2].plot(timestamps, np.array(df_experiment[cols_experiment[3]]), c='b')
+    if(gt_available): axes[2].plot(timestamps, [t_t_s_translation[2]] * len(timestamps), 'r--', label='GT z')
+    axes[2].plot(timestamps, np.array(df_experiment[cols_experiment[3]]), 'bo')
 
 
     axes[2].fill_between(timestamps,
@@ -391,8 +260,8 @@ def plot_transform(path, df_experiment, df_covariance, cols_experiment, cols_cov
     axes[2].set_ylabel("Z(m)")
     axes[2].grid()
 
-    axes[3].plot(timestamps, [t_t_s_yaw] * len(timestamps), 'r--', label='GT yaw')
-    axes[3].plot(timestamps, np.array(df_experiment[cols_experiment[-1]]), c='b')
+    if(gt_available): axes[3].plot(timestamps, [t_t_s_yaw] * len(timestamps), 'r--', label='GT yaw')
+    axes[3].plot(timestamps, np.array(df_experiment[cols_experiment[-1]]), 'bo')
 
     axes[3].fill_between(timestamps,
                          np.array(df_experiment[cols_experiment[-1]]) - 2.0*std_yaw,
@@ -410,83 +279,44 @@ def plot_transform(path, df_experiment, df_covariance, cols_experiment, cols_cov
 
     plt.show()
 
+    # === Plot RMSE errors over time ===
 
-def plot_attitude_temporal_evolution(path, df_ref_rpy, df_opt_rpy, df_covariance, df_covariance_odom, df_odom_rpy, cols_experiment, cols_covariance, cols_covariance_odom, target_odom_origin):
-    
+    translation_errors = []
+    rotation_errors = []
 
-    fig, axes = plt.subplots(3, 1, figsize=(15, 15))
-    plt.suptitle("Temporal Evolution of attitude")
+    for i in range(len(df_experiment)):
+        est_pos = df_experiment[[cols_experiment[1], cols_experiment[2], cols_experiment[3]]].iloc[i].values
+        est_quat = df_experiment[[cols_experiment[4], cols_experiment[5], cols_experiment[6], cols_experiment[7]]].iloc[i].values
+        T_est = np.eye(4)
+        T_est[:3, 3] = est_pos
+        T_est[:3, :3] = R.from_quat(est_quat).as_matrix()
 
-    #df_opt_rpy[cols_experiment[0]] -= df_opt_rpy[cols_experiment[0]].iloc[0]
-    #df_opt_rpy[cols_experiment[0]] -= t0
+        T_error = np.linalg.inv(T_t_s) @ T_est
+        trans_error = T_error[:3, 3]
+        rot_error = R.from_matrix(T_error[:3, :3]).as_rotvec()
 
-    #df_covariance[cols_experiment[0]] -= df_covariance[cols_experiment[0]].iloc[0]
-    #df_covariance[cols_experiment[0]] -= t0
+        translation_errors.append(np.linalg.norm(trans_error))
+        rotation_errors.append(np.linalg.norm(rot_error))  # radians
 
-    # Subtract the first element of the timestamp column to start from 0
-    #df_ref_rpy[cols_experiment[0]] -= t0
+    translation_errors = translation_errors
+    rotation_errors = rotation_errors
 
+    fig2, axes2 = plt.subplots(2, 1, figsize=(15, 10))
+    fig2.suptitle("Relative Transform RMSE")
 
-    # Align timestamps and compute RMSE
-    merged_cov_df = pd.merge_asof(df_covariance, df_covariance_odom, left_on=cols_covariance[0], right_on=cols_covariance_odom[0], direction='nearest')
-    std_yaw = np.sqrt(np.array(merged_cov_df[cols_covariance[4]])) + np.sqrt(np.array(merged_cov_df[cols_covariance_odom[4]]))  # Covariance_yaw
+    axes2[0].plot(timestamps, np.rad2deg(rotation_errors), '-o')
+    axes2[0].set_ylabel("Rotational Error (º)")
+    axes2[0].grid()
+    axes2[0].legend()
 
-    # # Subtract the first element of the timestamp column to start from 0
-    # df_experiment[cols_experiment[0]] *= 1e-6
-    # df_ref_rp[cols_ref_rp[0]] *= 1e-6
-    # df_ref_yaw[cols_ref_yaw[0]] *= 1e-6
+    axes2[1].plot(timestamps, translation_errors, '-o')
+    axes2[1].set_ylabel("Translational Error (m)")
+    axes2[1].set_xlabel("Time (s)")
+    axes2[1].grid()
+    axes2[1].legend()
 
-    axes[0].scatter(np.array(df_opt_rpy[cols_experiment[0]]), np.array(df_opt_rpy[cols_experiment[1]]), c='b', label = 'optmized ±2σ', alpha=0.4, s=10)
-    axes[0].plot(np.array(df_ref_rpy[cols_experiment[0]]), np.array(df_ref_rpy[cols_experiment[1]]), c='r', label = 'gt')
-    axes[0].plot(np.array(df_odom_rpy[cols_experiment[0]]), np.array(df_odom_rpy[cols_experiment[1]]), c='r', linestyle='--', label = 'odom')
-
-    axes[0].legend()
-    #plt.xlabel("Timestamp")
-    axes[0].set_ylabel("Roll(rad)")
-    axes[0].grid()
-    axes[1].scatter(np.array(df_opt_rpy[cols_experiment[0]]), np.array(df_opt_rpy[cols_experiment[2]]), c='b', alpha=0.4, s=10)
-    axes[1].plot(np.array(df_ref_rpy[cols_experiment[0]]), np.array(df_ref_rpy[cols_experiment[2]]), c='r')
-    axes[1].plot(np.array(df_odom_rpy[cols_experiment[0]]), np.array(df_odom_rpy[cols_experiment[2]]), c='r', linestyle='--')
-
-    axes[1].set_ylabel("Pitch(rad)")
-    axes[1].grid()
-
-    # yaw_odom = np.array(df_odom_rpy[cols_experiment[3]])
-    # yaw_world = np.arctan2(np.sin(yaw_odom + target_odom_origin[3]),
-    #                        np.cos(yaw_odom + target_odom_origin[3]))
-    
-    # Get rotation from target odom origin (world_T_odom)
-    R_target_odom = target_odom_origin[:3, :3]
-    # Get roll, pitch, yaw from df_odom_rpy
-    roll = np.array(df_odom_rpy[cols_experiment[1]])
-    pitch = np.array(df_odom_rpy[cols_experiment[2]])
-    yaw = np.array(df_odom_rpy[cols_experiment[3]])
-
-    # Build odom-local rotation matrices
-    odom_rot_mats = R.from_euler('zyx', np.vstack((yaw, pitch, roll)).T).as_matrix()  # shape: (N, 3, 3)
-
-    yaw_world = [R.from_matrix(R_target_odom @ R_odom).as_euler('zyx')[0] for R_odom in odom_rot_mats]
-
-    axes[2].scatter(np.array(df_opt_rpy[cols_experiment[0]]),
-                    np.array(df_opt_rpy[cols_experiment[3]]), c='b', alpha=0.4, s=10)
-    axes[2].plot(np.array(df_ref_rpy[cols_experiment[0]]),
-                 np.array(df_ref_rpy[cols_experiment[3]]), c='r')
-    axes[2].plot(np.array(df_odom_rpy[cols_experiment[0]]),
-                 yaw_world, c='r', linestyle='--', label='Odom (World Frame)')
-
-    axes[2].fill_between(np.array(df_opt_rpy[cols_experiment[0]]),
-                         np.array(df_opt_rpy[cols_experiment[-1]]) - 2.0*std_yaw,
-                         np.array(df_opt_rpy[cols_experiment[-1]]) + 2.0*std_yaw,
-                         color='blue', alpha=0.2, label='±2σ Uncertainty')
-    axes[2].set_ylabel("Yaw(rad)")
-    axes[2].grid()
-
-    axes[2].set_xlabel("Time(s)")
-
-
-    plt.savefig(path + '/attitude_t.png', bbox_inches='tight')
-
-    plt.show() 
+    plt.savefig(path + '/t_That_s_errors.png', bbox_inches='tight')
+    plt.show()
 
 def plot_metrics(path, df_metrics, cols_metrics, t0, title, filename):
 
@@ -537,17 +367,15 @@ def plot_experiment_data(path_experiment_data, path_folder, gt_available = "True
 
     #These are the odometry sources used for relative transform estimation
     odom_topic_uav = "/uav/odom"
-    odom_topic_agv = "/agv/odom"   #"/arco/idmind_motors/odom" #"/agv_odom"
+    odom_topic_agv = "/agv/odom"   #"/arco/idmind_motors/odom" #"/agv/odom"
+
+    tf_odom_agv = "arco/odom"
 
     #The origins of each local frame wrt to map 
     ####### Values for simulation ###########
     # (map coincides with AGV local frame in simulation)
-    target_odom_origin = pose_to_matrix(np.array([0.5,-0.5,2.0,0.0,0.0,0.524]))    #np.array([0.25,-0.25,2.0,0.0,0.0,0.17])
-    source_odom_origin = pose_to_matrix(np.array([0.0,0.0,0.0,0.0,0.0,0.0]))
-
-    ######### Values for dataset ##########
-    # source_odom_origin = pose_to_matrix(np.array([13.694, 25.197, 0.58, 0.001, 0.001, 3.09])) #[13.694, 25.197, 0.58, 0.001, 0.001, 3.09]
-    # target_odom_origin = pose_to_matrix(([15.926,22.978,0.901,0.0, 0.0, 0.0028])) #[15.925, 22.976, 0.911, 0.0, 0.0, 0.028]
+    # target_odom_origin = pose_to_matrix(np.array([0.5,-0.5,2.0,0.0,0.0,0.524]))    #np.array([0.25,-0.25,2.0,0.0,0.0,0.17])
+    # source_odom_origin = pose_to_matrix(np.array([0.0,0.0,0.0,0.0,0.0,0.0]))
 
     if(simulation == "True"):
 
@@ -594,6 +422,7 @@ def plot_experiment_data(path_experiment_data, path_folder, gt_available = "True
         target_gt_q1_data = f'{uav_gt_topic_name}/pose/orientation/y'
         target_gt_q2_data = f'{uav_gt_topic_name}/pose/orientation/z'
         target_gt_q3_data = f'{uav_gt_topic_name}/pose/orientation/w'
+        
 
     max_timestamp = None
 
@@ -607,6 +436,7 @@ def plot_experiment_data(path_experiment_data, path_folder, gt_available = "True
     source_odom_cov_z = f'{odom_topic_agv}/pose/covariance/[2;2]'
     source_odom_cov_yaw = f'{odom_topic_agv}/pose/covariance/[5;5]'
 
+    #Odometry topic
     source_odom_x_data = f'{odom_topic_agv}/pose/pose/position/x'
     source_odom_y_data = f'{odom_topic_agv}/pose/pose/position/y'
     source_odom_z_data = f'{odom_topic_agv}/pose/pose/position/z'
@@ -614,6 +444,11 @@ def plot_experiment_data(path_experiment_data, path_folder, gt_available = "True
     source_odom_q1_data = f'{odom_topic_agv}/pose/pose/orientation/y'
     source_odom_q2_data = f'{odom_topic_agv}/pose/pose/orientation/z'
     source_odom_q3_data = f'{odom_topic_agv}/pose/pose/orientation/w'
+
+    #Linear velocity odometry
+    source_odom_vx_data = f'{odom_topic_agv}/twist/twist/linear/x'
+    source_odom_vy_data = f'{odom_topic_agv}/twist/twist/linear/y'
+    source_odom_vz_data = f'{odom_topic_agv}/twist/twist/linear/z'
 
     target_odom_x_data = f'{odom_topic_uav}/pose/pose/position/x'
     target_odom_y_data = f'{odom_topic_uav}/pose/pose/position/y'
@@ -656,6 +491,18 @@ def plot_experiment_data(path_experiment_data, path_folder, gt_available = "True
     anchor_source_q2_data = "/pose_graph_node/agv_anchor/pose/pose/orientation/z"
     anchor_source_q3_data = "/pose_graph_node/agv_anchor/pose/pose/orientation/w"
 
+    ## Radar velocities
+    radar_source_x_data = "/agv/Ego_Vel_Twist/twist/twist/linear/x"
+    radar_source_y_data = "/agv/Ego_Vel_Twist/twist/twist/linear/y"
+    radar_source_z_data = "/agv/Ego_Vel_Twist/twist/twist/linear/z"
+
+    radar_target_x_data = "/uav/Ego_Vel_Twist/twist/twist/linear/x"
+    radar_target_y_data = "/uav/Ego_Vel_Twist/twist/twist/linear/y"
+    radar_target_z_data = "/uav/Ego_Vel_Twist/twist/twist/linear/z"
+
+    radar_source_cols = [time_data_setpoint, radar_source_x_data, radar_source_y_data, radar_source_z_data]
+    radar_target_cols = [time_data_setpoint, radar_target_x_data, radar_target_y_data, radar_target_z_data]
+
     pose_graph_agv_cols = ["id", "timestamp", "position_x", "position_y", "position_z", "orientation_x", "orientation_y", "orientation_z", "orientation_w"]
     pose_graph_uav_cols = ["id", "timestamp", "position_x", "position_y", "position_z", "orientation_x", "orientation_y", "orientation_z", "orientation_w"]
 
@@ -663,7 +510,6 @@ def plot_experiment_data(path_experiment_data, path_folder, gt_available = "True
     anchor_source_agv_cols = [time_data_setpoint, anchor_source_x_data, anchor_source_y_data, anchor_source_z_data, anchor_source_q0_data, anchor_source_q1_data, anchor_source_q2_data, anchor_source_q3_data]
 
     #Get the pose graphs
-
     agv_csv_path = path_folder + "/agv_pose_graph.csv"
     uav_csv_path = path_folder + "/uav_pose_graph.csv"
 
@@ -680,13 +526,13 @@ def plot_experiment_data(path_experiment_data, path_folder, gt_available = "True
     anchor_target_df = read_pandas_df(path_experiment_data, anchor_target_uav_cols, timestamp_col=time_data_setpoint, max_timestamp=max_timestamp)
     anchor_source_df = read_pandas_df(path_experiment_data, anchor_source_agv_cols, timestamp_col=time_data_setpoint, max_timestamp=max_timestamp)
 
-    #Transform local poses of graph to a global frame of reference using the anchors
-    poses_uav_world = compute_poses_odom_to_world(time_data_setpoint, poses_uav, anchor_target_df, anchor_target_uav_cols)
-    poses_agv_world = compute_poses_odom_to_world(time_data_setpoint, poses_agv, anchor_source_df, anchor_source_agv_cols)
-
     #Get odometry data
     columns_source_odom_data = [time_data_setpoint, source_odom_x_data, source_odom_y_data, source_odom_z_data, source_odom_q0_data, source_odom_q1_data,source_odom_q2_data, source_odom_q3_data   ]
     source_odom_data_df = read_pandas_df(path_experiment_data, columns_source_odom_data, 
+                                           timestamp_col=time_data_setpoint, max_timestamp=max_timestamp)
+    
+    columns_source_odom_vel_data = [time_data_setpoint, source_odom_vx_data, source_odom_vy_data, source_odom_vz_data]
+    source_odom_vel_data_df = read_pandas_df(path_experiment_data, columns_source_odom_vel_data, 
                                            timestamp_col=time_data_setpoint, max_timestamp=max_timestamp)
     
     columns_target_odom_data = [time_data_setpoint, target_odom_x_data, target_odom_y_data, target_odom_z_data, target_odom_q0_data , target_odom_q1_data ,target_odom_q2_data ,target_odom_q3_data ]
@@ -704,46 +550,60 @@ def plot_experiment_data(path_experiment_data, path_folder, gt_available = "True
     t_That_s_data_df = read_pandas_df(path_experiment_data, columns_t_That_s_data, 
                                       timestamp_col=time_data_setpoint, max_timestamp=max_timestamp)
 
-    #Insert the initial solution (identity transform) as the first row.
-    if not t_That_s_data_df.empty:
-        initial_timestamp = t_That_s_data_df[time_data_setpoint].iloc[0]
-    else:
-        initial_timestamp = 0  # or set a desired default timestamp
+    # #Insert the initial solution (identity transform) as the first row.
+    # if not t_That_s_data_df.empty:
+    #     initial_timestamp = t_That_s_data_df[time_data_setpoint].iloc[0]
+    # else:
+    #     initial_timestamp = 0  # or set a desired default timestamp
 
-    initial_row = {
-        time_data_setpoint: initial_timestamp - 0.5,
-        opt_T_target_source_x_data: 0.0,
-        opt_T_target_source_y_data: 0.0,
-        opt_T_target_source_z_data: 0.0,
-        opt_T_target_source_q0_data: 0.0,
-        opt_T_target_source_q1_data: 0.0,
-        opt_T_target_source_q2_data: 0.0,
-        opt_T_target_source_q3_data: 1.0
-    }
-    initial_df = pd.DataFrame([initial_row])
-    t_That_s_data_df = pd.concat([initial_df, t_That_s_data_df], ignore_index=True)
+    # initial_row = {
+    #     time_data_setpoint: initial_timestamp - 0.5,
+    #     opt_T_target_source_x_data: 0.0,
+    #     opt_T_target_source_y_data: 0.0,
+    #     opt_T_target_source_z_data: 0.0,
+    #     opt_T_target_source_q0_data: 0.0,
+    #     opt_T_target_source_q1_data: 0.0,
+    #     opt_T_target_source_q2_data: 0.0,
+    #     opt_T_target_source_q3_data: 1.0
+    # }
+    # initial_df = pd.DataFrame([initial_row])
+    # t_That_s_data_df = pd.concat([initial_df, t_That_s_data_df], ignore_index=True)
+
+    #Append yaw to the last column of the estimated transform
+    t_That_s_data_df = add_yaw_to_df(t_That_s_data_df,
+                               opt_T_target_source_q0_data,
+                               opt_T_target_source_q1_data,
+                               opt_T_target_source_q2_data,
+                               opt_T_target_source_q3_data)
+    columns_t_That_s_data = columns_t_That_s_data + ["yaw"]
 
     #Get relative transform covariance
     columns_covariance = [time_data_setpoint, covariance_x, covariance_y, covariance_z, covariance_yaw]
     covariance_data_df = read_pandas_df(path_experiment_data, columns_covariance, 
                                         timestamp_col=time_data_setpoint, max_timestamp=max_timestamp)
 
-    # Insert the initial covariance row (identity covariance, i.e. all ones) so that it aligns with the
-    # identity row you add to the optimized transform dataframe.
-    if not covariance_data_df.empty:
-        initial_timestamp_cov = covariance_data_df[time_data_setpoint].iloc[0]
-    else:
-        initial_timestamp_cov = 0  # or another default value
-    initial_cov_row = {
-        time_data_setpoint: initial_timestamp_cov - 0.5,
-        covariance_x: 1.0,
-        covariance_y: 1.0,
-        covariance_z: 1.0,
-        covariance_yaw: 1.0
-    }
+    # # Insert the initial covariance row (identity covariance, i.e. all ones) so that it aligns with the
+    # # identity row you add to the optimized transform dataframe.
+    # if not covariance_data_df.empty:
+    #     initial_timestamp_cov = covariance_data_df[time_data_setpoint].iloc[0]
+    # else:
+    #     initial_timestamp_cov = 0  # or another default value
+    # initial_cov_row = {
+    #     time_data_setpoint: initial_timestamp_cov - 0.5,
+    #     covariance_x: 1.0,
+    #     covariance_y: 1.0,
+    #     covariance_z: 1.0,
+    #     covariance_yaw: 1.0
+    # }
 
-    initial_cov_df = pd.DataFrame([initial_cov_row])
-    covariance_data_df = pd.concat([initial_cov_df, covariance_data_df], ignore_index=True)
+    # initial_cov_df = pd.DataFrame([initial_cov_row])
+    # covariance_data_df = pd.concat([initial_cov_df, covariance_data_df], ignore_index=True)
+
+    #Get the radar velocities
+    radar_source_df = read_pandas_df(path_experiment_data, radar_source_cols, 
+                                      timestamp_col=time_data_setpoint, max_timestamp=max_timestamp)
+    radar_target_df = read_pandas_df(path_experiment_data, radar_target_cols, 
+                                      timestamp_col=time_data_setpoint, max_timestamp=max_timestamp)
     
     if gt_available == "True":
 
@@ -760,53 +620,22 @@ def plot_experiment_data(path_experiment_data, path_folder, gt_available = "True
         target_gt_data_df = read_pandas_df(path_experiment_data, columns_target_gt_data, 
                                            timestamp_col=time_data_setpoint, max_timestamp=max_timestamp)
         
+        # Extract origin from the first AGV GT pose
+        first_agv_row = source_gt_data_df.iloc[0]
+        agv_pos = first_agv_row[[source_gt_x_data, source_gt_y_data, source_gt_z_data]].values
+        agv_quat = first_agv_row[[source_gt_q0_data, source_gt_q1_data, source_gt_q2_data, source_gt_q3_data]].values
+        agv_rpy = R.from_quat(agv_quat).as_euler('zyx', degrees=False)  # yaw, pitch, roll
+        source_odom_origin = pose_to_matrix(np.concatenate((agv_pos, agv_rpy[::-1])))  # [x, y, z, roll, pitch, yaw]
+
+        # Extract origin from the first UAV GT pose
+        first_uav_row = target_gt_data_df.iloc[0]
+        uav_pos = first_uav_row[[target_gt_x_data, target_gt_y_data, target_gt_z_data]].values
+        uav_quat = first_uav_row[[target_gt_q0_data, target_gt_q1_data, target_gt_q2_data, target_gt_q3_data]].values
+        uav_rpy = R.from_quat(uav_quat).as_euler('zyx', degrees=False)
+        target_odom_origin = pose_to_matrix(np.concatenate((uav_pos, uav_rpy[::-1])))  # [x, y, z, roll, pitch, yaw]
+        
         t0 = target_gt_data_df[columns_target_gt_data[0]].iloc[0]
 
-        w_That_t_data_df = compute_That_w_t(time_data_setpoint, target_gt_data_df, target_odom_data_df, 
-                                                           t_That_s_data_df, columns_target_gt_data, 
-                                                           columns_target_odom_data, columns_t_That_s_data)
-
-        
-        columns_w_That_t_data = [time_data_setpoint, "x", "y", "z", "qx", "qy", "qz", "qw", "yaw"]
-
-
-        plot_3d_scatter(path_folder, source_gt_data_df, source_odom_data_df, 
-                        target_gt_data_df, target_odom_data_df, w_That_t_data_df, 
-                        columns_source_gt_data, columns_source_odom_data, columns_target_gt_data, 
-                        columns_target_odom_data, columns_w_That_t_data, source_odom_origin, target_odom_origin)
-                
-        # #Plot position vs time
-        plot_pose_temporal_evolution(path_folder, target_gt_data_df, w_That_t_data_df, 
-                                     covariance_data_df, covariance_odom_data_df, target_odom_data_df, columns_target_gt_data, 
-                                     columns_w_That_t_data, columns_covariance, columns_odom_covariance, columns_target_odom_data, 
-                                     t0, target_odom_origin)
-
-        # #Plot attitude vs time
-
-        rpy_attitude_opt_data_df = w_That_t_data_df[["qw", "qx", "qy", "qz"]].apply(lambda row: pd.Series(quaternion_to_euler_angles(row), index=['roll', 'pitch', 'yaw']), axis=1)    
-        rpy_attitude_gt_data_df = target_gt_data_df[[target_gt_q3_data, target_gt_q0_data, target_gt_q1_data, target_gt_q2_data]].apply(lambda row: pd.Series(quaternion_to_euler_angles(row), index=['roll', 'pitch', 'yaw']), axis=1)    
-        rpy_attitude_odom_data_df = target_odom_data_df[[target_odom_q3_data, target_odom_q0_data, target_odom_q1_data, target_odom_q2_data]].apply(lambda row: pd.Series(quaternion_to_euler_angles(row), index=['roll', 'pitch', 'yaw']), axis=1)    
-
-
-        # Add the timestamp column to the resulting DataFrame
-        rpy_attitude_opt_data_df[time_data_setpoint] = w_That_t_data_df[time_data_setpoint]
-        rpy_attitude_gt_data_df[time_data_setpoint] = target_gt_data_df[time_data_setpoint]
-        rpy_attitude_odom_data_df[time_data_setpoint] = target_odom_data_df[time_data_setpoint]
-
-
-        #Add the previously computed yaw column to optimized data
-        rpy_attitude_opt_data_df["yaw"] = w_That_t_data_df["yaw"]
-
-        # Reorder the columns to make timestamp the first column
-        rpy_attitude_cols = [time_data_setpoint, "roll", "pitch", "yaw"]
-        
-        rpy_attitude_opt_data_df = rpy_attitude_opt_data_df[rpy_attitude_cols]
-        rpy_attitude_gt_data_df = rpy_attitude_gt_data_df[rpy_attitude_cols]
-        rpy_attitude_odom_data_df = rpy_attitude_odom_data_df[rpy_attitude_cols]
-
-        plot_attitude_temporal_evolution(path_folder, rpy_attitude_gt_data_df, rpy_attitude_opt_data_df, 
-                                         covariance_data_df, covariance_odom_data_df, rpy_attitude_odom_data_df, 
-                                         rpy_attitude_cols, columns_covariance, columns_odom_covariance, target_odom_origin)
 
         if simulation == "True":
 
@@ -823,37 +652,54 @@ def plot_experiment_data(path_experiment_data, path_folder, gt_available = "True
             plot_metrics(path_folder, metrics_df_data, columns_metrics, t0, "Relative transform errors", "transform")
             plot_metrics(path_folder, metrics_traj_df_data, columns_traj_metrics, t0, "Overall trajectory errors", "trajectory")
         
+        #Transform local poses of graph to a global frame of reference using the anchors
+        poses_uav_world = compute_poses_local_to_world(time_data_setpoint, poses_uav, anchor_target_df, anchor_target_uav_cols, use_last=True, use_gt = False, gt_anchor = target_odom_origin)
+        poses_agv_world = compute_poses_local_to_world(time_data_setpoint, poses_agv, anchor_source_df, anchor_source_agv_cols, use_last=True, use_gt = False, gt_anchor = source_odom_origin)
+        
         #plot posegraphs
-        plot_posegraph_temporal(path_folder, "posegraph_agv_world_poses", poses_agv_world, source_gt_data_df, columns_source_gt_data)
-        plot_posegraph_temporal(path_folder, "posegraph_uav_world_poses", poses_uav_world, target_gt_data_df, columns_target_gt_data)
-        plot_posegraph_temporal(path_folder, "posegraph_agv_local_poses", poses_agv, source_odom_data_df, columns_source_odom_data)
-        plot_posegraph_temporal(path_folder, "posegraph_uav_local_poses", poses_uav, target_odom_data_df, columns_target_odom_data)
+        plot_posegraph_temporal(path_folder, "posegraph_agv_world_poses", "AGV global trajectory wrt time", poses_agv_world, source_gt_data_df, columns_source_gt_data)
+        plot_posegraph_temporal(path_folder, "posegraph_uav_world_poses", "UAV global trajectory wrt time", poses_uav_world, target_gt_data_df, columns_target_gt_data)
+        
+        plot_posegraph_temporal(path_folder, "posegraph_agv_local_poses", "AGV local trajectory wrt time", poses_agv, source_gt_data_df, columns_source_gt_data, source_odom_origin)
+        plot_posegraph_temporal(path_folder, "posegraph_uav_local_poses", "UAV local trajectory wrt time", poses_uav, target_gt_data_df, columns_target_gt_data, target_odom_origin)
         
         plot_posegraphs_3d(path_folder, "posegraph_3d_poses", poses_agv_world, poses_uav_world, source_gt_data_df, target_gt_data_df, columns_source_gt_data, columns_target_gt_data)
-        plot_posegraphs_3d_side_by_side(path_folder, "local_posegraph_3d_poses", poses_agv, poses_uav)
+        
+        # === Transform GT to local frame ===
+        gt_agv_local_df = transform_gt_to_local(source_gt_data_df, columns_source_gt_data, source_odom_origin)
+        gt_uav_local_df = transform_gt_to_local(target_gt_data_df, columns_target_gt_data, target_odom_origin)
+        
+        plot_posegraphs_3d_side_by_side(path_folder, "local_posegraph_3d_poses", poses_agv, poses_uav, gt_agv=gt_agv_local_df, gt_uav=gt_uav_local_df,
+                                cols_gt_agv=columns_source_gt_data, cols_gt_uav=columns_target_gt_data)
 
         rmse_agv_pos, rmse_agv_yaw = compute_rmse(poses_agv_world, source_gt_data_df, pose_graph_agv_cols, columns_source_gt_data)
         rmse_uav_pos, rmse_uav_yaw = compute_rmse(poses_uav_world, target_gt_data_df, pose_graph_uav_cols, columns_target_gt_data)
         print(f'RMSE AGV ----> Translation: {rmse_agv_pos} m, Rotation: {np.rad2deg(rmse_agv_yaw)} º')
         print(f'RMSE UAV ----> Translation: {rmse_uav_pos} m, Rotation: {np.rad2deg(rmse_uav_yaw)} º')
+
+        plot_transform(path_folder, t_That_s_data_df, covariance_data_df, columns_t_That_s_data, columns_covariance, t0, source_odom_origin, target_odom_origin)
     
+        #Plot radar
+        plot_radar_velocities(path_folder, radar_source_df, radar_source_cols, label="AGV Radar", filename="radar_velocity_agv", gt_df = source_gt_data_df, 
+                              gt_cols = columns_source_gt_data, gt_origin = source_odom_origin,
+                              odom_df=source_odom_vel_data_df, odom_cols=columns_source_odom_vel_data)
+        plot_radar_velocities(path_folder, radar_target_df, radar_target_cols, label="UAV Radar", filename="radar_velocity_uav", gt_df = target_gt_data_df, gt_cols = columns_target_gt_data, gt_origin = target_odom_origin)    
+     
     else:
         t0 = target_odom_data_df[columns_target_odom_data[0]].iloc[0]
+        #Transform local poses of graph to a global frame of reference using the anchors
+        poses_uav_world = compute_poses_local_to_world(time_data_setpoint, poses_uav, anchor_target_df, anchor_target_uav_cols, use_last=True)
+        poses_agv_world = compute_poses_local_to_world(time_data_setpoint, poses_agv, anchor_source_df, anchor_source_agv_cols, use_last=True)
         plot_posegraph_temporal(path_folder, "posegraph_agv_world_poses", poses_agv_world)
         plot_posegraph_temporal(path_folder, "posegraph_uav_world_poses", poses_uav_world)
         plot_posegraph_temporal(path_folder, "posegraph_agv_local_poses", poses_agv, source_odom_data_df, columns_source_odom_data)
         plot_posegraph_temporal(path_folder, "posegraph_uav_local_poses", poses_uav, target_odom_data_df, columns_target_odom_data)
         plot_posegraphs_3d(path_folder, "posegraph_3d_poses", poses_agv_world, poses_uav_world)
+        plot_transform(path_folder, t_That_s_data_df, covariance_data_df, columns_t_That_s_data, columns_covariance, t0)
 
-    #Append yaw to the last column of the estimated transform
-    t_That_s_data_df = add_yaw_to_df(t_That_s_data_df,
-                               opt_T_target_source_q0_data,
-                               opt_T_target_source_q1_data,
-                               opt_T_target_source_q2_data,
-                               opt_T_target_source_q3_data)
-    columns_t_That_s_data = columns_t_That_s_data + ["yaw"]
-    plot_transform(path_folder, t_That_s_data_df, covariance_data_df, columns_t_That_s_data, columns_covariance, t0, source_odom_origin, target_odom_origin)
-
+        #Plot radar
+        plot_radar_velocities(path_folder, radar_source_df, radar_source_cols, label="AGV Radar", filename="radar_velocity_agv", gt_df = source_gt_data_df, gt_cols = None, gt_origin = None)
+        plot_radar_velocities(path_folder, radar_target_df, radar_target_cols, label="UAV Radar", filename="radar_velocity_uav", gt_df = target_gt_data_df, gt_cols = None, gt_origin = None)    
 
 
 def graph_dict_to_df(pose_graph):
@@ -958,10 +804,16 @@ def plot_posegraphs_3d(path, filename, poses_agv, poses_uav, gt_agv = None, gt_u
             '-o', color='blue', label='UAV Trajectory')
     
     if gt_agv is not None and cols_gt_agv is not None:
-        ax.plot(gt_agv[cols_gt_agv[1]], gt_agv[cols_gt_agv[2]], gt_agv[cols_gt_agv[3]], c='r', label='ref source', linewidth=2)
+        ax.plot(gt_agv[cols_gt_agv[1]], gt_agv[cols_gt_agv[2]], gt_agv[cols_gt_agv[3]], c='r', label='GT AGV', linewidth=2)
+        # # Highlight AGV GT start
+        ax.scatter(gt_agv[cols_gt_agv[1]].iloc[0], gt_agv[cols_gt_agv[2]].iloc[0], gt_agv[cols_gt_agv[3]].iloc[0],
+                   color='red', marker='*', s=140, label='Start AGV')
 
     if gt_uav is not None and cols_gt_uav is not None:
-        ax.plot(gt_uav[cols_gt_uav[1]], gt_uav[cols_gt_uav[2]], gt_uav[cols_gt_uav[3]], c='b', label='ref target', linewidth=2)
+        ax.plot(gt_uav[cols_gt_uav[1]], gt_uav[cols_gt_uav[2]], gt_uav[cols_gt_uav[3]], c='b', label='GT UAV', linewidth=2)
+        #  # Highlight UAV GT start
+        ax.scatter(gt_uav[cols_gt_uav[1]].iloc[0], gt_uav[cols_gt_uav[2]].iloc[0], gt_uav[cols_gt_uav[3]].iloc[0],
+                   color='blue', marker='*', s=140, label='Start UAV')
 
     ax.set_xlabel("X (m)")
     ax.set_ylabel("Y (m)")
@@ -975,7 +827,7 @@ def plot_posegraphs_3d(path, filename, poses_agv, poses_uav, gt_agv = None, gt_u
 
     plt.show()
 
-def plot_posegraph_temporal(path, filename, poses, gt = None, cols_gt = None):
+def plot_posegraph_temporal(path, filename, title, poses, gt = None, cols_gt = None, gt_origin = None):
     """
     Plots the temporal evolution of x, y, z, and yaw given a dictionary of poses.
     
@@ -1042,21 +894,61 @@ def plot_posegraph_temporal(path, filename, poses, gt = None, cols_gt = None):
     axs[3].set_xlabel('Time (s)')
 
     if gt is not None and cols_gt is not None:
+
         gt[cols_gt[0]] = gt[cols_gt[0]] - gt[cols_gt[0]].iloc[0]
-        axs[0].plot(np.array(gt[cols_gt[0]]), np.array(gt[cols_gt[1]]), c='r', label = 'target ref')
-        axs[1].plot(np.array(gt[cols_gt[0]]), np.array(gt[cols_gt[2]]), c='r', label = 'target ref')
-        axs[2].plot(np.array(gt[cols_gt[0]]), np.array(gt[cols_gt[3]]), c='r', label = 'target ref')
+
+        if gt_origin is not None: 
+            T_local_world = np.linalg.inv(gt_origin)
+            gt_local_positions = []
+            gt_local_yaws = []
+
+            for i in range(len(gt)):
+                pos = gt.iloc[i][[cols_gt[1], cols_gt[2], cols_gt[3]]].values
+                quat = gt.iloc[i][[cols_gt[4], cols_gt[5], cols_gt[6], cols_gt[7]]].values
+
+                T_world = np.eye(4)
+                T_world[:3, 3] = pos
+                T_world[:3, :3] = R.from_quat(quat).as_matrix()
+
+                T_local = T_local_world @ T_world
+
+                gt_local_positions.append(T_local[:3, 3])
+                yaw_local = R.from_matrix(T_local[:3, :3]).as_euler('zyx')[0]
+                gt_local_yaws.append(yaw_local)
+
+            gt_local_positions = np.array(gt_local_positions)
+            gt_x = gt_local_positions[:, 0]
+            gt_y = gt_local_positions[:, 1]
+            gt_z = gt_local_positions[:, 2]
+            gt_yaw = np.array(gt_local_yaws)
+        
+        else: 
+            
+            # axs[0].plot(np.array(gt[cols_gt[0]]), np.array(gt[cols_gt[1]]), c='r', label = 'target ref')
+            # axs[1].plot(np.array(gt[cols_gt[0]]), np.array(gt[cols_gt[2]]), c='r', label = 'target ref')
+            # axs[2].plot(np.array(gt[cols_gt[0]]), np.array(gt[cols_gt[3]]), c='r', label = 'target ref')
+            
+            gt_x = np.array(gt[cols_gt[1]])
+            gt_y = np.array(gt[cols_gt[2]])
+            gt_z = np.array(gt[cols_gt[3]])
             # Compute ground truth yaw from quaternion data.
-        gt_yaw = []
-        for i in range(len(gt)):
-            quat = [gt[cols_gt[4]].iloc[i], gt[cols_gt[5]].iloc[i],
-                    gt[cols_gt[6]].iloc[i], gt[cols_gt[7]].iloc[i]]
-            yaw_val = R.from_quat(quat).as_euler('zyx', degrees=False)[0]
-            gt_yaw.append(yaw_val)
-        gt_yaw = np.array(gt_yaw)
+            gt_yaw = []
+            for i in range(len(gt)):
+                quat = [gt[cols_gt[4]].iloc[i], gt[cols_gt[5]].iloc[i],
+                        gt[cols_gt[6]].iloc[i], gt[cols_gt[7]].iloc[i]]
+                yaw_val = R.from_quat(quat).as_euler('zyx', degrees=False)[0]
+                gt_yaw.append(yaw_val)
+            gt_yaw = np.array(gt_yaw)
+            #axs[3].plot(np.array(gt[cols_gt[0]]), gt_yaw, c='r', label = 'target ref')
+
+
+        axs[0].plot(np.array(gt[cols_gt[0]]), gt_x, c='r', label = 'target ref')
+        axs[1].plot(np.array(gt[cols_gt[0]]), gt_y, c='r', label = 'target ref')
+        axs[2].plot(np.array(gt[cols_gt[0]]), gt_z, c='r', label = 'target ref')
         axs[3].plot(np.array(gt[cols_gt[0]]), gt_yaw, c='r', label = 'target ref')
+
     
-    plt.suptitle("Temporal Evolution of Pose (x, y, z, yaw)")
+    plt.suptitle(title)
 
     plt.savefig(path + f'/{filename}.svg', format = 'svg', bbox_inches='tight')
     plt.savefig(path + f'/{filename}.png', format = 'png', bbox_inches='tight')
@@ -1065,80 +957,177 @@ def plot_posegraph_temporal(path, filename, poses, gt = None, cols_gt = None):
 
 def plot_posegraphs_3d_side_by_side(path, filename, poses_agv, poses_uav, gt_agv=None, gt_uav=None, cols_gt_agv=None, cols_gt_uav=None):
     """
-    Plots the 3D trajectories for AGV and UAV side-by-side in different subplots.
+    Plots the 3D local trajectories for AGV and UAV side-by-side in different subplots.
+    Estimated poses are plotted as blue lines with blue dots. Ground truth is plotted as red solid lines.
 
     Parameters:
-        poses_agv (dict): Dictionary of AGV poses. Each key is an index and each value is a dict with:
-                          - 'timestamp': float (seconds)
-                          - 'position': np.array of shape (3,)
-        poses_uav (dict): Dictionary of UAV poses, with the same structure as poses_agv.
-        gt_agv (np.array, optional): Ground truth data for AGV.
-        gt_uav (np.array, optional): Ground truth data for UAV.
-        cols_gt_agv (list, optional): List of indices to extract columns from gt_agv.
-        cols_gt_uav (list, optional): List of indices to extract columns from gt_uav.
+        poses_agv (dict): AGV local trajectory as a dictionary.
+        poses_uav (dict): UAV local trajectory as a dictionary.
+        gt_agv (pd.DataFrame, optional): Local ground truth DataFrame for AGV.
+        gt_uav (pd.DataFrame, optional): Local ground truth DataFrame for UAV.
+        cols_gt_agv (list, optional): Column names for AGV GT [timestamp, x, y, z, qx, qy, qz, qw].
+        cols_gt_uav (list, optional): Column names for UAV GT [timestamp, x, y, z, qx, qy, qz, qw].
     """
-    # Process AGV poses.
-    agv_data = []
-    for idx, pose in poses_agv.items():
-        if (pose.get('timestamp') is not None and 
-            pose.get('position') is not None and 
-            not np.isnan(pose['timestamp'])):
-            agv_data.append((pose['timestamp'], pose['position']))
-    if len(agv_data) == 0:
-        print("No valid AGV poses found.")
+    def extract_positions(poses):
+        data = [(pose['timestamp'], pose['position']) for pose in poses.values()
+                if pose['timestamp'] is not None and pose['position'] is not None and not np.isnan(pose['timestamp'])]
+        data.sort(key=lambda x: x[0])
+        return np.vstack([pos for _, pos in data]) if data else None
+
+    agv_positions = extract_positions(poses_agv)
+    uav_positions = extract_positions(poses_uav)
+
+    if agv_positions is None or uav_positions is None:
+        print("No valid AGV or UAV poses found.")
         return
-    agv_data.sort(key=lambda x: x[0])
-    agv_positions = np.vstack([pos for _, pos in agv_data])
-    
-    # Process UAV poses.
-    uav_data = []
-    for idx, pose in poses_uav.items():
-        if (pose.get('timestamp') is not None and 
-            pose.get('position') is not None and 
-            not np.isnan(pose['timestamp'])):
-            uav_data.append((pose['timestamp'], pose['position']))
-    if len(uav_data) == 0:
-        print("No valid UAV poses found.")
-        return
-    uav_data.sort(key=lambda x: x[0])
-    uav_positions = np.vstack([pos for _, pos in uav_data])
-    
-    # Create figure with 2 side-by-side 3D subplots.
+
     fig = plt.figure(figsize=(14, 6))
     ax_agv = fig.add_subplot(121, projection='3d')
     ax_uav = fig.add_subplot(122, projection='3d')
-    
-    # Plot AGV trajectory.
+
+    # AGV subplot
     ax_agv.plot(agv_positions[:, 0], agv_positions[:, 1], agv_positions[:, 2],
-                '-o', color='red', label='AGV Trajectory')
-    ax_agv.set_title("AGV Trajectory")
+                color='blue', marker='o', linestyle='-', label='AGV Estimated')
+    if gt_agv is not None and cols_gt_agv is not None:
+        ax_agv.plot(gt_agv[cols_gt_agv[1]], gt_agv[cols_gt_agv[2]], gt_agv[cols_gt_agv[3]],
+                    color='red', linestyle='-', linewidth=2, label='AGV Ground Truth')
+
+    ax_agv.set_title("AGV Local Trajectory")
     ax_agv.set_xlabel("X (m)")
     ax_agv.set_ylabel("Y (m)")
     ax_agv.set_zlabel("Z (m)")
+    ax_agv.view_init(elev=90, azim=90)  # Top-down XY view
     ax_agv.legend()
-    
-    # Optionally, plot ground truth for AGV.
-    if gt_agv is not None and cols_gt_agv is not None:
-        ax_agv.plot(gt_agv[cols_gt_agv[1]], gt_agv[cols_gt_agv[2]], gt_agv[cols_gt_agv[3]], 
-                    c='r', label='AGV Ground Truth', linewidth=2)
-    
-    # Plot UAV trajectory.
+    ax_agv.grid()
+
+    # UAV subplot
     ax_uav.plot(uav_positions[:, 0], uav_positions[:, 1], uav_positions[:, 2],
-                '-o', color='blue', label='UAV Trajectory')
-    ax_uav.set_title("UAV Trajectory")
+                color='blue', marker='o', linestyle='-', label='UAV Estimated')
+    if gt_uav is not None and cols_gt_uav is not None:
+        ax_uav.plot(gt_uav[cols_gt_uav[1]], gt_uav[cols_gt_uav[2]], gt_uav[cols_gt_uav[3]],
+                    color='red', linestyle='-', linewidth=2, label='UAV Ground Truth')
+
+    ax_uav.set_title("UAV Local Trajectory")
     ax_uav.set_xlabel("X (m)")
     ax_uav.set_ylabel("Y (m)")
     ax_uav.set_zlabel("Z (m)")
     ax_uav.legend()
-    
-    # Optionally, plot ground truth for UAV.
-    if gt_uav is not None and cols_gt_uav is not None:
-        ax_uav.plot(gt_uav[cols_gt_uav[1]], gt_uav[cols_gt_uav[2]], gt_uav[cols_gt_uav[3]],
-                    c='b', label='UAV Ground Truth', linewidth=2)
-    
-    plt.suptitle("3D Trajectories of AGV and UAV")
+    ax_uav.grid()
+
+    plt.suptitle("3D Local Trajectories: Estimated vs Ground Truth")
     plt.tight_layout()
     plt.savefig(path + f'/{filename}.png', format='png', bbox_inches='tight')
+    plt.savefig(path + f'/{filename}.svg', format='svg', bbox_inches='tight')
+    plt.show()
+
+
+
+def plot_radar_velocities(path, radar_df, cols_radar, label="Radar", filename="radar_velocity",
+                          gt_df=None, gt_cols=None, gt_origin=None,
+                          odom_df=None, odom_cols=None):
+    """
+    Plots smoothed radar linear velocities over time and optionally compares to
+    estimated ground truth velocities and/or odometry velocities.
+
+    Parameters:
+        path (str): Directory to save the plot.
+        radar_df (pd.DataFrame): DataFrame with radar velocity data.
+        cols_radar (list): [timestamp, vx, vy, vz] column names in radar_df.
+        label (str): Label prefix for legends.
+        filename (str): Output filename (without extension).
+        gt_df (pd.DataFrame, optional): Ground truth pose data (position over time).
+        gt_cols (list, optional): Column names [timestamp, x, y, z] in gt_df.
+        gt_origin (np.array, optional): 4x4 transformation matrix from local to world.
+        odom_df (pd.DataFrame, optional): Odometry linear velocity data.
+        odom_cols (list, optional): [timestamp, vx, vy, vz] column names in odom_df.
+    """
+    radar_df = radar_df.copy()
+    radar_df[cols_radar[0]] -= radar_df[cols_radar[0]].iloc[0]
+    time = radar_df[cols_radar[0]].values
+    vx = radar_df[cols_radar[1]].rolling(window=10, center=True).mean()
+    vy = radar_df[cols_radar[2]].rolling(window=10, center=True).mean()
+    vz = radar_df[cols_radar[3]].rolling(window=10, center=True).mean()
+
+    fig, axes = plt.subplots(3, 1, figsize=(15, 12), sharex=True)
+    plt.suptitle(f"{label} Linear Velocities (Smoothed)")
+
+    # === Optional: Odometry velocity ===
+    if odom_df is not None and odom_cols is not None:
+        odom_df = odom_df.copy()
+        odom_df[odom_cols[0]] -= odom_df[odom_cols[0]].iloc[0]
+        odom_df = odom_df.drop_duplicates(subset=odom_cols[0])
+        odom_df = odom_df.sort_values(odom_cols[0])
+        odom_time = odom_df[odom_cols[0]].values
+        vx_odom = odom_df[odom_cols[1]].values
+        vy_odom = odom_df[odom_cols[2]].values
+        vz_odom = odom_df[odom_cols[3]].values
+        odom_available = True
+    else:
+        odom_available = False
+
+    # === Optional: GT velocity ===
+    gt_available = False
+    if gt_df is not None and gt_cols is not None and gt_origin is not None:
+        gt_df = gt_df.copy()
+        gt_df[gt_cols[0]] -= gt_df[gt_cols[0]].iloc[0]
+        gt_df = gt_df.drop_duplicates(subset=gt_cols[0])
+        gt_df = gt_df.sort_values(gt_cols[0]).reset_index(drop=True)
+        gt_time = gt_df[gt_cols[0]].values
+
+        if len(gt_time) >= 3 and np.all(np.diff(gt_time) > 0):
+            uniform_time = np.linspace(gt_time[0], gt_time[-1], num=len(gt_time))
+            interp_x = interp1d(gt_time, gt_df[gt_cols[1]], kind='linear', fill_value="extrapolate")
+            interp_y = interp1d(gt_time, gt_df[gt_cols[2]], kind='linear', fill_value="extrapolate")
+            interp_z = interp1d(gt_time, gt_df[gt_cols[3]], kind='linear', fill_value="extrapolate")
+
+            x_uniform = interp_x(uniform_time)
+            y_uniform = interp_y(uniform_time)
+            z_uniform = interp_z(uniform_time)
+
+            window = min(21, len(x_uniform) // 2 * 2 + 1)
+            poly = 3
+
+            vx_map = savgol_filter(x_uniform, window_length=window, polyorder=poly, deriv=1, delta=np.mean(np.diff(uniform_time)))
+            vy_map = savgol_filter(y_uniform, window_length=window, polyorder=poly, deriv=1, delta=np.mean(np.diff(uniform_time)))
+            vz_map = savgol_filter(z_uniform, window_length=window, polyorder=poly, deriv=1, delta=np.mean(np.diff(uniform_time)))
+
+            R_map_to_local = gt_origin[:3, :3].T
+            gt_vel_local = R_map_to_local @ np.vstack((vx_map, vy_map, vz_map))
+            vx_gt, vy_gt, vz_gt = gt_vel_local[0], gt_vel_local[1], gt_vel_local[2]
+            gt_available = True
+
+    # === Plot X ===
+    axes[0].plot(time, vx, color='b', label=f"{label} Vx")
+    if gt_available:
+        axes[0].plot(uniform_time, vx_gt, color='r', linestyle='--', label='GT Vx')
+    if odom_available:
+        axes[0].plot(odom_time, vx_odom, color='g', linestyle='--', label='Odom Vx')
+    axes[0].set_ylabel("Vx (m/s)")
+    axes[0].legend()
+    axes[0].grid()
+
+    # === Plot Y ===
+    axes[1].plot(time, vy, color='b', label=f"{label} Vy")
+    if gt_available:
+        axes[1].plot(uniform_time, vy_gt, color='r', linestyle='--', label='GT Vy')
+    if odom_available:
+        axes[1].plot(odom_time, vy_odom, color='g', linestyle='--', label='Odom Vy')
+    axes[1].set_ylabel("Vy (m/s)")
+    axes[1].legend()
+    axes[1].grid()
+
+    # === Plot Z ===
+    axes[2].plot(time, vz, color='b', label=f"{label} Vz")
+    if gt_available:
+        axes[2].plot(uniform_time, vz_gt, color='r', linestyle='--', label='GT Vz')
+    if odom_available:
+        axes[2].plot(odom_time, vz_odom, color='g', linestyle='--', label='Odom Vz')
+    axes[2].set_ylabel("Vz (m/s)")
+    axes[2].set_xlabel("Time (s)")
+    axes[2].legend()
+    axes[2].grid()
+
+    plt.savefig(path + f"/{filename}.png", bbox_inches='tight')
     plt.show()
 
 def load_pose_graph(df, cols):
@@ -1232,6 +1221,28 @@ def add_yaw_to_df(df, col_qx, col_qy, col_qz, col_qw, new_col_name="yaw"):
     yaws = R.from_quat(quats).as_euler('zyx', degrees=False)[:, 0]  # extract yaw only
     df[new_col_name] = yaws
     return df
+
+def transform_gt_to_local(gt_df, cols_gt, T_world_to_local):
+    """
+    Transforms GT trajectory to local frame using inverse of initial pose.
+    Returns a new DataFrame with transformed positions.
+    """
+    T_inv = np.linalg.inv(T_world_to_local)
+    positions_local = []
+    for i in range(len(gt_df)):
+        pos = gt_df.iloc[i][[cols_gt[1], cols_gt[2], cols_gt[3]]].values
+        quat = gt_df.iloc[i][[cols_gt[4], cols_gt[5], cols_gt[6], cols_gt[7]]].values
+        T_w = np.eye(4)
+        T_w[:3, 3] = pos
+        T_w[:3, :3] = R.from_quat(quat).as_matrix()
+        T_l = T_inv @ T_w
+        positions_local.append(T_l[:3, 3])
+    new_df = gt_df.copy()
+    local_pos = np.array(positions_local)
+    new_df[cols_gt[1]] = local_pos[:, 0]
+    new_df[cols_gt[2]] = local_pos[:, 1]
+    new_df[cols_gt[3]] = local_pos[:, 2]
+    return new_df
 
 def main():
 

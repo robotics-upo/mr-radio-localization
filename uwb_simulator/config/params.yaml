@@ -39,11 +39,11 @@ odometry_simulator:
   ros__parameters:
     simple_trajectory: False
     holonomic_xy: False    #move independently in horizontal plane
-    trajectory_name: "trajectory_lemniscate"
+    trajectory_name: "trajectory_random_1"
     total_distance: 100
     pub_rate: 10.0
     use_sim_time: True
-    uav_origin: [0.5, -0.5, 2.0, 0.524] #xyz yaw
+    uav_origin: [0.25, -0.25, 2.0, 0.124] #xyz yaw
     ground_vehicle_origin: [0.0, 0.0, 0.0, 0.0] #xyz yaw
     linear_velocity_range: [0.1, 1.0]
     max_linear_acceleration: 0.5 #m/s²

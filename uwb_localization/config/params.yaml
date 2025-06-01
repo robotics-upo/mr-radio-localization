@@ -1,7 +1,7 @@
 eliko_global_opt_node:
   ros__parameters:
     use_sim_time: true
-    odom_topic_agv: "/arco/idmind_motors/odom" #or "/agv/odom" #"/arco/idmind_motors/odom"
+    odom_topic_agv: "/agv/odom" #or "/agv/odom" #"/arco/idmind_motors/odom"
     odom_topic_uav: "/uav/odom"
     opt_timer_rate: 10.0 #Hz
     min_measurements: 50
@@ -9,11 +9,11 @@ eliko_global_opt_node:
     min_traveled_angle: 0.262 #radians 15 deg approx
     max_traveled_distance: 10.0 #m
     measurement_stdev: 0.1 #m
-    odom_error_position: 1.0 # %,  meters for every 100 meters traveled
-    odom_error_angle: 1.0 # % degrees for every 100 degrees
-    dll_odom: false #set this to true to subscribe to the poses estimated by dll, instead of odometry
+    odom_error_position: 2.0 # %,  meters for every 100 meters traveled
+    odom_error_angle: 2.0 # % degrees for every 100 degrees
+    debug: true #set this to true to subscribe to the poses estimated by dll and publish gt ranges
     use_prior: true
-    init_solution: [-2.0, 2.0, 0.0, 3.14]
+    init_solution: [0.0, 0.0, 0.0, 0.0]
     use_ransac: true # use ransac algorithm with the prior
     moving_average: true
     moving_average_max_samples: 10
@@ -43,7 +43,7 @@ eliko_global_opt_node:
 fusion_optimization_node:
   ros__parameters:
     use_sim_time: true
-    odom_topic_agv: "/arco/idmind_motors/odom" #or "/agv/odom" #"/arco/idmind_motors/odom"
+    odom_topic_agv: "/agv/odom" #or "/agv/odom" #"/arco/idmind_motors/odom"
     lidar_topic_agv: "/arco/ouster/points"
     radar_topic_agv: "/agv/filtered_pointcloud" #or /arco/radar/PointCloudDetection OR /agv/filtered_pointcloud
     radar_egovel_topic_agv: "/agv/Ego_Vel_Twist"
@@ -60,14 +60,14 @@ fusion_optimization_node:
     using_lidar: false
     using_radar: true
     lidar_stdev: 0.05
-    radar_stdev: 0.1
+    radar_stdev: 0.2
     icp_type_lidar: 0   #ICP algorithm variant: 2->Generalized ICP, 1->Point to Plane ICP, else -> basic ICP
     icp_type_radar: 2
     radar_history_size: 3 #history of radar keyframes to compare against
     agv_init_pose: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0] #Local initial pose AGV [xyz rpy] [-2.805, -1.951, 0.0, 0.0, 0.0, -0.102]
     uav_init_pose: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0] #Local initial pose UAV
-    agv_anchor_prior: [13.694, 25.197, 0.58, 0.001, 0.001, 3.09] #[13.694, 25.197, 0.58, 0.001, 0.001, 3.09] #prior for the AGV anchor node (initial pose wrt global map frame)
-    uav_anchor_prior: [15.925, 22.978, 0.91, 0.0, 0.0, 0.028] #[15.925, 22.978, 0.91, 0.0, 0.0, 0.028] #prior for the UAV anchor node (initial pose wrt global map frame)
+    agv_anchor_prior: [13.351, 27.385, 0.636, 0.001, 0.001, 3.079] #[13.351, 27.385, 0.636, 0.001, 0.001, 3.079] #prior for the AGV anchor node (initial pose wrt global map frame)
+    uav_anchor_prior: [13.351, 27.385, 0.636, 0.001, 0.001, 3.079] #[15.351, 23.385, 0.9, 0.0, 0.0, 0.028] #prior for the UAV anchor node (initial pose wrt global map frame)
     imu_agv: 
         position: [0.0, 0.0, 0.165, 0.0, 0.0, 0.0] # x y z r p y 
     imu_uav: 
