@@ -178,6 +178,32 @@ public:
         return poses;
     }
 
+    void getMetrics() const
+    {
+        if (total_solves_ > 0 && !solver_times_.empty())
+        {
+            double avg = total_solver_time_ / static_cast<double>(total_solves_);
+            double sum_sq = 0.0;
+
+            for (const auto& time : solver_times_) {
+                sum_sq += (time - avg) * (time - avg);
+            }
+
+            double std_dev = std::sqrt(sum_sq / static_cast<double>(solver_times_.size()));
+
+            RCLCPP_INFO(this->get_logger(),
+                        "===== Ceres Solver Pose Graph Metrics =====\n"
+                        "Total runs              : %d\n"
+                        "Total time              : %.6f s\n"
+                        "Average time per solve  : %.6f s\n"
+                        "Std dev of solve times  : %.6f s",
+                        total_solves_, total_solver_time_, avg, std_dev);
+        }
+        else
+        {
+            RCLCPP_WARN(this->get_logger(), "No solver runs have completed yet.");
+        }
+    }
 
 
 private:
@@ -534,26 +560,31 @@ private:
     }
 
     void AgvEgoVelCb(const geometry_msgs::msg::TwistWithCovarianceStamped::SharedPtr msg) {
-        // store the latest AGV radar ego‐velocity
-        double vx = msg->twist.twist.linear.x;
-        double vy = msg->twist.twist.linear.y;
-        double vz = msg->twist.twist.linear.z;
-        double v = std::sqrt(vx*vx + vy*vy + vz*vz);
-        //Filter bad samples
-        if(std::abs(v) > 2.5) return;
+        
+        Eigen::Vector3d raw_velocity(msg->twist.twist.linear.x, msg->twist.twist.linear.y, msg->twist.twist.linear.z);
+
+        // Filter using median-then-average approach
+        Eigen::Vector3d filtered_velocity = filterVelocities(agv_velocity_buffer_, raw_velocity, 10);
+        
         agv_radar_egovel_ = *msg;
+        // Store the smoothed velocity
+        agv_radar_egovel_.twist.twist.linear.x = filtered_velocity.x();
+        agv_radar_egovel_.twist.twist.linear.y = filtered_velocity.y();
+        agv_radar_egovel_.twist.twist.linear.z = filtered_velocity.z();
         last_agv_egovel_time_sec_ = rclcpp::Time(msg->header.stamp).seconds();
     }
     
     void UavEgoVelCb(const geometry_msgs::msg::TwistWithCovarianceStamped::SharedPtr msg) {
-        // store the latest UAV radar ego‐velocity
-        double vx = msg->twist.twist.linear.x;
-        double vy = msg->twist.twist.linear.y;
-        double vz = msg->twist.twist.linear.z;
-        double v = std::sqrt(vx*vx + vy*vy + vz*vz);
-        //Filter bad samples
-        if(std::abs(v) > 2.5) return;
+
+        Eigen::Vector3d raw_velocity(msg->twist.twist.linear.x, msg->twist.twist.linear.y, msg->twist.twist.linear.z);
+
+        // Filter using median-then-average approach
+        Eigen::Vector3d filtered_velocity = filterVelocities(uav_velocity_buffer_, raw_velocity, 10);
+        
         uav_radar_egovel_ = *msg;
+        uav_radar_egovel_.twist.twist.linear.x = filtered_velocity.x();
+        uav_radar_egovel_.twist.twist.linear.y = filtered_velocity.y();
+        uav_radar_egovel_.twist.twist.linear.z = filtered_velocity.z();
         last_uav_egovel_time_sec_ = rclcpp::Time(msg->header.stamp).seconds();
     }
 
@@ -624,6 +655,7 @@ private:
         constraint.id_begin = id_source;
         constraint.id_end = id_target;
         constraint.t_T_s = T_icp_d;
+
         if(icp_type == 2) {
             if(fitness >= 2.0 || fitness <= 0.0) return false;
             // constraint.covariance = weight * reduceCovarianceMatrix(final_hessian.inverse());
@@ -693,7 +725,7 @@ private:
             //Get first measurements
             agv_measurements_.timestamp = current_time;
             *(agv_measurements_.lidar_scan) = *(preprocessPointCloud(agv_lidar_cloud_, 50.0, 2.0, pointcloud_lidar_sigma_));
-            *(agv_measurements_.radar_scan) = *(preprocessPointCloud(agv_radar_cloud_, 50.0, 2.0, pointcloud_radar_sigma_));
+            *(agv_measurements_.radar_scan) = *(agv_radar_cloud_);
             // 2) grab latest radar ego-velocity from your subscriber
             agv_measurements_.radar_egovel = Eigen::Vector3d{
                 agv_radar_egovel_.twist.twist.linear.x,
@@ -750,7 +782,7 @@ private:
 
             uav_measurements_.timestamp = current_time;
             *(uav_measurements_.lidar_scan) = *(preprocessPointCloud(uav_lidar_cloud_, 50.0, 2.0, pointcloud_lidar_sigma_));
-            *(uav_measurements_.radar_scan) = *(preprocessPointCloud(uav_radar_cloud_, 50.0, 2.0, pointcloud_radar_sigma_));
+            *(uav_measurements_.radar_scan) = *(uav_radar_cloud_);
             uav_measurements_.radar_egovel = Eigen::Vector3d{
                 uav_radar_egovel_.twist.twist.linear.x,
                 uav_radar_egovel_.twist.twist.linear.y,
@@ -884,16 +916,9 @@ private:
             double tilt = std::acos( R_odom_agv(2,2) );  // dot(body_z, world_z)
             new_agv.planar = ( tilt <= 15.0 * M_PI/180.0 );
 
-            if(agv_id_ > min_keyframes_){
-                new_agv.state = agv_map_[agv_id_ - 1].state;
-                new_agv.pose = agv_map_[agv_id_ - 1].pose;
-                new_agv.covariance = agv_map_[agv_id_ - 1].covariance;
-            }
-            else{
             new_agv.state = Eigen::Vector4d(t_odom_agv[0], t_odom_agv[1], t_odom_agv[2], euler_agv[0]);
             new_agv.pose = buildTransformationSE3(new_agv.roll, new_agv.pitch, new_agv.state);
             new_agv.covariance = Eigen::Matrix4d::Identity();
-            }
             
             agv_map_[agv_id_] = new_agv;
 
@@ -953,10 +978,12 @@ private:
 
                         if (agv_measurements_.radar_velocity_ok) {
                             Eigen::Vector3d radar_vel_body = T_agv_imu_.rotationMatrix() * agv_measurements_.radar_egovel;
+                            double dt_agv = (agv_measurements_.timestamp - prev_agv_measurements_.timestamp).seconds();
                             T_icp = integrateEgoVelIntoSE3(
                                 radar_vel_body,
-                                prev_agv_measurements_.timestamp,
-                                agv_measurements_.timestamp
+                                prev_agv_measurements_.odom_pose,
+                                agv_measurements_.odom_pose,
+                                dt_agv
                             ).cast<float>().matrix();
                         }
                         
@@ -1024,16 +1051,9 @@ private:
             
             new_uav.planar = false;
 
-            if(uav_id_ > min_keyframes_){
-                new_uav.state = uav_map_[uav_id_ - 1].state;
-                new_uav.pose = uav_map_[uav_id_ - 1].pose;
-                new_uav.covariance = uav_map_[uav_id_ - 1].covariance;
-            }
-            else{
             new_uav.state = Eigen::Vector4d(t_odom_uav[0], t_odom_uav[1], t_odom_uav[2], euler_uav[0]);
             new_uav.pose = buildTransformationSE3(new_uav.roll, new_uav.pitch, new_uav.state);
             new_uav.covariance = Eigen::Matrix4d::Identity();
-            }
 
             uav_map_[uav_id_] = new_uav;
 
@@ -1051,6 +1071,7 @@ private:
                 Sophus::SE3d odom_T_s_uav = prev_uav_measurements_.odom_pose;
                 Sophus::SE3d odom_T_t_uav = uav_measurements_.odom_pose;
                 constraint_odom_uav.t_T_s = odom_T_t_uav.inverse()*odom_T_s_uav;
+
                 constraint_odom_uav.covariance = computeRelativeOdometryCovariance(uav_measurements_.odom_pose, prev_uav_measurements_.odom_pose,
                                                                                     uav_measurements_.odom_covariance, prev_uav_measurements_.odom_covariance);
                 proprioceptive_constraints_uav_.push_back(constraint_odom_uav);
@@ -1089,12 +1110,13 @@ private:
                         if(using_odom_ && uav_measurements_.odom_ok) T_icp = (radar_uav.odom_pose.inverse() * olderKF.odom_pose).cast<float>().matrix();
                         
                         if (uav_measurements_.radar_velocity_ok) {
-                            // Transform radar velocity vector from IMU frame to body frame
                             Eigen::Vector3d radar_vel_body = T_uav_imu_.rotationMatrix() * uav_measurements_.radar_egovel;
+                            double dt_uav = (uav_measurements_.timestamp - prev_uav_measurements_.timestamp).seconds();
                             T_icp = integrateEgoVelIntoSE3(
                                 radar_vel_body,
-                                prev_uav_measurements_.timestamp,
-                                uav_measurements_.timestamp
+                                prev_uav_measurements_.odom_pose,
+                                uav_measurements_.odom_pose,
+                                dt_uav
                             ).cast<float>().matrix();
                         }
                         
@@ -1550,21 +1572,21 @@ private:
         return cloud_with_normals;
     }
 
-    static Sophus::SE3d integrateEgoVelIntoSE3(
-        const Eigen::Vector3d &linear_vel,
-        const rclcpp::Time    &t_prev,
-        const rclcpp::Time    &t_curr)
+    Sophus::SE3d integrateEgoVelIntoSE3(
+        const Eigen::Vector3d& radar_vel_t,     // body-frame velocity at time t
+        const Sophus::SE3d& odom_T_s,           // odom at source time (earlier)
+        const Sophus::SE3d& odom_T_t,           // odom at target time (later)
+        double dt)
     {
-        // Compute Δt in seconds
-        double dt = (t_curr - t_prev).seconds();
-    
-        // Δtranslation = v * dt
-        Eigen::Vector3d delta_x = linear_vel * dt;
+        // Integrate velocity forward in odom frame
+        //Eigen::Vector3d delta_t = odom_T_t.rotationMatrix() * radar_vel_t * dt;
+        Eigen::Vector3d delta_t = radar_vel_t * dt;
 
-        //We want the transform from source to target
-        return Sophus::SE3d{Eigen::Quaterniond::Identity(), delta_x};
+        //Sophus::SE3d t_T_s_odom = odom_T_t.inverse() * odom_T_s;
+        // Combine rotation from odometry and translation from radar
+        // return Sophus::SE3d(t_T_s_odom.so3(), -delta_t);
+        return Sophus::SE3d{Eigen::Quaterniond::Identity(), delta_t};
     }
-
 
     // Helper function to add measurement (proprioceptive or extraceptive) constraints.
     bool addMeasurementConstraints(ceres::Problem &problem, 
@@ -1727,7 +1749,6 @@ private:
             else problem.SetManifold(state.state.data(), state_manifold_4d);
 
             if (isNodeFixedKF(agv_id_, it->first, max_keyframes_, min_keyframes_)) problem.SetParameterBlockConstant(state.state.data());
-            else RCLCPP_DEBUG(this->get_logger(), "Optimizing for AGV node %d", it->first);
         }
 
         for (auto it = uav_map.begin(); it != uav_map.end(); ++it) {
@@ -1807,46 +1828,83 @@ private:
         // Notify and update values if optimization converged
         if (summary.termination_type == ceres::CONVERGENCE){
 
+
+            total_solves_++;
+            total_solver_time_ += summary.total_time_in_seconds;
+            solver_times_.push_back(summary.total_time_in_seconds);
+
             // --- Compute Covariances for the Last Nodes ---
             // Here we compute the covariance for the last AGV and UAV states.
             ceres::Covariance::Options cov_options;
             ceres::Covariance covariance(cov_options);
 
             std::vector<std::pair<const double*, const double*>> covariance_blocks;
+            // AFTER all parameter blocks and cost functions are added
             for (auto& kv : agv_map) {
-                // kv.first is the node's unique ID and kv.second is the State.
-                covariance_blocks.emplace_back(kv.second.state.data(), kv.second.state.data());
+                if (!problem.IsParameterBlockConstant(kv.second.state.data()))
+                    covariance_blocks.emplace_back(kv.second.state.data(), kv.second.state.data());
             }
-
             for (auto& kv : uav_map) {
-                // kv.first is the node's unique ID and kv.second is the State.
-                covariance_blocks.emplace_back(kv.second.state.data(), kv.second.state.data());
+                if (!problem.IsParameterBlockConstant(kv.second.state.data()))
+                    covariance_blocks.emplace_back(kv.second.state.data(), kv.second.state.data());
             }
+            // Anchor nodes, if not constant
+            if (!problem.IsParameterBlockConstant(anchor_node_agv_.state.data()))
+                covariance_blocks.emplace_back(anchor_node_agv_.state.data(), anchor_node_agv_.state.data());
 
-            covariance_blocks.emplace_back(anchor_node_agv_.state.data(), anchor_node_agv_.state.data());
-            covariance_blocks.emplace_back(anchor_node_uav_.state.data(), anchor_node_uav_.state.data());
+            if (!problem.IsParameterBlockConstant(anchor_node_uav_.state.data()))
+                covariance_blocks.emplace_back(anchor_node_uav_.state.data(), anchor_node_uav_.state.data());
 
             if (covariance.Compute(covariance_blocks, &problem)) {
-                // Update each node's covariance in the unified map.
+
+                std::unordered_set<const double*> requested_blocks;
+                for (const auto& pair : covariance_blocks) {
+                    requested_blocks.insert(pair.first);  // pair.first == pair.second
+                }
+
                 for (auto& kv : agv_map) {
-                    Eigen::Matrix4d cov = Eigen::Matrix4d::Zero();
-                    covariance.GetCovarianceBlock(kv.second.state.data(), kv.second.state.data(), cov.data());
-                    kv.second.covariance = cov;
+                    const double* ptr = kv.second.state.data();
+                    if (requested_blocks.count(ptr)) {
+                        double cov_data[16];
+                        if (covariance.GetCovarianceBlock(ptr, ptr, cov_data)) {
+                            kv.second.covariance = Eigen::Map<Eigen::Matrix4d>(cov_data);
+                        } else {
+                            kv.second.covariance = Eigen::Matrix4d::Identity();
+                            RCLCPP_WARN(this->get_logger(), "Failed to get AGV covariance for node %d", kv.first);
+                        }
+                    }
                 }
 
                 for (auto& kv : uav_map) {
-                    Eigen::Matrix4d cov = Eigen::Matrix4d::Zero();
-                    covariance.GetCovarianceBlock(kv.second.state.data(), kv.second.state.data(), cov.data());
-                    kv.second.covariance = cov;
+                    const double* ptr = kv.second.state.data();
+                    if (requested_blocks.count(ptr)) {
+                        double cov_data[16];
+                        if (covariance.GetCovarianceBlock(ptr, ptr, cov_data)) {
+                            kv.second.covariance = Eigen::Map<Eigen::Matrix4d>(cov_data);
+                        } else {
+                            kv.second.covariance = Eigen::Matrix4d::Identity();
+                            RCLCPP_WARN(this->get_logger(), "Failed to get UAV covariance for node %d", kv.first);
+                        }
+                    }
                 }
 
-                Eigen::Matrix4d cov_anchor_agv = Eigen::Matrix4d::Zero();
-                covariance.GetCovarianceBlock(anchor_node_agv_.state.data(), anchor_node_agv_.state.data(), cov_anchor_agv.data());
-                anchor_node_agv_.covariance = cov_anchor_agv;
+                if (requested_blocks.count(anchor_node_agv_.state.data())) {
+                    double cov_data[16];
+                    if (covariance.GetCovarianceBlock(anchor_node_agv_.state.data(), anchor_node_agv_.state.data(), cov_data)) {
+                        anchor_node_agv_.covariance = Eigen::Map<Eigen::Matrix4d>(cov_data);
+                    } else {
+                        anchor_node_agv_.covariance = Eigen::Matrix4d::Identity();
+                    }
+                }
 
-                Eigen::Matrix4d cov_anchor_uav = Eigen::Matrix4d::Zero();
-                covariance.GetCovarianceBlock(anchor_node_uav_.state.data(), anchor_node_uav_.state.data(), cov_anchor_uav.data());
-                anchor_node_uav_.covariance = cov_anchor_uav;
+                if (requested_blocks.count(anchor_node_uav_.state.data())) {
+                    double cov_data[16];
+                    if (covariance.GetCovarianceBlock(anchor_node_uav_.state.data(), anchor_node_uav_.state.data(), cov_data)) {
+                        anchor_node_uav_.covariance = Eigen::Map<Eigen::Matrix4d>(cov_data);
+                    } else {
+                        anchor_node_uav_.covariance = Eigen::Matrix4d::Identity();
+                    }
+                }
 
             } else {
                 RCLCPP_WARN(this->get_logger(), "Failed to compute covariances.");
@@ -1921,6 +1979,10 @@ private:
     bool uwb_transform_available_; 
     geometry_msgs::msg::PoseWithCovarianceStamped latest_relative_pose_;
     geometry_msgs::msg::TwistWithCovarianceStamped agv_radar_egovel_, uav_radar_egovel_;
+    
+    std::deque<Eigen::Vector3d> agv_velocity_buffer_;
+    std::deque<Eigen::Vector3d> uav_velocity_buffer_;
+    
     Sophus::SE3d latest_relative_pose_SE3_;
     Eigen::Matrix<double, 6, 6> latest_relative_pose_cov_;
 
@@ -1965,6 +2027,10 @@ private:
     double uav_translation_, agv_translation_;
     double uav_rotation_, agv_rotation_;
 
+    int total_solves_ = 0;
+    double total_solver_time_ = 0.0;
+    std::vector<double> solver_times_;
+
 };
 int main(int argc, char** argv) {
 
@@ -1980,6 +2046,8 @@ int main(int argc, char** argv) {
     // Write the CSV file
     writePoseGraphToCSV(agv_pose_graph, "agv_pose_graph.csv");
     writePoseGraphToCSV(uav_pose_graph, "uav_pose_graph.csv");
+
+    node->getMetrics();
 
     rclcpp::shutdown();
     return 0;

@@ -66,7 +66,7 @@ fusion_optimization_node:
     radar_history_size: 3 #history of radar keyframes to compare against
     agv_init_pose: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0] #Local initial pose AGV [xyz rpy] [-2.805, -1.951, 0.0, 0.0, 0.0, -0.102]
     uav_init_pose: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0] #Local initial pose UAV
-    agv_anchor_prior: [13.351, 27.385, 0.636, 0.001, 0.001, 3.079] #[13.694, 25.197, 0.58, 0.001, 0.001, 3.09] #prior for the AGV anchor node (initial pose wrt global map frame)
+    agv_anchor_prior: [13.351, 27.385, 0.636, 0.001, 0.001, 3.079] #[13.351, 27.385, 0.636, 0.001, 0.001, 3.079] #prior for the AGV anchor node (initial pose wrt global map frame)
     uav_anchor_prior: [13.351, 27.385, 0.636, 0.001, 0.001, 3.079] #[15.351, 23.385, 0.9, 0.0, 0.0, 0.028] #prior for the UAV anchor node (initial pose wrt global map frame)
     imu_agv: 
         position: [0.0, 0.0, 0.165, 0.0, 0.0, 0.0] # x y z r p y 

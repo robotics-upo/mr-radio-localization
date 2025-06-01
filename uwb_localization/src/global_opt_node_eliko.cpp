@@ -119,22 +119,31 @@ public:
   }
 
   void getMetrics() const
-  {
-    if (total_solves_ > 0)
     {
-      double avg = total_solver_time_ / static_cast<double>(total_solves_);
-      RCLCPP_INFO(this->get_logger(),
-                  "===== Ceres Solver Metrics =====\n"
-                  "Total runs: %d\n"
-                  "Total time: %.6f s\n"
-                  "Average time per solve: %.6f s",
-                  total_solves_, total_solver_time_, avg);
+        if (total_solves_ > 0 && !solver_times_.empty())
+        {
+            double avg = total_solver_time_ / static_cast<double>(total_solves_);
+            double sum_sq = 0.0;
+
+            for (const auto& time : solver_times_) {
+                sum_sq += (time - avg) * (time - avg);
+            }
+
+            double std_dev = std::sqrt(sum_sq / static_cast<double>(solver_times_.size()));
+
+            RCLCPP_INFO(this->get_logger(),
+                        "===== Ceres Solver Relative Transformation Metrics =====\n"
+                        "Total runs              : %d\n"
+                        "Total time              : %.6f s\n"
+                        "Average time per solve  : %.6f s\n"
+                        "Std dev of solve times  : %.6f s",
+                        total_solves_, total_solver_time_, avg, std_dev);
+        }
+        else
+        {
+            RCLCPP_WARN(this->get_logger(), "No solver runs have completed yet.");
+        }
     }
-    else
-    {
-      RCLCPP_WARN(this->get_logger(), "No solver runs have completed yet.");
-    }
-  }
 
 private:
 
@@ -565,22 +574,27 @@ private:
         /*Check the robots have moved enough between optimizations*/
         bool uav_enough_movement = uav_delta_translation_ >= min_traveled_distance_ || uav_delta_rotation_ >= min_traveled_angle_;
         bool agv_enough_movement = agv_delta_translation_ >= min_traveled_distance_ || agv_delta_rotation_ >= min_traveled_angle_;
-        if (!uav_enough_movement && !agv_enough_movement) {
+        if (!uav_enough_movement || !agv_enough_movement) {
             RCLCPP_WARN_THROTTLE(this->get_logger(), *this->get_clock(), 1000, "[Eliko global_opt node] Insufficient movement UAV = [%.2fm %.2fº], AGV= [%.2fm %.2fº]. Skipping optimization.", uav_delta_translation_, uav_delta_rotation_ * 180.0/M_PI, agv_delta_translation_, agv_delta_rotation_ * 180.0/M_PI);
             return;
         }
 
-        // // Remove very old measurements
-        // while (!global_measurements_.empty() &&
-        //       (current_time - global_measurements_.front().timestamp).seconds() > 60.0) {
-        //     global_measurements_.pop_front();
-        // }
-
         //*****************Displace window based on distance traveled ****************************/
         while (!global_measurements_.empty()) {
+   
             // Get the oldest measurement.
             const UWBMeasurement &oldest = global_measurements_.front();
             const UWBMeasurement &latest = global_measurements_.back();
+            rclcpp::Time current_latest_stamp = latest.timestamp;
+
+            // //Guard to check if no new measurements have arrived, even if the robots have moved
+            // if (current_latest_stamp.seconds() <= last_optimization_latest_stamp_.seconds()) {
+            //     RCLCPP_WARN_THROTTLE(this->get_logger(), *this->get_clock(), 1000,
+            //         "[Eliko global_opt node] Skipping optimization: No new measurements since last optimization (latest timestamp: %.3f).",
+            //         current_latest_stamp.seconds());
+            //     return;
+            // }
+
              // Compute the net displacement over the window using the stored cumulative distances.
             double uav_disp = latest.uav_cumulative_distance - oldest.uav_cumulative_distance;
             double agv_disp = latest.agv_cumulative_distance - oldest.agv_cumulative_distance;
@@ -609,6 +623,7 @@ private:
         for (const auto& measurement : global_measurements_) {
             observed_tags.insert(measurement.tag_id);
         }
+        
         if (observed_tags.size() < 2) {
             RCLCPP_WARN(this->get_logger(), "[Eliko global_opt node] Only one tag available. YAW IS NOT RELIABLE.");
             return;
@@ -659,6 +674,8 @@ private:
             
             geometry_msgs::msg::PoseWithCovarianceStamped msg = buildPoseMsg(opt_state_.pose, opt_state_.covariance + predicted_motion_covariance, opt_state_.timestamp, uav_odom_frame_id_);
             tf_publisher_->publish(msg);
+
+            last_optimization_latest_stamp_ = global_measurements_.back().timestamp;
 
         }
 
@@ -956,6 +973,8 @@ private:
                 
                 total_solves_++;
                 total_solver_time_ += summary.total_time_in_seconds;
+                solver_times_.push_back(summary.total_time_in_seconds);
+
                 // Compute Covariance
                 ceres::Covariance::Options cov_options;
                 ceres::Covariance covariance(cov_options);
@@ -1017,6 +1036,7 @@ private:
     bool use_prior_;
     bool use_ransac_;
     bool debug_;
+
     std::unordered_map<std::string, Eigen::Vector3d> anchor_positions_;
     std::unordered_map<std::string, Eigen::Vector3d> tag_positions_;
 
@@ -1044,9 +1064,13 @@ private:
 
     double odom_error_distance_, odom_error_angle_;
 
+    rclcpp::Time last_optimization_latest_stamp_;
+
     //Timing metrics
     int total_solves_;
     double total_solver_time_;
+    std::vector<double> solver_times_;
+
 
 };
 int main(int argc, char** argv) {

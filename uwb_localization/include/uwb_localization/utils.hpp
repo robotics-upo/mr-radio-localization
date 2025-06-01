@@ -246,6 +246,31 @@ namespace uwb_localization
         return output;
     }
 
+
+    inline Eigen::Vector3d filterVelocities(std::deque<Eigen::Vector3d>& buffer,
+                                            const Eigen::Vector3d& new_sample,
+                                            size_t max_size = 10,
+                                            double max_deviation = 1.5) {
+        // // Reject extreme outliers based on deviation from mean (if buffer isn't empty)
+        // if (!buffer.empty()) {
+        //     Eigen::Vector3d mean = std::accumulate(buffer.begin(), buffer.end(), Eigen::Vector3d::Zero().eval()) / static_cast<double>(buffer.size());
+        //     double deviation = (new_sample - mean).norm();
+        //     if (deviation > max_deviation) {
+        //         // Skip adding the sample — return smoothed current value
+        //         Eigen::Vector3d sum = std::accumulate(buffer.begin(), buffer.end(), Eigen::Vector3d::Zero().eval());
+        //         return sum / static_cast<double>(buffer.size());
+        //     }
+        // }
+
+        // Add new sample and maintain buffer size
+        buffer.push_back(new_sample);
+        if (buffer.size() > max_size) buffer.pop_front();
+
+        // Compute simple moving average
+        Eigen::Vector3d sum = std::accumulate(buffer.begin(), buffer.end(), Eigen::Vector3d::Zero().eval());
+        return sum / static_cast<double>(buffer.size());
+    }
+
 }
 
 #endif
