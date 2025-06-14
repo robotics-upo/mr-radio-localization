@@ -23,8 +23,14 @@ Clone this repository along with the dependency packages to your ROS 2 workspace
 
 This repository contains two ROS2 packages:
 
-* ```uwb_localization```: includes the UWB-based relative transformation estimation node and the pose-graph optimization node with radar constraints. The ```config``` folder in this package contains the parameter file for these two nodes. 
+* ```uwb_localization```: includes the UWB-based relative transformation estimation node and the pose-graph optimization node with radar constraints. The ```config``` folder in this package contains the parameter file for these two nodes.
+
+![](images/TFM_architecture.drawio.png)
+
 * ```uwb_simulator```: includes the odometry simulation node and the measurement simulation node.  The ```config``` folder in this package contains the parameter file for these two nodes.
+
+![](images/TFM_diagram_simulation.drawio.png)
+
 
 ## Launch files
 
@@ -37,8 +43,8 @@ ros2 launch uwb_localization localization.launch.py
 To launch the simulated scenario with just UWB and generic odometry, type:
 ``` 
 ros2 launch uwb_localization localization_sim.launch.py
-```
 
+```
 
 
 
