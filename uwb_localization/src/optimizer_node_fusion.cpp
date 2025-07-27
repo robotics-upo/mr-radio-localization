@@ -1585,7 +1585,7 @@ private:
         //Sophus::SE3d t_T_s_odom = odom_T_t.inverse() * odom_T_s;
         // Combine rotation from odometry and translation from radar
         // return Sophus::SE3d(t_T_s_odom.so3(), -delta_t);
-        return Sophus::SE3d{Eigen::Quaterniond::Identity(), delta_t};
+        return Sophus::SE3d{Eigen::Quaterniond::Identity(), -delta_t};
     }
 
     // Helper function to add measurement (proprioceptive or extraceptive) constraints.
