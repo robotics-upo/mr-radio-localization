@@ -1,0 +1,6 @@
+uav_offboard_control:
+  ros__parameters:
+    offboard_control_mode_topic: "/px4_1/fmu/in/offboard_control_mode"
+    trajectory_setpoint_topic: "/px4_1/fmu/in/trajectory_setpoint"
+    vehicle_command_topic: "/px4_1/fmu/in/vehicle_command"
+    vehicle_odometry_topic: "/px4_1/fmu/out/vehicle_odometry"
