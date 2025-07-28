@@ -30,7 +30,6 @@
 # POSSIBILITY OF SUCH DAMAGE.
 #
 ############################################################################
-cmake_minimum_required(VERSION 3.10)
 
 # Template for a new plugin project
 # Replace TemplatePlugin with your plugin name
@@ -41,24 +40,34 @@ project(UWBGazeboPlugin)
 
 # Find required packages
 # find_package(PackageName REQUIRED)
-
 find_package(ament_cmake REQUIRED)
-find_package(rclcpp REQUIRED)
-find_package(std_msgs REQUIRED)
-find_package(px4_gz_msgs REQUIRED)
+# find_package(rclcpp REQUIRED)
+# find_package(std_msgs REQUIRED)
 
 add_library(${PROJECT_NAME} SHARED
     # Add your source files here
-    UWBGazeboPlugin.cpp
+    UWBGazeboSystem.cpp
 )
+
+
+target_link_libraries(${PROJECT_NAME}
+    PUBLIC px4_gz_msgs
+    PUBLIC gz-sensors${gz-sensors_VERSION_MAJOR}::gz-sensors${gz-sensors_VERSION_MAJOR}
+    PUBLIC gz-plugin${gz-plugin_VERSION_MAJOR}::gz-plugin${gz-plugin_VERSION_MAJOR}
+    PUBLIC gz-sim${gz-sim_VERSION_MAJOR}::gz-sim${gz-sim_VERSION_MAJOR}
+    PUBLIC gz-transport${gz-transport_VERSION_MAJOR}::gz-transport${gz-transport_VERSION_MAJOR}
+    # Add other dependencies as needed
+    # PUBLIC ${OtherLib_LIBS}
+)
+
 
 target_include_directories(${PROJECT_NAME}
     PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}
     PUBLIC ${CMAKE_CURRENT_BINARY_DIR}
     PUBLIC px4_gz_msgs
     # Add other include directories as needed
-    PUBLIC ${rclcpp_INCLUDE_DIRS}
-    PUBLIC ${std_msgs_INCLUDE_DIRS}
+#     PUBLIC ${rclcpp_INCLUDE_DIRS}
+#     PUBLIC ${std_msgs_INCLUDE_DIRS}
     # PUBLIC ${OtherLib_INCLUDE_DIRS}
 )
 
