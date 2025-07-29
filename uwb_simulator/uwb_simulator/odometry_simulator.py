@@ -104,7 +104,10 @@ class OdometrySimulator(Node):
             else: self.uav_velocity_commands, self.agv_velocity_commands = self.generate_velocity_commands()
             
             self.save_trajectories()
+            # self.save_trajectory_positions()
         
+        self.save_trajectory_positions()
+
         # Plot the trajectories
         self.plot_trajectories()
 
@@ -648,6 +651,56 @@ class OdometrySimulator(Node):
             }
             np.save(self.trajectory_name, data)
             self.get_logger().info(f"Trajectories saved to {self.trajectory_name}")
+
+    def save_trajectory_positions(self):
+
+        """Integrate velocity commands and save trajectories as x, y, z, yaw coordinates."""
+        dt = 1.0 / self.publish_rate
+
+        # UAV trajectory integration
+        uav_positions = [self.uav_pose.copy()]
+        agv_positions = [self.agv_pose.copy()]
+
+        temp_uav_pose = self.uav_pose.copy()
+        temp_agv_pose = self.agv_pose.copy()
+
+        temp_traveled_distance_uav = temp_traveled_distance_agv = 0
+        temp_traveled_angle_uav = temp_traveled_angle_agv = 0
+
+        for uav_command in self.uav_velocity_commands:
+            v_uav = np.array(uav_command[:2])
+            w_uav = uav_command[2]
+            temp_traveled_distance_uav += np.linalg.norm(v_uav) * dt
+            temp_traveled_angle_uav += np.rad2deg(abs(w_uav) * dt)
+            temp_uav_pose, _ = self.integrate_odometry(
+                temp_uav_pose, v_uav, w_uav, dt,
+                temp_traveled_distance_uav, temp_traveled_angle_uav,
+                self.uav_origin, self.holonomic_xy
+            )
+            uav_positions.append(temp_uav_pose.copy())
+
+        for agv_command in self.agv_velocity_commands:
+            v_agv = np.array(agv_command[:2])
+            w_agv = agv_command[2]
+            temp_traveled_distance_agv += np.linalg.norm(v_agv) * dt
+            temp_traveled_angle_agv += np.rad2deg(abs(w_agv) * dt)
+            temp_agv_pose, _ = self.integrate_odometry(
+                temp_agv_pose, v_agv, w_agv, dt,
+                temp_traveled_distance_agv, temp_traveled_angle_agv,
+                self.agv_origin, self.holonomic_xy
+            )
+            agv_positions.append(temp_agv_pose.copy())
+
+        data = {
+            'uav_positions': np.array(uav_positions),  # Shape: [N, 4] (x, y, z, yaw)
+            'agv_positions': np.array(agv_positions)
+        }
+        
+        np.save(self.trajectory_name + "_positions.npy", data)
+        np.savetxt(self.trajectory_name + "_uav.csv", data['uav_positions'], delimiter=',', header="x,y,z,yaw", comments='')
+        np.savetxt(self.trajectory_name + "_agv.csv", data['agv_positions'], delimiter=',', header="x,y,z,yaw", comments='')
+        
+        self.get_logger().info(f"Trajectory positions saved to {self.trajectory_name}_position")
 
 
 

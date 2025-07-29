@@ -56,6 +56,11 @@
 
 #include <rclcpp/qos.hpp>
 
+#include <fstream>
+#include <sstream>
+#include <vector>
+
+
 using namespace std::chrono;
 using namespace std::chrono_literals;
 using namespace px4_msgs::msg;
@@ -71,17 +76,31 @@ public:
 		this->declare_parameter<std::string>("trajectory_setpoint_topic", "/px4_1/fmu/in/trajectory_setpoint");
 		this->declare_parameter<std::string>("vehicle_command_topic", "/px4_1/fmu/in/vehicle_command");
 		this->declare_parameter<std::string>("vehicle_odometry_topic", "/px4_1/fmu/out/vehicle_odometry");
+		this->declare_parameter<std::string>("trajectory_csv_file", "trajectory_lemniscate_uav.csv");
+		this->declare_parameter<double>("lookahead_distance", 2.0);
+		this->declare_parameter<double>("kp_v", 1.0);
+		this->declare_parameter<double>("kp_w", 0.1);
+
 
 		// Retrieve parameter values
 		std::string offboard_control_mode_topic;
 		std::string trajectory_setpoint_topic;
 		std::string vehicle_command_topic;
 		std::string vehicle_odometry_topic;
+		std::string traj_file;
 
 		this->get_parameter("offboard_control_mode_topic", offboard_control_mode_topic);
 		this->get_parameter("trajectory_setpoint_topic", trajectory_setpoint_topic);
 		this->get_parameter("vehicle_command_topic", vehicle_command_topic);
 		this->get_parameter("vehicle_odometry_topic", vehicle_odometry_topic);
+		this->get_parameter("trajectory_csv_file", traj_file);
+		this->get_parameter("lookahead_distance", lookahead_distance_);
+		this->get_parameter("kp_v", kp_v_);
+		this->get_parameter("kp_w", kp_w_);
+
+
+		load_trajectory(traj_file);
+		initial_hover_target_ = trajectory_.front();  // inside load_trajectory() after loading
 
 		// Create publishers with the topics from params
 		offboard_control_mode_publisher_ = this->create_publisher<OffboardControlMode>(offboard_control_mode_topic, 10);
@@ -213,7 +232,59 @@ private:
 	void publish_offboard_control_mode();
 	void publish_trajectory_setpoint();
 	void publish_vehicle_command(uint16_t command, float param1 = 0.0, float param2 = 0.0);
+	void load_trajectory(const std::string &filename);
+
+	std::vector<std::array<double, 4>> trajectory_;
+	size_t current_target_idx_ = 0;
+	size_t closest_idx_ = 0;
+	double lookahead_distance_ = 2.0;  // meters
+	double kp_v_ = 1.0;         // proportional gain
+	double kp_w_ = 0.1;
+
+	bool hover_reached_ = false;
+	std::array<double, 4> initial_hover_target_{0.0, 0.0, -2.0, -3.14};
+	double hover_tolerance_ = 0.3;  // meters
 };
+
+void UAVOffboardControl::load_trajectory(const std::string &filename)
+{
+	std::ifstream file(filename);
+	if (!file.is_open()) {
+		RCLCPP_ERROR(this->get_logger(), "Failed to open trajectory file: %s", filename.c_str());
+		return;
+	}
+
+	std::string line;
+	size_t line_num = 0;
+
+	// Skip the header row
+	std::getline(file, line);  // <- Skip line 1
+
+	while (std::getline(file, line)) {
+		line_num++;
+		std::stringstream ss(line);
+		std::string val;
+		std::array<double, 4> pose;
+		int i = 0;
+		while (std::getline(ss, val, ',')) {
+			try {
+				pose[i++] = std::stod(val);
+			} catch (const std::exception &e) {
+				RCLCPP_WARN(this->get_logger(), "Skipping invalid line %zu: %s", line_num + 1, line.c_str());
+				i = -1;
+				break;
+			}
+		}
+		if (i == 4) {
+			pose[2] = -pose[2];  // Flip Z from ENU to NED
+			trajectory_.push_back(pose);
+		}
+	}
+	file.close();
+
+	RCLCPP_INFO(this->get_logger(), "Loaded %zu trajectory points.", trajectory_.size());
+}
+
 
 /**
  * @brief Send a command to Arm the vehicle
@@ -242,8 +313,14 @@ void UAVOffboardControl::disarm()
 void UAVOffboardControl::publish_offboard_control_mode()
 {
 	OffboardControlMode msg{};
-	msg.position = true;
-	msg.velocity = false;
+	if(!hover_reached_){
+		msg.position = true;
+		msg.velocity = false;
+	}
+	else{
+		msg.position = false;
+		msg.velocity = true;
+	}
 	msg.acceleration = false;
 	msg.attitude = false;
 	msg.body_rate = false;
@@ -253,15 +330,121 @@ void UAVOffboardControl::publish_offboard_control_mode()
 
 /**
  * @brief Publish a trajectory setpoint
- *        For this example, it sends a trajectory setpoint to make the
- *        vehicle hover at 5 meters with a yaw angle of 180 degrees.
  */
 void UAVOffboardControl::publish_trajectory_setpoint()
 {
+	std::array<double, 4> pose;
+	{
+		std::lock_guard<std::mutex> lock(position_mutex_);
+		pose = current_pose_;
+	}
+
+	if (!hover_reached_) {
+		// Check distance to hover point
+		double dx = pose[0] - initial_hover_target_[0];
+		double dy = pose[1] - initial_hover_target_[1];
+		double dz = pose[2] - initial_hover_target_[2];
+		double dist = std::sqrt(dx*dx + dy*dy + dz*dz);
+
+		// Send hover command
+		TrajectorySetpoint msg{};
+		msg.position = {initial_hover_target_[0], initial_hover_target_[1], initial_hover_target_[2]};
+		msg.yaw = initial_hover_target_[3];
+		msg.timestamp = this->get_clock()->now().nanoseconds() / 1000;
+		trajectory_setpoint_publisher_->publish(msg);
+
+		if (dist < hover_tolerance_) {
+			RCLCPP_INFO(this->get_logger(), "Initial hover position reached.");
+			hover_reached_ = true;
+		}
+		return;
+	}
+
+	// ---- Begin normal trajectory tracking ----
+
+	if (trajectory_.empty()) {
+		RCLCPP_WARN_THROTTLE(this->get_logger(), *this->get_clock(), 2000, "Trajectory is empty");
+		return;
+	}
+
+	// Step 1: Find the closest point in a forward-looking window
+	size_t window_size = 50;
+	size_t search_start = closest_idx_;
+	size_t search_end = std::min(closest_idx_ + window_size, trajectory_.size());
+
+	double min_dist = std::numeric_limits<double>::max();
+	size_t new_closest_idx = closest_idx_;  // start from last known
+
+	for (size_t i = search_start; i < search_end; ++i) {
+		double dx = trajectory_[i][0] - pose[0];
+		double dy = trajectory_[i][1] - pose[1];
+		double dz = trajectory_[i][2] - pose[2];
+		double dist = std::sqrt(dx * dx + dy * dy + dz * dz);
+		if (dist < min_dist) {
+			min_dist = dist;
+			new_closest_idx = i;
+		}
+	}
+
+	double accum_dist = 0.0;
+	size_t new_target_idx = closest_idx_;
+
+	for (size_t i = closest_idx_ + 1; i < trajectory_.size(); ++i) {
+		double dx = trajectory_[i][0] - trajectory_[i-1][0];
+		double dy = trajectory_[i][1] - trajectory_[i-1][1];
+		double dz = trajectory_[i][2] - trajectory_[i-1][2];
+		accum_dist += std::sqrt(dx*dx + dy*dy + dz*dz);
+		if (accum_dist >= lookahead_distance_) {
+			new_target_idx = i;
+			break;
+		}
+	}
+
+
+	// Update indices
+	closest_idx_ = new_closest_idx;
+	current_target_idx_ = new_target_idx;
+
+	const auto &target = trajectory_[current_target_idx_];
+
+	// Compute position error
+	double ex = target[0] - pose[0];
+	double ey = target[1] - pose[1];
+	double ez = target[2] - pose[2];
+	double dist = std::sqrt(ex*ex + ey*ey + ez*ez);
+
+	// Compute unit direction vector
+	double ux = ex / dist;
+	double uy = ey / dist;
+	double uz = ez / dist;
+
+	// Compute commanded velocity magnitude
+	double max_vel = 1.5;
+	double vel_mag = std::min(kp_v_ * dist, max_vel);	// double vel_mag = 0.5; //track at constant velocity
+	// Apply velocity vector
+	double vx = vel_mag * ux;
+	double vy = vel_mag * uy;
+	double vz = 2.0 * vel_mag * uz;
+
+	// Construct setpoint message
 	TrajectorySetpoint msg{};
-	msg.position = {0.0, 0.0, -5.0};
-	msg.yaw = -3.14; // [-PI:PI]
+	msg.velocity = {vx, vy, vz};
+	double yaw_error = target[3] - pose[3];
+	yaw_error = std::atan2(std::sin(yaw_error), std::cos(yaw_error));
+	msg.yawspeed = kp_w_ * yaw_error;	
 	msg.timestamp = this->get_clock()->now().nanoseconds() / 1000;
+
+	RCLCPP_INFO(this->get_logger(),
+    "Current -> x: %.2f, y: %.2f, z: %.2f, yaw: %.2f | "
+    "Target -> x: %.2f, y: %.2f, z: %.2f, yaw: %.2f | "
+    "Error -> dx: %.2f, dy: %.2f, dz: %.2f | dist: %.2f | "
+    "Setpoint -> vx: %.2f, vy: %.2f, vz: %.2f, yawspeed: %.2f | current idx: %zu | target idx: %zu",
+    pose[0], pose[1], pose[2], pose[3],
+    target[0], target[1], target[2], target[3],
+    ex, ey, ez, dist,
+    vx, vy, vz, msg.yawspeed, closest_idx_, current_target_idx_);
+
+
 	trajectory_setpoint_publisher_->publish(msg);
 }
 
