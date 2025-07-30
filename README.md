@@ -46,6 +46,11 @@ ros2 launch uwb_localization localization_sim.launch.py
 
 ```
 
+## Acknowledgements
+
+![Logos](minci.png)
+
+This work was partially supported by the following grants: 1) INSERTION PID2021-127648OB-C31, and 2) RATEC PDC2022-133643-C21 projects, funded by MCIN/AEI/ 10.13039/501100011033 and the "European Union NextGenerationEU / PRTR".
 
 
 
