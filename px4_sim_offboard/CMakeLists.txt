@@ -17,8 +17,16 @@ find_package(geometry_msgs REQUIRED)
 add_executable(uav_offboard_control src/uav_offboard_control.cpp)
 ament_target_dependencies(uav_offboard_control rclcpp px4_msgs std_msgs nav_msgs geometry_msgs)
 
+add_executable(agv_offboard_control src/agv_offboard_control.cpp)
+ament_target_dependencies(agv_offboard_control rclcpp px4_msgs std_msgs nav_msgs geometry_msgs)
+
 install(TARGETS
   uav_offboard_control
+  DESTINATION lib/${PROJECT_NAME}
+)
+
+install(TARGETS
+  agv_offboard_control
   DESTINATION lib/${PROJECT_NAME}
 )
 

@@ -424,14 +424,22 @@ void UAVOffboardControl::publish_trajectory_setpoint()
 	// Apply velocity vector
 	double vx = vel_mag * ux;
 	double vy = vel_mag * uy;
-	double vz = 2.0 * vel_mag * uz;
+	double vz = vel_mag * uz;
 
 	// Construct setpoint message
 	TrajectorySetpoint msg{};
+	auto nan = std::numeric_limits<float>::quiet_NaN();
+
+	// Set velocity control mode only
+	msg.position = {nan, nan, nan};
+	double yaw_to_target = std::atan2(ey, ex);  // ey = target.y - current.y, ex = target.x - current.x
+	msg.yaw = static_cast<float>(yaw_to_target);
+
 	msg.velocity = {vx, vy, vz};
-	double yaw_error = target[3] - pose[3];
-	yaw_error = std::atan2(std::sin(yaw_error), std::cos(yaw_error));
-	msg.yawspeed = kp_w_ * yaw_error;	
+	// double yaw_error = target[3] - pose[3];
+	// yaw_error = std::atan2(std::sin(yaw_error), std::cos(yaw_error));
+	// msg.yawspeed = kp_w_ * yaw_error;
+	// msg.yawspeed = std::numeric_limits<float>::quiet_NaN();  // disable yaw rate control	
 	msg.timestamp = this->get_clock()->now().nanoseconds() / 1000;
 
 	RCLCPP_INFO(this->get_logger(),
@@ -460,7 +468,7 @@ void UAVOffboardControl::publish_vehicle_command(uint16_t command, float param1,
 	msg.param1 = param1;
 	msg.param2 = param2;
 	msg.command = command;
-	msg.target_system = 0; //CAREFUL WITH THIS!!!
+	msg.target_system = 2; //CAREFUL WITH THIS!!!
 	msg.target_component = 1;
 	msg.source_system = 1;
 	msg.source_component = 1;
