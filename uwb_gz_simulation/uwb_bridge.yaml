@@ -1,3 +1,5 @@
+## ros2 run ros_gz_bridge parameter_bridge --ros-args -p config_file:=uwb_bridge.yaml
+
 # UWB distance topic bridges (GZ_TO_ROS only)
 - ros_topic_name: "/uwb_gz_simulator/distances/a1t1"
   gz_topic_name: "/uwb_gz_simulator/distances/a1t1"

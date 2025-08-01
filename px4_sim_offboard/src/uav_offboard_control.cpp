@@ -77,49 +77,54 @@ public:
 		this->declare_parameter<std::string>("vehicle_command_topic", "/px4_1/fmu/in/vehicle_command");
 		this->declare_parameter<std::string>("vehicle_odometry_topic", "/px4_1/fmu/out/vehicle_odometry");
 		this->declare_parameter<std::string>("trajectory_csv_file", "trajectory_lemniscate_uav.csv");
+		this->declare_parameter<std::string>("ros_odometry_topic", "/uav/odom");
+
 		this->declare_parameter<double>("lookahead_distance", 2.0);
 		this->declare_parameter<double>("kp_v", 1.0);
 		this->declare_parameter<double>("kp_w", 0.1);
 
 
 		// Retrieve parameter values
-		std::string offboard_control_mode_topic;
-		std::string trajectory_setpoint_topic;
-		std::string vehicle_command_topic;
-		std::string vehicle_odometry_topic;
-		std::string traj_file;
+		std::string offboard_control_mode_topic_;
+		std::string trajectory_setpoint_topic_;
+		std::string vehicle_command_topic_;
+		std::string vehicle_odometry_topic_;
+		std::string ros_odometry_topic_;
+		std::string traj_file_;
 
-		this->get_parameter("offboard_control_mode_topic", offboard_control_mode_topic);
-		this->get_parameter("trajectory_setpoint_topic", trajectory_setpoint_topic);
-		this->get_parameter("vehicle_command_topic", vehicle_command_topic);
-		this->get_parameter("vehicle_odometry_topic", vehicle_odometry_topic);
-		this->get_parameter("trajectory_csv_file", traj_file);
+		this->get_parameter("offboard_control_mode_topic", offboard_control_mode_topic_);
+		this->get_parameter("trajectory_setpoint_topic", trajectory_setpoint_topic_);
+		this->get_parameter("vehicle_command_topic", vehicle_command_topic_);
+		this->get_parameter("vehicle_odometry_topic", vehicle_odometry_topic_);
+		this->get_parameter("trajectory_csv_file", traj_file_);
 		this->get_parameter("lookahead_distance", lookahead_distance_);
+		this->get_parameter("ros_odometry_topic", ros_odometry_topic_);
+
 		this->get_parameter("kp_v", kp_v_);
 		this->get_parameter("kp_w", kp_w_);
 
 
-		load_trajectory(traj_file);
+		load_trajectory(traj_file_);
 		initial_hover_target_ = trajectory_.front();  // inside load_trajectory() after loading
 
 		// Create publishers with the topics from params
-		offboard_control_mode_publisher_ = this->create_publisher<OffboardControlMode>(offboard_control_mode_topic, 10);
-		trajectory_setpoint_publisher_ = this->create_publisher<TrajectorySetpoint>(trajectory_setpoint_topic, 10);
-		vehicle_command_publisher_ = this->create_publisher<VehicleCommand>(vehicle_command_topic, 10);
+		offboard_control_mode_publisher_ = this->create_publisher<OffboardControlMode>(offboard_control_mode_topic_, 10);
+		trajectory_setpoint_publisher_ = this->create_publisher<TrajectorySetpoint>(trajectory_setpoint_topic_, 10);
+		vehicle_command_publisher_ = this->create_publisher<VehicleCommand>(vehicle_command_topic_, 10);
 
-		ros_odometry_publisher_ = this->create_publisher<nav_msgs::msg::Odometry>("/uav/odom", 10);
+		ros_odometry_publisher_ = this->create_publisher<nav_msgs::msg::Odometry>(ros_odometry_topic_, 10);
 
 		// Set QoS to match PX4 publisher
 		rclcpp::QoS qos_profile = rclcpp::SensorDataQoS();
 
 		vehicle_odometry_subscriber_ = this->create_subscription<px4_msgs::msg::VehicleOdometry>(
-			vehicle_odometry_topic, qos_profile,
+			vehicle_odometry_topic_, qos_profile,
 			[this](const px4_msgs::msg::VehicleOdometry::SharedPtr msg) {
 				
-				double qx = msg->q[0];
-				double qy = msg->q[1];
-				double qz = msg->q[2];
-				double qw = msg->q[3];
+				double qw = msg->q[0];
+				double qx = msg->q[1];
+				double qy = msg->q[2];
+				double qz = msg->q[3];
 
 				// Convert quaternion to yaw
 				double siny_cosp = 2.0 * (qw * qz + qx * qy);
@@ -137,8 +142,8 @@ public:
 				// Construct a nav_msgs/Odometry message
 				nav_msgs::msg::Odometry odom_msg;
 				odom_msg.header.stamp = this->get_clock()->now();
-				odom_msg.header.frame_id = "map";  // or "odom" or "world"
-				odom_msg.child_frame_id = "base_link";  // or "uav_base"
+				odom_msg.header.frame_id = "/uav/odom";  // or "odom" or "world"
+				odom_msg.child_frame_id = "/uav/base_link";  // or "uav_base"
 
 				// Position
 				odom_msg.pose.pose.position.x = msg->position[0];
@@ -370,7 +375,7 @@ void UAVOffboardControl::publish_trajectory_setpoint()
 	// Step 1: Find the closest point in a forward-looking window
 	size_t window_size = 50;
 	size_t search_start = closest_idx_;
-	size_t search_end = std::min(closest_idx_ + window_size, trajectory_.size());
+	size_t search_end = std::min(closest_idx_ + window_size, trajectory_.size() - 1);
 
 	double min_dist = std::numeric_limits<double>::max();
 	size_t new_closest_idx = closest_idx_;  // start from last known
@@ -442,15 +447,15 @@ void UAVOffboardControl::publish_trajectory_setpoint()
 	// msg.yawspeed = std::numeric_limits<float>::quiet_NaN();  // disable yaw rate control	
 	msg.timestamp = this->get_clock()->now().nanoseconds() / 1000;
 
-	RCLCPP_INFO(this->get_logger(),
-    "Current -> x: %.2f, y: %.2f, z: %.2f, yaw: %.2f | "
-    "Target -> x: %.2f, y: %.2f, z: %.2f, yaw: %.2f | "
-    "Error -> dx: %.2f, dy: %.2f, dz: %.2f | dist: %.2f | "
-    "Setpoint -> vx: %.2f, vy: %.2f, vz: %.2f, yawspeed: %.2f | current idx: %zu | target idx: %zu",
-    pose[0], pose[1], pose[2], pose[3],
-    target[0], target[1], target[2], target[3],
-    ex, ey, ez, dist,
-    vx, vy, vz, msg.yawspeed, closest_idx_, current_target_idx_);
+	// RCLCPP_INFO(this->get_logger(),
+    // "Current -> x: %.2f, y: %.2f, z: %.2f, yaw: %.2f | "
+    // "Target -> x: %.2f, y: %.2f, z: %.2f, yaw: %.2f | "
+    // "Error -> dx: %.2f, dy: %.2f, dz: %.2f | dist: %.2f | "
+    // "Setpoint -> vx: %.2f, vy: %.2f, vz: %.2f, yawspeed: %.2f | current idx: %zu | target idx: %zu",
+    // pose[0], pose[1], pose[2], pose[3],
+    // target[0], target[1], target[2], target[3],
+    // ex, ey, ez, dist,
+    // vx, vy, vz, msg.yawspeed, closest_idx_, current_target_idx_);
 
 
 	trajectory_setpoint_publisher_->publish(msg);
@@ -468,7 +473,7 @@ void UAVOffboardControl::publish_vehicle_command(uint16_t command, float param1,
 	msg.param1 = param1;
 	msg.param2 = param2;
 	msg.command = command;
-	msg.target_system = 2; //CAREFUL WITH THIS!!!
+	msg.target_system = 2; //2 //CAREFUL WITH THIS!!!
 	msg.target_component = 1;
 	msg.source_system = 1;
 	msg.source_component = 1;
