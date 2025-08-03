@@ -162,10 +162,10 @@ AGVOffboardControl::AGVOffboardControl() : Node("agv_offboard_control")
             odom_msg.pose.pose.position.z = - msg->position[2]; //it is NED, change to Z UP
 
             // Orientation
-            odom_msg.pose.pose.orientation.x = msg->q[0];
-            odom_msg.pose.pose.orientation.y = msg->q[1];
-            odom_msg.pose.pose.orientation.z = msg->q[2];
-            odom_msg.pose.pose.orientation.w = msg->q[3];
+            odom_msg.pose.pose.orientation.x = msg->q[1];
+            odom_msg.pose.pose.orientation.y = msg->q[2];
+            odom_msg.pose.pose.orientation.z = msg->q[3];
+            odom_msg.pose.pose.orientation.w = msg->q[0];
 
             // Linear velocity
             odom_msg.twist.twist.linear.x = msg->velocity[0];
