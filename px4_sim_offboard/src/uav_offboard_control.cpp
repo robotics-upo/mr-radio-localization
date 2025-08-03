@@ -148,7 +148,7 @@ public:
 				// Position
 				odom_msg.pose.pose.position.x = msg->position[0];
 				odom_msg.pose.pose.position.y = msg->position[1];
-				odom_msg.pose.pose.position.z = msg->position[2];
+				odom_msg.pose.pose.position.z = -msg->position[2]; //it is NED, change to Z UP
 
 				// Orientation
 				odom_msg.pose.pose.orientation.x = msg->q[0];

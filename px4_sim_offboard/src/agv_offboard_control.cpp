@@ -7,6 +7,12 @@
 #include <geometry_msgs/msg/point.hpp>
 #include <geometry_msgs/msg/quaternion.hpp>
 
+#include <std_msgs/msg/float64.hpp>
+#include <unordered_map>
+
+#include <eliko_messages/msg/distances.hpp>
+#include <eliko_messages/msg/distances_list.hpp>
+
 #include <rclcpp/rclcpp.hpp>
 #include <fstream>
 #include <sstream>
@@ -30,6 +36,7 @@ private:
     void publish_offboard_control_mode();
     void publish_trajectory_setpoint();
     void publish_vehicle_command(uint16_t command, float param1 = 0.0, float param2 = 0.0);
+    void publish_distances();
 
     // Retrieve parameter values
     std::string offboard_control_mode_topic_;
@@ -47,17 +54,38 @@ private:
     std::array<double, 3> current_pose_ = {0.0, 0.0, 0.0};
     std::mutex pose_mutex_;
 
-    rclcpp::TimerBase::SharedPtr timer_;
+    rclcpp::TimerBase::SharedPtr timer_, distances_timer_;
     rclcpp::Publisher<OffboardControlMode>::SharedPtr offboard_control_mode_publisher_;
     rclcpp::Publisher<TrajectorySetpoint>::SharedPtr trajectory_setpoint_publisher_;
     rclcpp::Publisher<VehicleCommand>::SharedPtr vehicle_command_publisher_;
     rclcpp::Publisher<nav_msgs::msg::Odometry>::SharedPtr ros_odometry_publisher_;
+    rclcpp::Publisher<eliko_messages::msg::DistancesList>::SharedPtr distances_list_pub_;
 
     rclcpp::Subscription<VehicleOdometry>::SharedPtr vehicle_odometry_subscriber_;
+
+
+    std::unordered_map<std::string, double> uwb_distances_;
+    std::mutex uwb_mutex_;
+    std::vector<rclcpp::Subscription<std_msgs::msg::Float64>::SharedPtr> uwb_subscribers_;
+    const std::vector<std::string> uwb_topic_names_ = {
+        "/uwb_gz_simulator/distances/a1t1",
+        "/uwb_gz_simulator/distances/a1t2",
+        "/uwb_gz_simulator/distances/a2t1",
+        "/uwb_gz_simulator/distances/a2t2",
+        "/uwb_gz_simulator/distances/a3t1",
+        "/uwb_gz_simulator/distances/a3t2",
+        "/uwb_gz_simulator/distances/a4t1",
+        "/uwb_gz_simulator/distances/a4t2"
+    };
+
+    std::unordered_map<std::string, std::string> anchor_ids_;
+    std::unordered_map<std::string, std::string> tag_ids_;
+
 };
 
 AGVOffboardControl::AGVOffboardControl() : Node("agv_offboard_control")
 {
+    //Declare parameters
     this->declare_parameter<std::string>("offboard_control_mode_topic", "/px4_2/fmu/in/offboard_control_mode");
     this->declare_parameter<std::string>("trajectory_setpoint_topic", "/px4_2/fmu/in/trajectory_setpoint");
     this->declare_parameter<std::string>("vehicle_command_topic", "/px4_2/fmu/in/vehicle_command");
@@ -68,6 +96,17 @@ AGVOffboardControl::AGVOffboardControl() : Node("agv_offboard_control")
     this->declare_parameter<double>("lookahead_distance", 1.0);
     this->declare_parameter<double>("kp_v", 1.0);
 
+    // Declare anchor IDs
+    this->declare_parameter<std::string>("anchors.a1.id", "0x0009D6");
+    this->declare_parameter<std::string>("anchors.a2.id", "0x0009E5");
+    this->declare_parameter<std::string>("anchors.a3.id", "0x0016FA");
+    this->declare_parameter<std::string>("anchors.a4.id", "0x0016CF");
+
+    // Declare tag IDs
+    this->declare_parameter<std::string>("tags.t1.id", "0x001155");
+    this->declare_parameter<std::string>("tags.t2.id", "0x001397");
+
+    // Load parameters
     this->get_parameter("offboard_control_mode_topic", offboard_control_mode_topic_);
     this->get_parameter("trajectory_setpoint_topic", trajectory_setpoint_topic_);
     this->get_parameter("vehicle_command_topic", vehicle_command_topic_);
@@ -78,6 +117,16 @@ AGVOffboardControl::AGVOffboardControl() : Node("agv_offboard_control")
     this->get_parameter("lookahead_distance", lookahead_distance_);
     this->get_parameter("kp_v", kp_v_);
 
+    // Get anchor IDs
+    this->get_parameter("anchors.a1.id", anchor_ids_["a1"]);
+    this->get_parameter("anchors.a2.id", anchor_ids_["a2"]);
+    this->get_parameter("anchors.a3.id", anchor_ids_["a3"]);
+    this->get_parameter("anchors.a4.id", anchor_ids_["a4"]);
+
+    // Get tag IDs
+    this->get_parameter("tags.t1.id", tag_ids_["t1"]);
+    this->get_parameter("tags.t2.id", tag_ids_["t2"]);
+
     load_trajectory(traj_file_);
 
     offboard_control_mode_publisher_ = this->create_publisher<OffboardControlMode>(offboard_control_mode_topic_, 10);
@@ -85,7 +134,7 @@ AGVOffboardControl::AGVOffboardControl() : Node("agv_offboard_control")
     vehicle_command_publisher_ = this->create_publisher<VehicleCommand>(vehicle_command_topic_, 10);
 
     ros_odometry_publisher_ = this->create_publisher<nav_msgs::msg::Odometry>(ros_odometry_topic_, 10);
-
+    distances_list_pub_ = this->create_publisher<eliko_messages::msg::DistancesList>("eliko/Distances", 10);
 
     vehicle_odometry_subscriber_ = this->create_subscription<VehicleOdometry>(
         vehicle_odometry_topic_, rclcpp::SensorDataQoS(),
@@ -110,7 +159,7 @@ AGVOffboardControl::AGVOffboardControl() : Node("agv_offboard_control")
             // Position
             odom_msg.pose.pose.position.x = msg->position[0];
             odom_msg.pose.pose.position.y = msg->position[1];
-            odom_msg.pose.pose.position.z = msg->position[2];
+            odom_msg.pose.pose.position.z = - msg->position[2]; //it is NED, change to Z UP
 
             // Orientation
             odom_msg.pose.pose.orientation.x = msg->q[0];
@@ -153,6 +202,19 @@ AGVOffboardControl::AGVOffboardControl() : Node("agv_offboard_control")
         });
 
     timer_ = this->create_wall_timer(100ms, std::bind(&AGVOffboardControl::timer_callback, this));
+
+    distances_timer_ = this->create_wall_timer(100ms, std::bind(&AGVOffboardControl::publish_distances, this));
+
+    for (const auto& topic : uwb_topic_names_) {
+        auto sub = this->create_subscription<std_msgs::msg::Float64>(
+            topic, 10,
+            [this, topic = topic](const std_msgs::msg::Float64::SharedPtr msg) {
+                std::lock_guard<std::mutex> lock(this->uwb_mutex_);
+                this->uwb_distances_[topic] = msg->data;
+            });
+        uwb_subscribers_.push_back(sub);
+    }
+
 }
 
 void AGVOffboardControl::timer_callback()
@@ -240,6 +302,42 @@ void AGVOffboardControl::publish_vehicle_command(uint16_t command, float param1,
     msg.from_external = true;
     msg.timestamp = this->get_clock()->now().nanoseconds() / 1000;
     vehicle_command_publisher_->publish(msg);
+}
+
+
+void AGVOffboardControl::publish_distances()
+{
+    eliko_messages::msg::DistancesList list_msg;
+    list_msg.header.stamp = this->get_clock()->now();
+    list_msg.header.frame_id = "arco/eliko";
+
+    {
+        std::lock_guard<std::mutex> lock(uwb_mutex_);
+        for (const auto& [topic, distance] : uwb_distances_) {
+            // Parse topic like "/uwb_gz_simulator/distances/a1t2"
+            std::string key = topic.substr(topic.find_last_of('/') + 1); // "a1t2"
+            if (key.size() != 4) continue;
+
+            std::string anchor_key = key.substr(0, 2); // "a1"
+            std::string tag_key = key.substr(2, 2);    // "t2"
+
+            if (anchor_ids_.count(anchor_key) && tag_ids_.count(tag_key)) {
+                eliko_messages::msg::Distances d;
+                d.anchor_sn = anchor_ids_[anchor_key];
+                d.tag_sn = tag_ids_[tag_key];
+                d.distance = static_cast<float>(distance);
+                list_msg.anchor_distances.push_back(d);
+            }
+        }
+
+        // 🔴 Clear old values after publishing
+        uwb_distances_.clear();
+    }
+
+    if (!list_msg.anchor_distances.empty()) {
+        distances_list_pub_->publish(list_msg);
+    }
+
 }
 
 int main(int argc, char *argv[])

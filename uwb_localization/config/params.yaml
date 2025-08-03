@@ -58,7 +58,7 @@ fusion_optimization_node:
     max_keyframes: 7
     using_odom: true
     using_lidar: false
-    using_radar: true
+    using_radar: false
     lidar_stdev: 0.05
     radar_stdev: 0.2
     icp_type_lidar: 0   #ICP algorithm variant: 2->Generalized ICP, 1->Point to Plane ICP, else -> basic ICP

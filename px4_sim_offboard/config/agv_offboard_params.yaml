@@ -9,3 +9,23 @@ agv_offboard_control:
     lookahead_distance: 2.0
     kp_v: 0.5
     kp_w: 0.25
+    anchors:
+      a1:
+        id: "0x0009D6"
+        position: [-0.32, 0.3, 0.875]
+      a2:
+        id: "0x0009E5"
+        position: [0.32, -0.3, 0.875]
+      a3:
+        id: "0x0016FA"
+        position: [0.32, 0.3, 0.33]
+      a4:
+        id: "0x0016CF"
+        position: [-0.32, -0.3, 0.33]
+    tags:
+      t1:
+        id: "0x001155"
+        position: [-0.24, -0.24, -0.06]
+      t2:
+        id: "0x001397"
+        position: [0.24, 0.24, -0.06]
