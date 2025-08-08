@@ -490,7 +490,7 @@ private:
         double dt_agv = std::abs(uwb_time_sec - last_agv_odom_time_sec_);
         double dt_uav = std::abs(uwb_time_sec - last_uav_odom_time_sec_);
 
-        double max_age_sec = 1.0;
+        double max_age_sec = 0.25; // Maximum allowed age of odometry data in seconds
         if (dt_agv > max_age_sec || dt_uav > max_age_sec) {
             RCLCPP_INFO(this->get_logger(),
             "[Eliko global_opt node] Skipping UWB data due to stale odometry.\n"

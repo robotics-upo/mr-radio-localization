@@ -94,7 +94,7 @@ make px4_sitl
 
 11) Update ```simulator_launcher.sh``` with the paths to your ROS 2 workspace, your PX4-Autopilot installation folder and the location of the QGC executable. By default, the script assumes that PX4 and the ROS 2 ws are on the root folder, and QGC is in ```~/Desktop```. 
 
-12) Give permissions to the simulator script and launch the simulator: 
+12) Give permissions to the simulator script and execute it: 
 
 ```
 cd <ros2_ws>/mr-radio-localization

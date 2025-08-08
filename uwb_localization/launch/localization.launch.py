@@ -26,8 +26,15 @@ def generate_launch_description():
         name='fusion_optimization_node',
         parameters=[config]
         )
+    
+    clock_pub = Node(
+        package='uwb_simulator',
+        executable='clock_publisher',
+        name='clock_publisher',
+        parameters=[config]
+        )
 
 
-    nodes_to_execute = [node1, node2]
+    nodes_to_execute = [node1, node2, clock_pub]
     
     return LaunchDescription(nodes_to_execute)

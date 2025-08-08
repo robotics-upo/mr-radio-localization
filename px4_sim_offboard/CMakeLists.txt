@@ -13,13 +13,15 @@ find_package(std_msgs REQUIRED)
 find_package(nav_msgs REQUIRED)
 find_package(eliko_messages REQUIRED)
 find_package(geometry_msgs REQUIRED)
-
+find_package(ament_index_cpp REQUIRED)
+find_package(px4_ros_com REQUIRED)
+find_package(tf2 REQUIRED)
 
 add_executable(uav_offboard_control src/uav_offboard_control.cpp)
-ament_target_dependencies(uav_offboard_control rclcpp px4_msgs std_msgs nav_msgs geometry_msgs)
+ament_target_dependencies(uav_offboard_control rclcpp px4_msgs px4_ros_com tf2 std_msgs nav_msgs geometry_msgs ament_index_cpp)
 
 add_executable(agv_offboard_control src/agv_offboard_control.cpp)
-ament_target_dependencies(agv_offboard_control rclcpp px4_msgs std_msgs nav_msgs geometry_msgs eliko_messages)
+ament_target_dependencies(agv_offboard_control rclcpp px4_msgs px4_ros_com tf2 std_msgs nav_msgs geometry_msgs eliko_messages ament_index_cpp)
 
 install(TARGETS
   uav_offboard_control
@@ -40,6 +42,12 @@ install(DIRECTORY launch
 install(DIRECTORY config
   DESTINATION share/${PROJECT_NAME}
 )
+
+install(
+  DIRECTORY trajectories_positions
+  DESTINATION share/${PROJECT_NAME}
+)
+
 
 
 if(BUILD_TESTING)

@@ -43,10 +43,17 @@
 #include <px4_msgs/msg/vehicle_command.hpp>
 #include <px4_msgs/msg/vehicle_control_mode.hpp>
 #include <px4_msgs/msg/vehicle_odometry.hpp>
+#include <px4_msgs/msg/vehicle_local_position.hpp>
+
+#include <px4_ros_com/frame_transforms.h>
 
 #include <nav_msgs/msg/odometry.hpp>
 #include <geometry_msgs/msg/point.hpp>
 #include <geometry_msgs/msg/quaternion.hpp>
+#include <geometry_msgs/msg/pose_stamped.hpp>
+
+#include <tf2/LinearMath/Quaternion.h>
+#include <Eigen/Geometry>
 
 #include <rclcpp/rclcpp.hpp>
 #include <stdint.h>
@@ -59,6 +66,8 @@
 #include <fstream>
 #include <sstream>
 #include <vector>
+
+#include "ament_index_cpp/get_package_share_directory.hpp"
 
 
 using namespace std::chrono;
@@ -76,8 +85,10 @@ public:
 		this->declare_parameter<std::string>("trajectory_setpoint_topic", "/px4_1/fmu/in/trajectory_setpoint");
 		this->declare_parameter<std::string>("vehicle_command_topic", "/px4_1/fmu/in/vehicle_command");
 		this->declare_parameter<std::string>("vehicle_odometry_topic", "/px4_1/fmu/out/vehicle_odometry");
+		this->declare_parameter<std::string>("vehicle_local_position_topic", "/px4_1/fmu/out/vehicle_local_position");
 		this->declare_parameter<std::string>("trajectory_csv_file", "trajectory_lemniscate_uav.csv");
 		this->declare_parameter<std::string>("ros_odometry_topic", "/uav/odom");
+		this->declare_parameter<std::string>("ros_gt_topic", "/uav/gt");
 
 		this->declare_parameter<double>("lookahead_distance", 2.0);
 		this->declare_parameter<double>("kp_v", 1.0);
@@ -89,22 +100,26 @@ public:
 		std::string trajectory_setpoint_topic_;
 		std::string vehicle_command_topic_;
 		std::string vehicle_odometry_topic_;
-		std::string ros_odometry_topic_;
+		std::string vehicle_local_position_topic_;
+		std::string ros_odometry_topic_, ros_gt_topic_;
 		std::string traj_file_;
 
 		this->get_parameter("offboard_control_mode_topic", offboard_control_mode_topic_);
 		this->get_parameter("trajectory_setpoint_topic", trajectory_setpoint_topic_);
 		this->get_parameter("vehicle_command_topic", vehicle_command_topic_);
 		this->get_parameter("vehicle_odometry_topic", vehicle_odometry_topic_);
+		this->get_parameter("vehicle_local_position_topic", vehicle_local_position_topic_);
 		this->get_parameter("trajectory_csv_file", traj_file_);
 		this->get_parameter("lookahead_distance", lookahead_distance_);
 		this->get_parameter("ros_odometry_topic", ros_odometry_topic_);
+		this->get_parameter("ros_gt_topic", ros_gt_topic_);
 
 		this->get_parameter("kp_v", kp_v_);
 		this->get_parameter("kp_w", kp_w_);
-
-
-		load_trajectory(traj_file_);
+		
+		std::string package_path = ament_index_cpp::get_package_share_directory("px4_sim_offboard");
+		std::string full_csv_path = package_path + "/trajectories_positions/" + traj_file_;
+		load_trajectory(full_csv_path);
 		initial_hover_target_ = trajectory_.front();  // inside load_trajectory() after loading
 
 		// Create publishers with the topics from params
@@ -113,31 +128,33 @@ public:
 		vehicle_command_publisher_ = this->create_publisher<VehicleCommand>(vehicle_command_topic_, 10);
 
 		ros_odometry_publisher_ = this->create_publisher<nav_msgs::msg::Odometry>(ros_odometry_topic_, 10);
-
+		ros_gt_publisher_ = this->create_publisher<geometry_msgs::msg::PoseStamped>(ros_gt_topic_, 10);
 		// Set QoS to match PX4 publisher
 		rclcpp::QoS qos_profile = rclcpp::SensorDataQoS();
 
 		vehicle_odometry_subscriber_ = this->create_subscription<px4_msgs::msg::VehicleOdometry>(
 			vehicle_odometry_topic_, qos_profile,
 			[this](const px4_msgs::msg::VehicleOdometry::SharedPtr msg) {
+
+
+				// Convert orientation
+                Eigen::Quaterniond q_ned(msg->q[0], msg->q[1], msg->q[2], msg->q[3]);
+                Eigen::Quaterniond q_enu = px4_ros_com::frame_transforms::px4_to_ros_orientation(q_ned);
+
+                // Convert position and velocity
+                Eigen::Vector3d pos_ned(msg->position[0], msg->position[1], msg->position[2]);
+                Eigen::Vector3d pos_enu = px4_ros_com::frame_transforms::ned_to_enu_local_frame(pos_ned);
+
+                Eigen::Vector3d vel_ned(msg->velocity[0], msg->velocity[1], msg->velocity[2]);
+                Eigen::Vector3d vel_enu = px4_ros_com::frame_transforms::ned_to_enu_local_frame(vel_ned);
 				
-				double qw = msg->q[0];
-				double qx = msg->q[1];
-				double qy = msg->q[2];
-				double qz = msg->q[3];
-
-				// Convert quaternion to yaw
-				double siny_cosp = 2.0 * (qw * qz + qx * qy);
-				double cosy_cosp = 1.0 - 2.0 * (qy * qy + qz * qz);
-				double yaw = std::atan2(siny_cosp, cosy_cosp);
-
 				{
 					std::lock_guard<std::mutex> lock(position_mutex_);
 					current_pose_[0] = msg->position[0];
 					current_pose_[1] = msg->position[1];
 					current_pose_[2] = msg->position[2];
-					current_pose_[3] = yaw;
-				}
+					current_pose_[3] = px4_ros_com::frame_transforms::utils::quaternion::quaternion_get_yaw(q_ned);
+                }
 
 				// Construct a nav_msgs/Odometry message
 				nav_msgs::msg::Odometry odom_msg;
@@ -145,26 +162,22 @@ public:
 				odom_msg.header.frame_id = "/uav/odom";  // or "odom" or "world"
 				odom_msg.child_frame_id = "/uav/base_link";  // or "uav_base"
 
-				// Position
-				odom_msg.pose.pose.position.x = msg->position[0];
-				odom_msg.pose.pose.position.y = msg->position[1];
-				odom_msg.pose.pose.position.z = -msg->position[2]; //it is NED, change to Z UP
+				odom_msg.pose.pose.position.x = pos_enu.x();
+                odom_msg.pose.pose.position.y = pos_enu.y();
+                odom_msg.pose.pose.position.z = pos_enu.z();
 
-				// Orientation
-				odom_msg.pose.pose.orientation.x = msg->q[1];
-				odom_msg.pose.pose.orientation.y = msg->q[2];
-				odom_msg.pose.pose.orientation.z = msg->q[3];
-				odom_msg.pose.pose.orientation.w = msg->q[0];
+                odom_msg.pose.pose.orientation.x = q_enu.x();
+                odom_msg.pose.pose.orientation.y = q_enu.y();
+                odom_msg.pose.pose.orientation.z = q_enu.z();
+                odom_msg.pose.pose.orientation.w = q_enu.w();
 
-				// Linear velocity
-				odom_msg.twist.twist.linear.x = msg->velocity[0];
-				odom_msg.twist.twist.linear.y = msg->velocity[1];
-				odom_msg.twist.twist.linear.z = msg->velocity[2];
+                odom_msg.twist.twist.linear.x = vel_enu.x();
+                odom_msg.twist.twist.linear.y = vel_enu.y();
+                odom_msg.twist.twist.linear.z = vel_enu.z();
 
-				// Angular velocity
-				odom_msg.twist.twist.angular.x = msg->angular_velocity[0];
-				odom_msg.twist.twist.angular.y = msg->angular_velocity[1];
-				odom_msg.twist.twist.angular.z = msg->angular_velocity[2];
+                odom_msg.twist.twist.angular.x = msg->angular_velocity[1];
+                odom_msg.twist.twist.angular.y = msg->angular_velocity[0];
+                odom_msg.twist.twist.angular.z = -msg->angular_velocity[2];
 
 				// Fill pose covariance (position + orientation)
 				odom_msg.pose.covariance = {
@@ -189,6 +202,34 @@ public:
 				// Publish the converted message
 				ros_odometry_publisher_->publish(odom_msg);
 			});
+
+		this->create_subscription<px4_msgs::msg::VehicleLocalPosition>(
+			vehicle_local_position_topic_, qos_profile,
+			[this](const px4_msgs::msg::VehicleLocalPosition::SharedPtr msg) {
+				geometry_msgs::msg::PoseStamped pose_msg;
+
+				// Header
+				pose_msg.header.stamp = this->get_clock()->now();
+				pose_msg.header.frame_id = "map";  // or "world", depending on your convention
+
+				Eigen::Vector3d pos_ned(msg->x, msg->y, msg->z);
+                Eigen::Vector3d pos_enu = px4_ros_com::frame_transforms::ned_to_enu_local_frame(pos_ned);
+
+                pose_msg.pose.position.x = pos_enu.x();
+                pose_msg.pose.position.y = pos_enu.y();
+                pose_msg.pose.position.z = pos_enu.z();
+
+				Eigen::Quaterniond q_heading(Eigen::AngleAxisd(msg->heading, Eigen::Vector3d::UnitZ()));
+                Eigen::Quaterniond q_enu = px4_ros_com::frame_transforms::px4_to_ros_orientation(q_heading);
+
+                pose_msg.pose.orientation.x = q_enu.x();
+                pose_msg.pose.orientation.y = q_enu.y();
+                pose_msg.pose.orientation.z = q_enu.z();
+                pose_msg.pose.orientation.w = q_enu.w();
+
+				ros_gt_publisher_->publish(pose_msg);
+			});
+
 
 		offboard_setpoint_counter_ = 0;
 
@@ -224,6 +265,8 @@ private:
 	rclcpp::Publisher<TrajectorySetpoint>::SharedPtr trajectory_setpoint_publisher_;
 	rclcpp::Publisher<VehicleCommand>::SharedPtr vehicle_command_publisher_;
 	rclcpp::Publisher<nav_msgs::msg::Odometry>::SharedPtr ros_odometry_publisher_;
+	rclcpp::Publisher<geometry_msgs::msg::PoseStamped>::SharedPtr ros_gt_publisher_;
+
 
 	rclcpp::Subscription<VehicleOdometry>::SharedPtr vehicle_odometry_subscriber_;
 
@@ -247,7 +290,7 @@ private:
 	double kp_w_ = 0.1;
 
 	bool hover_reached_ = false;
-	std::array<double, 4> initial_hover_target_{0.0, 0.0, -2.0, -3.14};
+	std::array<double, 4> initial_hover_target_{0.0, 0.0, -2.0, 0.0};
 	double hover_tolerance_ = 0.3;  // meters
 };
 
@@ -281,7 +324,17 @@ void UAVOffboardControl::load_trajectory(const std::string &filename)
 			}
 		}
 		if (i == 4) {
-			pose[2] = -pose[2];  // Flip Z from ENU to NED
+			double x_enu = pose[0];
+			double y_enu = pose[1];
+			double z_enu = pose[2];
+			double yaw_enu = pose[3];
+
+			// Convert to NED
+			pose[0] = y_enu;
+			pose[1] = x_enu;
+			pose[2] = -z_enu;
+			pose[3] = -yaw_enu;
+
 			trajectory_.push_back(pose);
 		}
 	}
