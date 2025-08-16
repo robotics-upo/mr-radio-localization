@@ -6,7 +6,7 @@ QGC_PATH=~/Desktop/QGroundControl-x86_64.AppImage
 
 # UAV initial pose (x, y, z, roll, pitch, yaw)
 UAV_X=0
-UAV_Y=0
+UAV_Y=2
 UAV_Z=0
 UAV_ROLL=0
 UAV_PITCH=0
@@ -14,7 +14,7 @@ UAV_YAW=0
 
 # Rover initial pose (x, y, z, roll, pitch, yaw)
 ROVER_X=0
-ROVER_Y=2
+ROVER_Y=0
 ROVER_Z=0
 ROVER_ROLL=0
 ROVER_PITCH=0
@@ -22,7 +22,30 @@ ROVER_YAW=0
 
 SESSION="sim_session"
 
-trap "echo '[CLEANUP] Killing leftover processes...'; killall -9 gzserver gzclient ruby 2>/dev/null" EXIT
+graceful_shutdown() {
+  echo "[CLEANUP] Graceful shutdown…"
+
+  # 1) Stop ros2 bag cleanly (send Ctrl-C to pane 1.3)
+  if tmux has-session -t "$SESSION" 2>/dev/null; then
+    echo "[CLEANUP] Stopping ros2 bag…"
+    tmux send-keys -t $SESSION:1.3 C-c
+    sleep 3   # give it time to finalize files
+
+    # 2) Stop your other ROS nodes cleanly (optional)
+    tmux send-keys -t $SESSION:1.2 C-c  # uwb_localization
+    tmux send-keys -t $SESSION:0.4 C-c  # offboard_launch.py
+    sleep 1
+
+    # 3) Now kill simulators last
+    echo "[CLEANUP] Killing simulators…"
+    killall -9 gzserver gzclient ruby 2>/dev/null || true
+
+    # 4) Finally, kill the tmux session
+    tmux kill-session -t "$SESSION" 2>/dev/null || true
+  fi
+}
+
+trap graceful_shutdown EXIT INT TERM
 
 # Kill any previous session
 tmux kill-session -t $SESSION 2>/dev/null
