@@ -120,7 +120,7 @@ public:
 		std::string package_path = ament_index_cpp::get_package_share_directory("px4_sim_offboard");
 		std::string full_csv_path = package_path + "/trajectories_positions/" + traj_file_;
 		load_trajectory(full_csv_path);
-		initial_hover_target_ = trajectory_.front();  // inside load_trajectory() after loading
+		initial_hover_target_ = trajectory_.front(); 
 
 		// Create publishers with the topics from params
 		offboard_control_mode_publisher_ = this->create_publisher<OffboardControlMode>(offboard_control_mode_topic_, 10);
@@ -203,7 +203,7 @@ public:
 				ros_odometry_publisher_->publish(odom_msg);
 			});
 
-		this->create_subscription<px4_msgs::msg::VehicleLocalPosition>(
+		vehicle_local_position_subscriber_ = this->create_subscription<px4_msgs::msg::VehicleLocalPosition>(
 			vehicle_local_position_topic_, qos_profile,
 			[this](const px4_msgs::msg::VehicleLocalPosition::SharedPtr msg) {
 				geometry_msgs::msg::PoseStamped pose_msg;
@@ -257,6 +257,7 @@ public:
 
 	void arm();
 	void disarm();
+	void land();
 
 private:
 	rclcpp::TimerBase::SharedPtr timer_;
@@ -267,8 +268,8 @@ private:
 	rclcpp::Publisher<nav_msgs::msg::Odometry>::SharedPtr ros_odometry_publisher_;
 	rclcpp::Publisher<geometry_msgs::msg::PoseStamped>::SharedPtr ros_gt_publisher_;
 
-
 	rclcpp::Subscription<VehicleOdometry>::SharedPtr vehicle_odometry_subscriber_;
+	rclcpp::Subscription<px4_msgs::msg::VehicleLocalPosition>::SharedPtr vehicle_local_position_subscriber_;
 
 	std::atomic<uint64_t> timestamp_;   //!< common synced timestamped
 
@@ -290,7 +291,8 @@ private:
 	double kp_w_ = 0.1;
 
 	bool hover_reached_ = false;
-	std::array<double, 4> initial_hover_target_{0.0, 0.0, -2.0, 0.0};
+	bool land_sent_ = false;  // flag to ensure LAND command is sent only once
+	std::array<double, 4> initial_hover_target_{0.0, 2.0, -2.0, 0.0};
 	double hover_tolerance_ = 0.3;  // meters
 };
 
@@ -364,6 +366,14 @@ void UAVOffboardControl::disarm()
 	RCLCPP_INFO(this->get_logger(), "Disarm command send");
 }
 
+void UAVOffboardControl::land()
+{
+    // PX4: NAV_LAND starts an auto land at current position for MC
+    publish_vehicle_command(VehicleCommand::VEHICLE_CMD_NAV_LAND);
+	land_sent_ = true;  // Set flag to prevent multiple LAND commands
+    RCLCPP_INFO(this->get_logger(), "LAND command sent");
+}
+
 /**
  * @brief Publish the offboard control mode.
  *        For this example, only position and altitude controls are active.
@@ -425,6 +435,11 @@ void UAVOffboardControl::publish_trajectory_setpoint()
 		return;
 	}
 
+	if(land_sent_){
+		RCLCPP_INFO(this->get_logger(), "Landing already sent, not sending further setpoints.");
+		return;
+	}
+
 	// Step 1: Find the closest point in a forward-looking window
 	size_t window_size = 50;
 	size_t search_start = closest_idx_;
@@ -471,6 +486,18 @@ void UAVOffboardControl::publish_trajectory_setpoint()
 	double ez = target[2] - pose[2];
 	double dist = std::sqrt(ex*ex + ey*ey + ez*ez);
 
+	double dist_to_end = std::sqrt(
+		(trajectory_.back()[0] - pose[0]) * (trajectory_.back()[0] - pose[0]) +
+		(trajectory_.back()[1] - pose[1]) * (trajectory_.back()[1] - pose[1]) +
+		(trajectory_.back()[2] - pose[2]) * (trajectory_.back()[2] - pose[2])
+	);
+
+	// If we're very near the end of the path, trigger LAND (once)
+	if ((closest_idx_ >= 0.9*trajectory_.size()) && dist_to_end <= 0.25) {
+		land();
+		return;
+	}
+
 	// Compute unit direction vector
 	double ux = ex / dist;
 	double uy = ey / dist;
@@ -509,7 +536,6 @@ void UAVOffboardControl::publish_trajectory_setpoint()
     // target[0], target[1], target[2], target[3],
     // ex, ey, ez, dist,
     // vx, vy, vz, msg.yawspeed, closest_idx_, current_target_idx_);
-
 
 	trajectory_setpoint_publisher_->publish(msg);
 }

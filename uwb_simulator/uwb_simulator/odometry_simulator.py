@@ -26,7 +26,7 @@ class OdometrySimulator(Node):
         self.declare_parameters(
             namespace='',
             parameters=[
-                ('simple_trajectory', False),
+                ('use_mission', False),
                 ('holonomic_xy', False),
                 ('trajectory_name', "trajectory1"),
                 ('total_distance', 100),
@@ -89,7 +89,7 @@ class OdometrySimulator(Node):
         }
 
         self.trajectory_name = self.get_parameter('trajectory_name').value
-        self.simple = self.get_parameter('simple_trajectory').value
+        self.mission = self.get_parameter('use_mission').value
 
         self.get_logger().info(f"Loading trajectory: {self.trajectory_name}")
 
@@ -100,8 +100,8 @@ class OdometrySimulator(Node):
         except Exception as e:
             self.get_logger().error(f"Trajectory not found: {e}")
             self.get_logger().info("Generating new trajectories")
-            if self.simple: self.uav_velocity_commands, self.agv_velocity_commands = self.generate_simple_velocity_commands()
-            else: self.uav_velocity_commands, self.agv_velocity_commands = self.generate_velocity_commands()
+            if self.mission: self.uav_velocity_commands, self.agv_velocity_commands = self.generate_mission_velocity_commands()
+            else: self.uav_velocity_commands, self.agv_velocity_commands = self.generate_random_velocity_commands()
             
             self.save_trajectories()
             # self.save_trajectory_positions()
@@ -144,60 +144,141 @@ class OdometrySimulator(Node):
         self.create_timer(1./self.publish_rate, self.update_odometry)
 
     
-    def generate_simple_velocity_commands(self):
-        """Generate velocity commands for simple predefined trajectories.
-        Both UAV and AGV follow the same type of trajectory (either straight lines or circles),
-        with a fixed yaw rotation offset between them.
-        """
+    def generate_mission_velocity_commands(self):
+        """Generate velocity commands for simple predefined missions."""
         uav_commands = []
         agv_commands = []
 
-        # Define trajectory parameters
-        use_circular_trajectory = False  # Toggle between circular or straight-line trajectories
-        use_lemniscate = True
+        # === Select the mission here ===
+        use_custom_mission = True 
+        use_circular_trajectory    = False
+        use_lemniscate             = False
 
         dt = 1.0 / self.publish_rate
-        average_vel = 0.5
-        duration = self.total_distance / average_vel  # Time to complete the trajectory
-        total_steps = int(duration * self.publish_rate)
+
+        # ---------- Helpers to hit exact distances/angles ----------
+        def append_straight(cmds, distance, v):
+            """Append forward straight motion of 'distance' at speed v, exact to last step."""
+            if distance <= 0.0 or v <= 0.0:
+                return
+            steps_full = int(np.floor(distance / (v * dt)))
+            for _ in range(steps_full):
+                cmds.append((v, 0.0, 0.0))
+            rem = distance - steps_full * v * dt
+            if rem > 1e-9:
+                cmds.append((rem / dt, 0.0, 0.0))  # scale last step to finish exactly
+
+        def append_turn(cmds, angle, w_abs):
+            """Append pure rotation by 'angle' radians (CCW positive), exact to last step."""
+            if w_abs <= 0.0 or abs(angle) <= 0.0:
+                return
+            sgn = 1.0 if angle >= 0.0 else -1.0
+            w = sgn * w_abs
+            steps_full = int(np.floor(abs(angle) / (w_abs * dt)))
+            for _ in range(steps_full):
+                cmds.append((0.0, 0.0, w))
+            rem = abs(angle) - steps_full * w_abs * dt
+            if rem > 1e-9:
+                cmds.append((0.0, 0.0, sgn * rem / dt))
+
+        def append_circle_laps(cmds, radius, v, laps, ccw=True):
+            """Append constant-curvature motion for 'laps' of a circle with given radius."""
+            if radius <= 0.0 or v <= 0.0 or laps <= 0:
+                return
+            sgn = 1.0 if ccw else -1.0
+            w = sgn * (v / radius)                     # keep curvature r = v / w = radius
+            total_angle = laps * 2.0 * np.pi
+            steps_full = int(np.floor(total_angle / (abs(w) * dt)))
+            for _ in range(steps_full):
+                cmds.append((v, 0.0, w))
+            rem = total_angle - steps_full * abs(w) * dt
+            if rem > 1e-9:
+                alpha = rem / (abs(w) * dt)            # scale v,w for the last partial step
+                cmds.append((v * alpha, 0.0, w * alpha))
+
+        if use_custom_mission:
+            # --- UAV: rectangular loop (5m x 20m) ---
+            rect_width  = 5.0     # meters
+            rect_length = 20.0    # meters
+            v_lin       = 0.5     # m/s straight speed
+            w_turn_abs  = np.pi/2 / 2.0   # 90° turns in ~2 s (pure rotation)
+
+            half_W = rect_width * 0.5
+            half_L = rect_length * 0.5
+
+            # A) center -> lateral (move +Y by half width)
+            append_turn(uav_commands,  np.pi/2, w_turn_abs)   # face +Y
+            append_straight(uav_commands, half_W, v_lin)      # go to mid of +Y side
+            append_turn(uav_commands, -np.pi/2, w_turn_abs)   # face +X again
+
+            # B) perimeter sequence (clockwise), starting at mid +Y side, heading +X
+            # 1)  half length  (+X)
+            append_straight(uav_commands, half_L, v_lin)
+
+            # 2)  full width   (-Y)
+            append_turn(uav_commands, -np.pi/2, w_turn_abs)   # face -Y
+            append_straight(uav_commands, rect_width, v_lin)
+
+            # 3)  full length  (-X)
+            append_turn(uav_commands, -np.pi/2, w_turn_abs)   # face -X
+            append_straight(uav_commands, rect_length, v_lin)
+
+            # 4)  full width   (+Y)
+            append_turn(uav_commands, -np.pi/2, w_turn_abs)   # face +Y
+            append_straight(uav_commands, rect_width, v_lin)
+
+            # 5)  half length  (+X) back to mid +Y side
+            append_turn(uav_commands, -np.pi/2, w_turn_abs)   # face +X
+            append_straight(uav_commands, half_L, v_lin)
+
+            # C) lateral -> center (move -Y by half width)
+            append_turn(uav_commands, -np.pi/2, w_turn_abs)   # face -Y
+            append_straight(uav_commands, half_W, v_lin)      # back to center
+            append_turn(uav_commands,  np.pi/2, w_turn_abs)   # restore heading +X
+
+            # --- AGV: from center -> radius 4m -> 3 laps -> back to center ---
+            R         = 3.0       # meters
+            v_lin = 0.5  # m/s straight speed
+            laps      = 3
+
+            # Start at center, heading = 0. Go to (R, 0), turn to +90°, do 3 CCW laps, undo turn, return.
+            append_straight(agv_commands, R, v_lin)              # center -> (R,0), heading 0
+            append_turn(agv_commands, np.pi/2, np.pi/2/2.0)      # ~2 s, face +Y so ICC = origin
+            append_circle_laps(agv_commands, R, v_lin, laps, ccw=True)
+            append_turn(agv_commands, -np.pi/2, np.pi/2/2.0)     # back to heading 0 at (R,0)
+            append_straight(agv_commands, R, v_lin)              # (R,0) -> center
+
+            self.get_logger().info(f"Generated {len(uav_commands)} commands for UAV and {len(agv_commands)} for AGV.")
+            return uav_commands, agv_commands
 
         if use_circular_trajectory:
             self.get_logger().info(f"Generating circular trajectory!.")
+            radius = 2.0
+            angular_velocity = 0.5
+            average_vel = radius * angular_velocity
+            duration = self.total_distance / average_vel
+            total_steps = int(duration * self.publish_rate)
+            for _ in range(total_steps):
+                v = radius * angular_velocity
+                w = angular_velocity
+                agv_commands.append((v, 0.0, w))
+                uav_commands.append((v, 0.0, w))
+            self.get_logger().info(f"Generated {len(uav_commands)} commands for UAV and AGV.")
+            return uav_commands, agv_commands
 
-            # Circular trajectory parameters
-            radius = 2.0  # Radius of the circular trajectory
-            angular_velocity = 0.5  # Angular velocity for the circular motion
-
-            for step in range(total_steps):
-                
-                # UAV circular trajectory
-                agv_v = [radius * angular_velocity, 0.0]
-                agv_w = angular_velocity
-                agv_commands.append((*agv_v, agv_w))
-
-                uav_v = agv_v
-                uav_w = agv_w 
-                uav_commands.append((*uav_v, uav_w))
-
-        elif use_lemniscate:
-            
+        if use_lemniscate:
             R = 5.0
-            # 1) approximate L:
             thetas = np.linspace(0, 2*np.pi, 4_000)
             dx_dθ =  R * np.cos(thetas)
             dy_dθ =  R * np.cos(2*thetas)
             L = np.trapz(np.hypot(dx_dθ, dy_dθ), thetas)
-
-            # 2) timing + steps:
             v_avg = 0.5
             T_loop = L / v_avg
             N_steps = int(np.ceil(T_loop * self.publish_rate))
             N_loops = int(np.ceil(self.total_distance / L))
-
-            for loop in range (N_loops):
+            for _ in range(N_loops):
                 for i in range(N_steps):
                     theta = 2.0 * np.pi * (i / N_steps)
-                    # derivatives:
                     dx =  R * np.cos(theta) * (2.0*np.pi/T_loop)
                     dy =  R * np.cos(2*theta)* (2.0*np.pi/T_loop)
                     ddx = -R * np.sin(theta) * (2.0*np.pi/T_loop)**2.0
@@ -205,38 +286,17 @@ class OdometrySimulator(Node):
                     v = np.hypot(dx, dy)
                     kappa = (dx*ddy - dy*ddx) / (v**3.0 + 1e-8)
                     angular_vel = kappa * v
-
                     agv_commands.append((v, 0.0, angular_vel))
                     uav_commands.append((v, 0.0, angular_vel))
-
             self.get_logger().info(f"Generated {len(uav_commands)} commands for UAV and AGV.")
+            return uav_commands, agv_commands
 
-        else:
-            self.get_logger().info(f"Generating straight line!.")
-
-            # Straight-line trajectory parameters
-            linear_speed = 1.0  # Speed of the vehicles on the straight line
-            duration = self.total_distance / linear_speed  # Time to complete the straight line
-
-            # Fixed yaw rotation between UAV and AGV
-            yaw_offset = np.pi / 4  # 45-degree offset
-
-            for step in range(total_steps):
-                # UAV straight-line trajectory
-                uav_v = [linear_speed, 0.0]
-                uav_w = 0.0
-                uav_commands.append((uav_v, uav_w))
-
-                # AGV straight-line trajectory with yaw offset
-                agv_v = uav_v
-                agv_w = 0.0
-                agv_commands.append((agv_v, agv_w))
-
-        self.get_logger().info(f"Generated {len(uav_commands)} commands for UAV and AGV.")
+        # Fallback in case nothing selected
+        self.get_logger().warn("No mission selected; defaulting to empty command lists.")
         return uav_commands, agv_commands
 
 
-    def generate_velocity_commands(self):
+    def generate_random_velocity_commands(self):
         """Generate random linear and angular velocity commands."""
         uav_commands = []
         agv_commands = []
@@ -361,22 +421,24 @@ class OdometrySimulator(Node):
         x, y, z, theta = pose
     
         if holonomic is True:
-            # Independent motion in x, y, and yaw
+            # Independent motion in x, y, and yaw (holonomic)
             dx = v[0] * dt
             dy = v[1] * dt
             dtheta = w * dt
         else:
+            # Unicycle model: v[0] is forward speed, ignore v[1]
+            v_fwd = float(v[0])
             if abs(w) < 1e-6:
-                # Straight-line motion (special case when angular velocity is very small)
-                dx = v[0] * dt * np.cos(theta)
-                dy = v[1] * dt * np.sin(theta)
+                # Straight line
+                dx = v_fwd * dt * np.cos(theta)
+                dy = v_fwd * dt * np.sin(theta)
             else:
-                # Arc-based motion model
-                r = v[0] / w
-                dx = r * (np.sin(theta + w * dt) - np.sin(theta))
-                dy = r * (np.cos(theta) - np.cos(theta + w * dt))
+                # Constant curvature arc
+                dx = (v_fwd / w) * (np.sin(theta + w * dt) - np.sin(theta))
+                dy = (v_fwd / w) * (np.cos(theta) - np.cos(theta + w * dt))
+            
+            dtheta = w * dt
         
-        dtheta = w * dt
         dz = 0.0
 
         updated_pose = np.array([x + dx, y + dy, z + dz, self.normalize_angle(theta + dtheta)])
@@ -395,8 +457,6 @@ class OdometrySimulator(Node):
         error_distance = np.random.normal(error_distance_sys, error_distance_delta)
         error_angle = np.random.normal(error_angle_sys, error_angle_delta)
 
-        # With no errors, let G = updated_pose = [x_GT, y_GT, z_GT, θ_GT]
-        # and origin = [x₀, y₀, z₀, θ₀] define the static transform (world -> uav/odom).
         dx = updated_pose[0] - origin[0]
         dy = updated_pose[1] - origin[1]
         x_ideal = np.cos(origin[3]) * dx + np.sin(origin[3]) * dy

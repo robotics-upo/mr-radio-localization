@@ -4,53 +4,23 @@ measurement_simulator:
     pub_rate: 10.0
     add_outliers: True
     use_sim_time: True
-trajectory_simulator:
-  ros__parameters:
-    load_trajectory: True
-    same_trajectory: True
-    trajectory_name: "trajectory_identical_drift2"
-    total_steps: 100
-    pub_rate: 10.0
-    use_sim_time: True
-    uav_origin: [0.0, 0.0, 2.0]
-    ground_vehicle_origin: [0.0, 0.0, 0.0]
-    anchors:
-      a1:
-        id: "0x0009D6" 
-        position: [-0.32, 0.3, 0.875]
-      a2:
-        id: "0x0009E5"
-        position: [0.32, -0.3, 0.875]
-      a3:
-        id: "0x0016FA" 
-        position: [0.32, 0.3, 0.33]
-      a4:
-        id: "0x0016CF"
-        position: [-0.32, -0.3, 0.33]
-    tags:
-      t1: 
-        id: "0x001155"
-        position: [-0.24, -0.24, -0.06]
-      t2: 
-        id: "0x001397"
-        position: [0.24, 0.24, -0.06]
 
 odometry_simulator:
   ros__parameters:
-    simple_trajectory: False
+    use_mission: True
     holonomic_xy: False    #move independently in horizontal plane
-    trajectory_name: "trajectory_random_1"
+    trajectory_name: "trajectory_mission_1"
     total_distance: 100
     pub_rate: 10.0
     use_sim_time: True
-    uav_origin: [0.25, -0.25, 2.0, 0.124] #xyz yaw
+    uav_origin: [2.0, 0.0, 2.0, 0.0] #xyz yaw
     ground_vehicle_origin: [0.0, 0.0, 0.0, 0.0] #xyz yaw
     linear_velocity_range: [0.1, 1.0]
     max_linear_acceleration: 0.5 #m/s²
     max_angular_acceleration: 0.25 # rad/s²
     angular_velocity_range: [-0.5, 0.5]
-    odom_error_position: 2.0 # %,  meters for every 100 meters traveled
-    odom_error_angle: 2.0 # % degrees for every 100 degrees
+    odom_error_position: 0.0 # %,  meters for every 100 meters traveled
+    odom_error_angle: 0.0 # % degrees for every 100 degrees
     anchors:
       a1:
         id: "0x0009D6" 

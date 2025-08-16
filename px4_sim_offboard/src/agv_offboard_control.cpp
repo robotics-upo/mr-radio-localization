@@ -75,6 +75,7 @@ private:
     rclcpp::Publisher<eliko_messages::msg::DistancesList>::SharedPtr distances_list_pub_;
 
     rclcpp::Subscription<VehicleOdometry>::SharedPtr vehicle_odometry_subscriber_;
+	rclcpp::Subscription<px4_msgs::msg::VehicleLocalPosition>::SharedPtr vehicle_local_position_subscriber_;
 
 
     std::unordered_map<std::string, double> uwb_distances_;
@@ -105,7 +106,7 @@ AGVOffboardControl::AGVOffboardControl() : Node("agv_offboard_control")
     this->declare_parameter<std::string>("vehicle_odometry_topic", "/px4_2/fmu/out/vehicle_odometry");
     this->declare_parameter<std::string>("vehicle_local_position_topic", "/px4_2/fmu/out/vehicle_local_position");
 
-    this->declare_parameter<std::string>("trajectory_csv_file", "trajectory_agv.csv");
+    this->declare_parameter<std::string>("trajectory_csv_file", "trajectory_lemniscate_agv.csv");
     this->declare_parameter<std::string>("ros_odometry_topic", "/agv/odom");
     this->declare_parameter<std::string>("ros_gt_topic", "/agv/gt");
 
@@ -147,7 +148,7 @@ AGVOffboardControl::AGVOffboardControl() : Node("agv_offboard_control")
 
     std::string package_path = ament_index_cpp::get_package_share_directory("px4_sim_offboard");
     std::string full_csv_path = package_path + "/trajectories_positions/" + traj_file_;
-    load_trajectory(traj_file_);
+    load_trajectory(full_csv_path);
 
     offboard_control_mode_publisher_ = this->create_publisher<OffboardControlMode>(offboard_control_mode_topic_, 10);
     trajectory_setpoint_publisher_ = this->create_publisher<TrajectorySetpoint>(trajectory_setpoint_topic_, 10);
@@ -228,7 +229,7 @@ AGVOffboardControl::AGVOffboardControl() : Node("agv_offboard_control")
             ros_odometry_publisher_->publish(odom_msg);
         });
 
-    this->create_subscription<px4_msgs::msg::VehicleLocalPosition>(
+    vehicle_local_position_subscriber_ = this->create_subscription<px4_msgs::msg::VehicleLocalPosition>(
         vehicle_local_position_topic_, rclcpp::SensorDataQoS(),
         [this](const px4_msgs::msg::VehicleLocalPosition::SharedPtr msg) {
             geometry_msgs::msg::PoseStamped pose_msg;
