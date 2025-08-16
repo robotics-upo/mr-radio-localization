@@ -245,7 +245,7 @@ class OdometrySimulator(Node):
             append_straight(agv_commands, R, v_lin)              # center -> (R,0), heading 0
             append_turn(agv_commands, np.pi/2, np.pi/2/2.0)      # ~2 s, face +Y so ICC = origin
             append_circle_laps(agv_commands, R, v_lin, laps, ccw=True)
-            append_turn(agv_commands, -np.pi/2, np.pi/2/2.0)     # back to heading 0 at (R,0)
+            append_turn(agv_commands, np.pi/2, np.pi/2/2.0)     # back to heading 0 at (R,0)
             append_straight(agv_commands, R, v_lin)              # (R,0) -> center
 
             self.get_logger().info(f"Generated {len(uav_commands)} commands for UAV and {len(agv_commands)} for AGV.")
