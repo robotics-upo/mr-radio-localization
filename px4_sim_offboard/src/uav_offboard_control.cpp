@@ -94,6 +94,7 @@ public:
 		this->declare_parameter<double>("kp_v", 1.0);
 		this->declare_parameter<double>("kp_w", 0.1);
 
+		this->declare_parameter<std::vector<double>>("uav_origin", {0.0, 0.0, 0.0, 0.0, 0.0, 0.0});
 
 		// Retrieve parameter values
 		std::string offboard_control_mode_topic_;
@@ -116,6 +117,25 @@ public:
 
 		this->get_parameter("kp_v", kp_v_);
 		this->get_parameter("kp_w", kp_w_);
+
+		std::vector<double> uav_origin_vec;
+		this->get_parameter("uav_origin", uav_origin_vec);
+		if (uav_origin_vec.size() != 6) {
+			RCLCPP_WARN(this->get_logger(),
+						"uav_origin must have 6 elements [x,y,z,roll,pitch,yaw]; using zeros");
+		} else {
+			origin_pos_enu_ = Eigen::Vector3d(uav_origin_vec[0], uav_origin_vec[1], uav_origin_vec[2]);
+
+			// RPY are given in ENU. Build quaternion qz(yaw)*qy(pitch)*qx(roll).
+			const double roll  = uav_origin_vec[3];
+			const double pitch = uav_origin_vec[4];
+			const double yaw   = uav_origin_vec[5];
+
+			origin_q_enu_ =
+				Eigen::AngleAxisd(yaw,   Eigen::Vector3d::UnitZ()) *
+				Eigen::AngleAxisd(pitch, Eigen::Vector3d::UnitY()) *
+				Eigen::AngleAxisd(roll,  Eigen::Vector3d::UnitX());
+		}
 		
 		std::string package_path = ament_index_cpp::get_package_share_directory("px4_sim_offboard");
 		std::string full_csv_path = package_path + "/trajectories_positions/" + traj_file_;
@@ -147,14 +167,6 @@ public:
 
                 Eigen::Vector3d vel_ned(msg->velocity[0], msg->velocity[1], msg->velocity[2]);
                 Eigen::Vector3d vel_enu = px4_ros_com::frame_transforms::ned_to_enu_local_frame(vel_ned);
-				
-				{
-					std::lock_guard<std::mutex> lock(position_mutex_);
-					current_pose_[0] = msg->position[0];
-					current_pose_[1] = msg->position[1];
-					current_pose_[2] = msg->position[2];
-					current_pose_[3] = px4_ros_com::frame_transforms::utils::quaternion::quaternion_get_yaw(q_ned);
-                }
 
 				// Construct a nav_msgs/Odometry message
 				nav_msgs::msg::Odometry odom_msg;
@@ -212,20 +224,44 @@ public:
 				pose_msg.header.stamp = this->get_clock()->now();
 				pose_msg.header.frame_id = "map";  // or "world", depending on your convention
 
-				Eigen::Vector3d pos_ned(msg->x, msg->y, msg->z);
-                Eigen::Vector3d pos_enu = px4_ros_com::frame_transforms::ned_to_enu_local_frame(pos_ned);
+				// PX4 local position is NED, origin at arming/start.
+      			Eigen::Vector3d pos_ned(msg->x, msg->y, msg->z);
+				
+				// Convert to ENU (local)
+				Eigen::Vector3d pos_enu_local =
+					px4_ros_com::frame_transforms::ned_to_enu_local_frame(pos_ned);
 
-                pose_msg.pose.position.x = pos_enu.x();
-                pose_msg.pose.position.y = pos_enu.y();
-                pose_msg.pose.position.z = pos_enu.z();
+				// Rotate by origin orientation, then translate by origin position to get world/map
+				Eigen::Vector3d pos_enu_world = origin_q_enu_ * pos_enu_local + origin_pos_enu_;
 
-				Eigen::Quaterniond q_heading(Eigen::AngleAxisd(msg->heading, Eigen::Vector3d::UnitZ()));
-                Eigen::Quaterniond q_enu = px4_ros_com::frame_transforms::px4_to_ros_orientation(q_heading);
+				pose_msg.pose.position.x = pos_enu_world.x();
+				pose_msg.pose.position.y = pos_enu_world.y();
+				pose_msg.pose.position.z = pos_enu_world.z();
 
-                pose_msg.pose.orientation.x = q_enu.x();
-                pose_msg.pose.orientation.y = q_enu.y();
-                pose_msg.pose.orientation.z = q_enu.z();
-                pose_msg.pose.orientation.w = q_enu.w();
+				// Orientation: PX4 gives heading (yaw in NED). Build NED yaw quaternion,
+				// convert to ENU, then compose with origin orientation.
+				Eigen::Quaterniond q_heading_ned(Eigen::AngleAxisd(msg->heading, Eigen::Vector3d::UnitZ()));
+				Eigen::Quaterniond q_heading_enu =
+					px4_ros_com::frame_transforms::px4_to_ros_orientation(q_heading_ned);
+
+				Eigen::Quaterniond q_world_enu = origin_q_enu_ * q_heading_enu;
+
+				// Extract ENU yaw from q_world_enu
+				Eigen::Vector3d rpy = q_world_enu.toRotationMatrix().eulerAngles(2, 1, 0); // ZYX
+				double yaw_world_enu = rpy[0];
+				 // UPDATE current pose in WORLD ENU
+				{
+					std::lock_guard<std::mutex> lock(position_mutex_);
+					current_pose_[0] = pos_enu_world.x();
+					current_pose_[1] = pos_enu_world.y();
+					current_pose_[2] = pos_enu_world.z();
+					current_pose_[3] = yaw_world_enu;
+				}
+
+				pose_msg.pose.orientation.x = q_world_enu.x();
+				pose_msg.pose.orientation.y = q_world_enu.y();
+				pose_msg.pose.orientation.z = q_world_enu.z();
+				pose_msg.pose.orientation.w = q_world_enu.w();
 
 				ros_gt_publisher_->publish(pose_msg);
 			});
@@ -292,8 +328,12 @@ private:
 
 	bool hover_reached_ = false;
 	bool land_sent_ = false;  // flag to ensure LAND command is sent only once
-	std::array<double, 4> initial_hover_target_{0.0, 2.0, -2.0, 0.0};
+	std::array<double, 4> initial_hover_target_{0.0, 0.0, -2.0, 0.0};
 	double hover_tolerance_ = 0.3;  // meters
+
+	Eigen::Vector3d origin_pos_enu_{0.0, 0.0, 0.0};
+	Eigen::Quaterniond origin_q_enu_{1.0, 0.0, 0.0, 0.0}; // w,x,y,z
+
 };
 
 void UAVOffboardControl::load_trajectory(const std::string &filename)
@@ -326,17 +366,6 @@ void UAVOffboardControl::load_trajectory(const std::string &filename)
 			}
 		}
 		if (i == 4) {
-			double x_enu = pose[0];
-			double y_enu = pose[1];
-			double z_enu = pose[2];
-			double yaw_enu = pose[3];
-
-			// Convert to NED
-			pose[0] = y_enu;
-			pose[1] = x_enu;
-			pose[2] = -z_enu;
-			pose[3] = -yaw_enu;
-
 			trajectory_.push_back(pose);
 		}
 	}
@@ -414,10 +443,23 @@ void UAVOffboardControl::publish_trajectory_setpoint()
 		double dz = pose[2] - initial_hover_target_[2];
 		double dist = std::sqrt(dx*dx + dy*dy + dz*dz);
 
-		// Send hover command
+		// Convert hover target (world ENU) to local NED for PX4
+		Eigen::Vector3d p_world_enu(initial_hover_target_[0], initial_hover_target_[1], initial_hover_target_[2]);
+		Eigen::Vector3d p_local_enu = origin_q_enu_.inverse() * (p_world_enu - origin_pos_enu_);
+		Eigen::Vector3d p_local_ned = px4_ros_com::frame_transforms::enu_to_ned_local_frame(p_local_enu);
+
+		// Yaw: build world ENU quaternion, move to local ENU, then to PX4(NED)
+		Eigen::Quaterniond q_hover_world_enu(
+			Eigen::AngleAxisd(initial_hover_target_[3], Eigen::Vector3d::UnitZ()));
+		Eigen::Quaterniond q_hover_local_enu = origin_q_enu_.inverse() * q_hover_world_enu;
+		Eigen::Quaterniond q_hover_ned = px4_ros_com::frame_transforms::ros_to_px4_orientation(q_hover_local_enu);
+		double yaw_ned = px4_ros_com::frame_transforms::utils::quaternion::quaternion_get_yaw(q_hover_ned);
+
 		TrajectorySetpoint msg{};
-		msg.position = {initial_hover_target_[0], initial_hover_target_[1], initial_hover_target_[2]};
-		msg.yaw = initial_hover_target_[3];
+		msg.position = {static_cast<float>(p_local_ned.x()),
+						static_cast<float>(p_local_ned.y()),
+						static_cast<float>(p_local_ned.z())};
+		msg.yaw = static_cast<float>(yaw_ned);
 		msg.timestamp = this->get_clock()->now().nanoseconds() / 1000;
 		trajectory_setpoint_publisher_->publish(msg);
 
@@ -511,31 +553,31 @@ void UAVOffboardControl::publish_trajectory_setpoint()
 	double vy = vel_mag * uy;
 	double vz = vel_mag * uz;
 
-	// Construct setpoint message
+	// v_world_enu from your controller (vx, vy, vz in world ENU)
+	Eigen::Vector3d v_world_enu(vx, vy, vz);
+
+	// Transform velocity to local ENU then to local NED
+	Eigen::Vector3d v_local_enu = origin_q_enu_.inverse() * v_world_enu;
+	Eigen::Vector3d v_local_ned = px4_ros_com::frame_transforms::enu_to_ned_local_frame(v_local_enu);
+
+	// Yaw to face the target in world ENU
+	double yaw_world_enu = std::atan2(ey, ex);
+
+	// Convert that yaw to PX4 NED heading
+	Eigen::Quaterniond q_world_enu(Eigen::AngleAxisd(yaw_world_enu, Eigen::Vector3d::UnitZ()));
+	Eigen::Quaterniond q_local_enu = origin_q_enu_.inverse() * q_world_enu;
+	Eigen::Quaterniond q_ned = px4_ros_com::frame_transforms::ros_to_px4_orientation(q_local_enu);
+	double yaw_ned = px4_ros_com::frame_transforms::utils::quaternion::quaternion_get_yaw(q_ned);
+
+	// Build setpoint
 	TrajectorySetpoint msg{};
 	auto nan = std::numeric_limits<float>::quiet_NaN();
-
-	// Set velocity control mode only
-	msg.position = {nan, nan, nan};
-	double yaw_to_target = std::atan2(ey, ex);  // ey = target.y - current.y, ex = target.x - current.x
-	msg.yaw = static_cast<float>(yaw_to_target);
-
-	msg.velocity = {vx, vy, vz};
-	// double yaw_error = target[3] - pose[3];
-	// yaw_error = std::atan2(std::sin(yaw_error), std::cos(yaw_error));
-	// msg.yawspeed = kp_w_ * yaw_error;
-	// msg.yawspeed = std::numeric_limits<float>::quiet_NaN();  // disable yaw rate control	
+	msg.position = {nan, nan, nan};  // velocity mode
+	msg.velocity = {static_cast<float>(v_local_ned.x()),
+					static_cast<float>(v_local_ned.y()),
+					static_cast<float>(v_local_ned.z())};
+	msg.yaw = static_cast<float>(yaw_ned);
 	msg.timestamp = this->get_clock()->now().nanoseconds() / 1000;
-
-	// RCLCPP_INFO(this->get_logger(),
-    // "Current -> x: %.2f, y: %.2f, z: %.2f, yaw: %.2f | "
-    // "Target -> x: %.2f, y: %.2f, z: %.2f, yaw: %.2f | "
-    // "Error -> dx: %.2f, dy: %.2f, dz: %.2f | dist: %.2f | "
-    // "Setpoint -> vx: %.2f, vy: %.2f, vz: %.2f, yawspeed: %.2f | current idx: %zu | target idx: %zu",
-    // pose[0], pose[1], pose[2], pose[3],
-    // target[0], target[1], target[2], target[3],
-    // ex, ey, ez, dist,
-    // vx, vy, vz, msg.yawspeed, closest_idx_, current_target_idx_);
 
 	trajectory_setpoint_publisher_->publish(msg);
 }

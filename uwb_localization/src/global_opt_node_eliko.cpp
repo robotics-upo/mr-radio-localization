@@ -493,15 +493,7 @@ private:
         double max_age_sec = 0.25; // Maximum allowed age of odometry data in seconds
         if (dt_agv > max_age_sec || dt_uav > max_age_sec) {
             RCLCPP_INFO(this->get_logger(),
-            "[Eliko global_opt node] Skipping UWB data due to stale odometry.\n"
-            "  - UWB stamp   : %.9f\n"
-            "  - AGV stamp   : %.9f (Δ = %.3fs)\n"
-            "  - UAV stamp   : %.9f (Δ = %.3fs)\n"
-            "  - Max allowed : %.3fs",
-            uwb_time_sec,
-            last_agv_odom_time_sec_, dt_agv,
-            last_uav_odom_time_sec_, dt_uav,
-            max_age_sec);
+            "[Eliko global_opt node] Skipping UWB data due to stale odometry....\n");
             return;
         }
 

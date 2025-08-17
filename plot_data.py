@@ -348,20 +348,22 @@ def plot_metrics(path, df_metrics, cols_metrics, t0, title, filename):
     
 
 
-def plot_experiment_data(path_experiment_data, path_folder, gt_available = "True", simulation = "True"):
+def plot_experiment_data(path_experiment_data, path_folder, experiment_type = "sitl"):
 
     
-    print("gt_available set to: " + gt_available)
-    print("simulation set to: " + simulation)
+    print("experiment_type set to: " + experiment_type)
 
     #Get names of the topics we want to plot
     time_data_setpoint = '__time'
     
     #This is ground truth data
-    if simulation == "True":
+    if experiment_type == "basic_sim":
         source_gt_frame_id = 'agv_gt'
         target_gt_frame_id = 'uav_gt'
-    elif gt_available == "True":
+    elif experiment_type == "sitl":
+        uav_gt_topic_name = '/uav/gt' 
+        agv_gt_topic_name = '/agv/gt'
+    elif experiment_type == "dataset":
         uav_gt_topic_name = '/dll_node/pose_estimation'
         agv_gt_topic_name = '/dll_node_arco/pose_estimation'
 
@@ -371,13 +373,7 @@ def plot_experiment_data(path_experiment_data, path_folder, gt_available = "True
 
     tf_odom_agv = "arco/odom"
 
-    #The origins of each local frame wrt to map 
-    ####### Values for simulation ###########
-    # (map coincides with AGV local frame in simulation)
-    # target_odom_origin = pose_to_matrix(np.array([0.5,-0.5,2.0,0.0,0.0,0.524]))    #np.array([0.25,-0.25,2.0,0.0,0.0,0.17])
-    # source_odom_origin = pose_to_matrix(np.array([0.0,0.0,0.0,0.0,0.0,0.0]))
-
-    if(simulation == "True"):
+    if(experiment_type == "basic_sim"):
 
         source_gt_x_data = f'/tf/world/{source_gt_frame_id}/translation/x'
         source_gt_y_data = f'/tf/world/{source_gt_frame_id}/translation/y'
@@ -405,7 +401,7 @@ def plot_experiment_data(path_experiment_data, path_folder, gt_available = "True
         metrics_traj_rmse_R_data = '/optimization/traj_metrics/data[2]'
         metrics_traj_rmse_t_data = '/optimization/traj_metrics/data[3]'
 
-    elif gt_available == "True":
+    else:
 
         source_gt_x_data = f'{agv_gt_topic_name}/pose/position/x'
         source_gt_y_data = f'{agv_gt_topic_name}/pose/position/y'
@@ -599,107 +595,91 @@ def plot_experiment_data(path_experiment_data, path_folder, gt_available = "True
     # initial_cov_df = pd.DataFrame([initial_cov_row])
     # covariance_data_df = pd.concat([initial_cov_df, covariance_data_df], ignore_index=True)
 
-    #Get the radar velocities
-    radar_source_df = read_pandas_df(path_experiment_data, radar_source_cols, 
-                                      timestamp_col=time_data_setpoint, max_timestamp=max_timestamp)
-    radar_target_df = read_pandas_df(path_experiment_data, radar_target_cols, 
-                                      timestamp_col=time_data_setpoint, max_timestamp=max_timestamp)
+    if(experiment_type == "dataset"):
+        #Get the radar velocities
+        radar_source_df = read_pandas_df(path_experiment_data, radar_source_cols, 
+                                        timestamp_col=time_data_setpoint, max_timestamp=max_timestamp)
+        radar_target_df = read_pandas_df(path_experiment_data, radar_target_cols, 
+                                        timestamp_col=time_data_setpoint, max_timestamp=max_timestamp)
     
-    if gt_available == "True":
 
-        # Plot 3D representation
-
-        columns_source_gt_data = [time_data_setpoint, source_gt_x_data, source_gt_y_data, source_gt_z_data, source_gt_q0_data, source_gt_q1_data,source_gt_q2_data, source_gt_q3_data   ]
-        
-        columns_target_gt_data = [time_data_setpoint, target_gt_x_data, target_gt_y_data, target_gt_z_data, target_gt_q0_data , target_gt_q1_data ,target_gt_q2_data ,target_gt_q3_data ]
-        
-        source_gt_data_df = read_pandas_df(path_experiment_data, columns_source_gt_data, 
-                                           timestamp_col=time_data_setpoint, max_timestamp=max_timestamp)
-        
-        
-        target_gt_data_df = read_pandas_df(path_experiment_data, columns_target_gt_data, 
-                                           timestamp_col=time_data_setpoint, max_timestamp=max_timestamp)
-        
-        # Extract origin from the first AGV GT pose
-        first_agv_row = source_gt_data_df.iloc[0]
-        agv_pos = first_agv_row[[source_gt_x_data, source_gt_y_data, source_gt_z_data]].values
-        agv_quat = first_agv_row[[source_gt_q0_data, source_gt_q1_data, source_gt_q2_data, source_gt_q3_data]].values
-        agv_rpy = R.from_quat(agv_quat).as_euler('zyx', degrees=False)  # yaw, pitch, roll
-        source_odom_origin = pose_to_matrix(np.concatenate((agv_pos, agv_rpy[::-1])))  # [x, y, z, roll, pitch, yaw]
-
-        # Extract origin from the first UAV GT pose
-        first_uav_row = target_gt_data_df.iloc[0]
-        uav_pos = first_uav_row[[target_gt_x_data, target_gt_y_data, target_gt_z_data]].values
-        uav_quat = first_uav_row[[target_gt_q0_data, target_gt_q1_data, target_gt_q2_data, target_gt_q3_data]].values
-        uav_rpy = R.from_quat(uav_quat).as_euler('zyx', degrees=False)
-        target_odom_origin = pose_to_matrix(np.concatenate((uav_pos, uav_rpy[::-1])))  # [x, y, z, roll, pitch, yaw]
-        
-        t0 = target_gt_data_df[columns_target_gt_data[0]].iloc[0]
-
-
-        if simulation == "True":
-
-            columns_metrics = [time_data_setpoint, metrics_detR_data, metrics_dett_data, metrics_rmse_R_data, metrics_rmse_t_data]
-            columns_traj_metrics = [time_data_setpoint, metrics_traj_detR_data, metrics_traj_dett_data, metrics_traj_rmse_R_data, metrics_traj_rmse_t_data]
-
-            metrics_df_data = read_pandas_df(path_experiment_data, columns_metrics,
-                                                    timestamp_col=time_data_setpoint, max_timestamp=max_timestamp)
-                    
-            metrics_traj_df_data = read_pandas_df(path_experiment_data, columns_traj_metrics,
-                                                    timestamp_col=time_data_setpoint, max_timestamp=max_timestamp)
-            
-            #plot metrics
-            plot_metrics(path_folder, metrics_df_data, columns_metrics, t0, "Relative transform errors", "transform")
-            plot_metrics(path_folder, metrics_traj_df_data, columns_traj_metrics, t0, "Overall trajectory errors", "trajectory")
-        
-        #Transform local poses of graph to a global frame of reference using the anchors
-        poses_uav_world = compute_poses_local_to_world(time_data_setpoint, poses_uav, anchor_target_df, anchor_target_uav_cols, use_last=True, use_gt = False, gt_anchor = target_odom_origin)
-        poses_agv_world = compute_poses_local_to_world(time_data_setpoint, poses_agv, anchor_source_df, anchor_source_agv_cols, use_last=True, use_gt = False, gt_anchor = source_odom_origin)
-        
-        #plot posegraphs
-        plot_posegraph_temporal(path_folder, "posegraph_agv_world_poses", "AGV global trajectory wrt time", poses_agv_world, source_gt_data_df, columns_source_gt_data)
-        plot_posegraph_temporal(path_folder, "posegraph_uav_world_poses", "UAV global trajectory wrt time", poses_uav_world, target_gt_data_df, columns_target_gt_data)
-        
-        plot_posegraph_temporal(path_folder, "posegraph_agv_local_poses", "AGV local trajectory wrt time", poses_agv, source_gt_data_df, columns_source_gt_data, source_odom_origin)
-        plot_posegraph_temporal(path_folder, "posegraph_uav_local_poses", "UAV local trajectory wrt time", poses_uav, target_gt_data_df, columns_target_gt_data, target_odom_origin)
-        
-        plot_posegraphs_3d(path_folder, "posegraph_3d_poses", poses_agv_world, poses_uav_world, source_gt_data_df, target_gt_data_df, columns_source_gt_data, columns_target_gt_data)
-        
-        # === Transform GT to local frame ===
-        gt_agv_local_df = transform_gt_to_local(source_gt_data_df, columns_source_gt_data, source_odom_origin)
-        gt_uav_local_df = transform_gt_to_local(target_gt_data_df, columns_target_gt_data, target_odom_origin)
-        
-        plot_posegraphs_3d_side_by_side(path_folder, "local_posegraph_3d_poses", poses_agv, poses_uav, gt_agv=gt_agv_local_df, gt_uav=gt_uav_local_df,
-                                cols_gt_agv=columns_source_gt_data, cols_gt_uav=columns_target_gt_data)
-
-        rmse_agv_pos, rmse_agv_yaw = compute_rmse(poses_agv_world, source_gt_data_df, pose_graph_agv_cols, columns_source_gt_data)
-        rmse_uav_pos, rmse_uav_yaw = compute_rmse(poses_uav_world, target_gt_data_df, pose_graph_uav_cols, columns_target_gt_data)
-        print(f'RMSE AGV ----> Translation: {rmse_agv_pos} m, Rotation: {np.rad2deg(rmse_agv_yaw)} º')
-        print(f'RMSE UAV ----> Translation: {rmse_uav_pos} m, Rotation: {np.rad2deg(rmse_uav_yaw)} º')
-
-        plot_transform(path_folder, t_That_s_data_df, covariance_data_df, columns_t_That_s_data, columns_covariance, t0, source_odom_origin, target_odom_origin)
+    # Plot 3D representation
+    columns_source_gt_data = [time_data_setpoint, source_gt_x_data, source_gt_y_data, source_gt_z_data, source_gt_q0_data, source_gt_q1_data,source_gt_q2_data, source_gt_q3_data   ]
     
+    columns_target_gt_data = [time_data_setpoint, target_gt_x_data, target_gt_y_data, target_gt_z_data, target_gt_q0_data , target_gt_q1_data ,target_gt_q2_data ,target_gt_q3_data ]
+    
+    source_gt_data_df = read_pandas_df(path_experiment_data, columns_source_gt_data, 
+                                        timestamp_col=time_data_setpoint, max_timestamp=max_timestamp)
+    
+    
+    target_gt_data_df = read_pandas_df(path_experiment_data, columns_target_gt_data, 
+                                        timestamp_col=time_data_setpoint, max_timestamp=max_timestamp)
+    
+    # Extract origin from the first AGV GT pose
+    first_agv_row = source_gt_data_df.iloc[0]
+    agv_pos = first_agv_row[[source_gt_x_data, source_gt_y_data, source_gt_z_data]].values
+    agv_quat = first_agv_row[[source_gt_q0_data, source_gt_q1_data, source_gt_q2_data, source_gt_q3_data]].values
+    agv_rpy = R.from_quat(agv_quat).as_euler('zyx', degrees=False)  # yaw, pitch, roll
+    source_odom_origin = pose_to_matrix(np.concatenate((agv_pos, agv_rpy[::-1])))  # [x, y, z, roll, pitch, yaw]
+
+    # Extract origin from the first UAV GT pose
+    first_uav_row = target_gt_data_df.iloc[0]
+    uav_pos = first_uav_row[[target_gt_x_data, target_gt_y_data, target_gt_z_data]].values
+    uav_quat = first_uav_row[[target_gt_q0_data, target_gt_q1_data, target_gt_q2_data, target_gt_q3_data]].values
+    uav_rpy = R.from_quat(uav_quat).as_euler('zyx', degrees=False)
+    target_odom_origin = pose_to_matrix(np.concatenate((uav_pos, uav_rpy[::-1])))  # [x, y, z, roll, pitch, yaw]
+    
+    t0 = target_gt_data_df[columns_target_gt_data[0]].iloc[0]
+
+    if experiment_type == "basic_sim":
+
+        columns_metrics = [time_data_setpoint, metrics_detR_data, metrics_dett_data, metrics_rmse_R_data, metrics_rmse_t_data]
+        columns_traj_metrics = [time_data_setpoint, metrics_traj_detR_data, metrics_traj_dett_data, metrics_traj_rmse_R_data, metrics_traj_rmse_t_data]
+
+        metrics_df_data = read_pandas_df(path_experiment_data, columns_metrics,
+                                                timestamp_col=time_data_setpoint, max_timestamp=max_timestamp)
+                
+        metrics_traj_df_data = read_pandas_df(path_experiment_data, columns_traj_metrics,
+                                                timestamp_col=time_data_setpoint, max_timestamp=max_timestamp)
+        
+        #plot metrics
+        plot_metrics(path_folder, metrics_df_data, columns_metrics, t0, "Relative transform errors", "transform")
+        plot_metrics(path_folder, metrics_traj_df_data, columns_traj_metrics, t0, "Overall trajectory errors", "trajectory")
+    
+    #Transform local poses of graph to a global frame of reference using the anchors
+    poses_uav_world = compute_poses_local_to_world(time_data_setpoint, poses_uav, anchor_target_df, anchor_target_uav_cols, use_last=True, use_gt = False, gt_anchor = target_odom_origin)
+    poses_agv_world = compute_poses_local_to_world(time_data_setpoint, poses_agv, anchor_source_df, anchor_source_agv_cols, use_last=True, use_gt = False, gt_anchor = source_odom_origin)
+    
+    #plot posegraphs
+    plot_posegraph_temporal(path_folder, "posegraph_agv_world_poses", "AGV global trajectory wrt time", poses_agv_world, source_gt_data_df, columns_source_gt_data)
+    plot_posegraph_temporal(path_folder, "posegraph_uav_world_poses", "UAV global trajectory wrt time", poses_uav_world, target_gt_data_df, columns_target_gt_data)
+    
+    plot_posegraph_temporal(path_folder, "posegraph_agv_local_poses", "AGV local trajectory wrt time", poses_agv, source_gt_data_df, columns_source_gt_data, source_odom_origin)
+    plot_posegraph_temporal(path_folder, "posegraph_uav_local_poses", "UAV local trajectory wrt time", poses_uav, target_gt_data_df, columns_target_gt_data, target_odom_origin)
+    
+    plot_posegraphs_3d(path_folder, "posegraph_3d_poses", poses_agv_world, poses_uav_world, source_gt_data_df, target_gt_data_df, columns_source_gt_data, columns_target_gt_data)
+    
+    # === Transform GT to local frame ===
+    gt_agv_local_df = transform_gt_to_local(source_gt_data_df, columns_source_gt_data, source_odom_origin)
+    gt_uav_local_df = transform_gt_to_local(target_gt_data_df, columns_target_gt_data, target_odom_origin)
+    
+    plot_posegraphs_3d_side_by_side(path_folder, "local_posegraph_3d_poses", poses_agv, poses_uav, gt_agv=gt_agv_local_df, gt_uav=gt_uav_local_df,
+                            cols_gt_agv=columns_source_gt_data, cols_gt_uav=columns_target_gt_data)
+
+    rmse_agv_pos, rmse_agv_yaw = compute_rmse(poses_agv_world, source_gt_data_df, pose_graph_agv_cols, columns_source_gt_data)
+    rmse_uav_pos, rmse_uav_yaw = compute_rmse(poses_uav_world, target_gt_data_df, pose_graph_uav_cols, columns_target_gt_data)
+    print(f'RMSE AGV ----> Translation: {rmse_agv_pos} m, Rotation: {np.rad2deg(rmse_agv_yaw)} º')
+    print(f'RMSE UAV ----> Translation: {rmse_uav_pos} m, Rotation: {np.rad2deg(rmse_uav_yaw)} º')
+
+    plot_transform(path_folder, t_That_s_data_df, covariance_data_df, columns_t_That_s_data, columns_covariance, t0, source_odom_origin, target_odom_origin)
+
+    if(experiment_type == "dataset"):
         #Plot radar
         plot_radar_velocities(path_folder, radar_source_df, radar_source_cols, label="AGV Radar", filename="radar_velocity_agv", gt_df = source_gt_data_df, 
-                              gt_cols = columns_source_gt_data, gt_origin = source_odom_origin,
-                              odom_df=source_odom_vel_data_df, odom_cols=columns_source_odom_vel_data)
+                            gt_cols = columns_source_gt_data, gt_origin = source_odom_origin,
+                            odom_df=source_odom_vel_data_df, odom_cols=columns_source_odom_vel_data)
         plot_radar_velocities(path_folder, radar_target_df, radar_target_cols, label="UAV Radar", filename="radar_velocity_uav", gt_df = target_gt_data_df, gt_cols = columns_target_gt_data, gt_origin = target_odom_origin)    
      
-    else:
-        t0 = target_odom_data_df[columns_target_odom_data[0]].iloc[0]
-        #Transform local poses of graph to a global frame of reference using the anchors
-        poses_uav_world = compute_poses_local_to_world(time_data_setpoint, poses_uav, anchor_target_df, anchor_target_uav_cols, use_last=True)
-        poses_agv_world = compute_poses_local_to_world(time_data_setpoint, poses_agv, anchor_source_df, anchor_source_agv_cols, use_last=True)
-        plot_posegraph_temporal(path_folder, "posegraph_agv_world_poses", poses_agv_world)
-        plot_posegraph_temporal(path_folder, "posegraph_uav_world_poses", poses_uav_world)
-        plot_posegraph_temporal(path_folder, "posegraph_agv_local_poses", poses_agv, source_odom_data_df, columns_source_odom_data)
-        plot_posegraph_temporal(path_folder, "posegraph_uav_local_poses", poses_uav, target_odom_data_df, columns_target_odom_data)
-        plot_posegraphs_3d(path_folder, "posegraph_3d_poses", poses_agv_world, poses_uav_world)
-        plot_transform(path_folder, t_That_s_data_df, covariance_data_df, columns_t_That_s_data, columns_covariance, t0)
-
-        #Plot radar
-        plot_radar_velocities(path_folder, radar_source_df, radar_source_cols, label="AGV Radar", filename="radar_velocity_agv", gt_df = source_gt_data_df, gt_cols = None, gt_origin = None)
-        plot_radar_velocities(path_folder, radar_target_df, radar_target_cols, label="UAV Radar", filename="radar_velocity_uav", gt_df = target_gt_data_df, gt_cols = None, gt_origin = None)    
 
 
 def graph_dict_to_df(pose_graph):
@@ -1246,17 +1226,16 @@ def transform_gt_to_local(gt_df, cols_gt, T_world_to_local):
 
 def main():
 
-    if len(sys.argv) != 4:
-        print("Usage: python script.py <csv_file_path>")
+    if len(sys.argv) != 3:
+        print("Usage: python script.py <csv_file_path> <gt_available> <simulation>")
         sys.exit(1)
 
     path_to_data = sys.argv[1]
-    gt_available = sys.argv[2]
-    simulation = sys.argv[3]
+    experiment_type = sys.argv[2] # "sitl", "basic_sim", "dataset"
 
     bag_csv_path = path_to_data + "/data.csv"
 
-    plot_experiment_data(bag_csv_path, path_to_data, gt_available, simulation)
+    plot_experiment_data(bag_csv_path, path_to_data, experiment_type)
 
 
 if __name__ == "__main__":

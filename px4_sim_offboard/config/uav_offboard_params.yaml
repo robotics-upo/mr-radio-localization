@@ -4,10 +4,11 @@ uav_offboard_control:
     trajectory_setpoint_topic: "/px4_1/fmu/in/trajectory_setpoint"
     vehicle_command_topic: "/px4_1/fmu/in/vehicle_command"
     vehicle_odometry_topic: "/px4_1/fmu/out/vehicle_odometry"
-    vehicle_local_position_topic: "/px4_2/fmu/out/vehicle_local_position"
+    vehicle_local_position_topic: "/px4_1/fmu/out/vehicle_local_position_v1"
     trajectory_csv_file: "trajectory_lemniscate_uav.csv"
     ros_odometry_topic: "/uav/odom"
     ros_gt_topic: "/uav/gt"
     lookahead_distance: 2.0
     kp_v: 0.5
     kp_w: 0.25
+    uav_origin: [1.0, -1.0, 0.0, 0.0, 0.0, 0.524] #x y z r p y #spawning location of the UAV in Gazebo(ENU)
