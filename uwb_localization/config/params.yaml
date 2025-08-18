@@ -40,7 +40,7 @@ eliko_global_opt_node:
         id: "0x001397"
         position: [0.24, 0.24, -0.06]  #[0.24, 0.24, -0.06]
 
-fusion_optimization_node:
+pose_optimization_node:
   ros__parameters:
     use_sim_time: true
     odom_topic_agv: "/agv/odom" #or "/agv/odom" #"/arco/idmind_motors/odom"

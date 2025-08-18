@@ -24,8 +24,8 @@ def generate_launch_description():
                 
     node2 = Node(
         package='uwb_localization',
-        executable='optimizer_node_fusion',
-        name='fusion_optimization_node',
+        executable='pose_optimization_node',
+        name='pose_optimization_node',
         parameters=[config]
         )
     
