@@ -63,18 +63,16 @@ namespace posegraph
         Eigen::Matrix<double, 6, 6> odom_covariance;
       
         // Pointer to an associated point cloud (keyframe scan).
-        pcl::PointCloud<pcl::PointXYZ>::Ptr lidar_scan;
         pcl::PointCloud<pcl::PointXYZ>::Ptr radar_scan;
         Eigen::Vector3d radar_egovel;
 
         //Check the timestamps to determine if the measurements are recent enough
         bool odom_ok;
-        bool lidar_ok;
         bool radar_ok;
         bool radar_velocity_ok;
     
          // Constructor to initialize the pointer.
-         Measurements() : lidar_scan(new pcl::PointCloud<pcl::PointXYZ>), radar_scan(new pcl::PointCloud<pcl::PointXYZ>) {}
+         Measurements() : radar_scan(new pcl::PointCloud<pcl::PointXYZ>) {}
     };
     
     

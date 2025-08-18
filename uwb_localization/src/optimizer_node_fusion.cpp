@@ -96,14 +96,6 @@ public:
     odom_tf_agv_t_ = "agv/odom"; 
     odom_tf_uav_t_ = "uav/odom";
 
-    if(using_lidar_){
-        pcl_agv_lidar_sub_ = this->create_subscription<sensor_msgs::msg::PointCloud2>(
-                    pcl_topic_lidar_agv_, qos, std::bind(&FusionOptimizationNode::pclAgvLidarCb, this, std::placeholders::_1));
-
-        pcl_uav_lidar_sub_ = this->create_subscription<sensor_msgs::msg::PointCloud2>(
-                    pcl_topic_lidar_uav_, qos, std::bind(&FusionOptimizationNode::pclUavLidarCb, this, std::placeholders::_1));
-    }
-
     if(using_radar_){
 
         pcl_agv_radar_sub_ = this->create_subscription<sensor_msgs::msg::PointCloud2>(
@@ -213,10 +205,8 @@ private:
         // Basic topics and timing.
         this->declare_parameter<std::string>("odom_topic_agv", "/arco/idmind_motors/odom");
         this->declare_parameter<std::string>("odom_topic_uav", "/uav/odom");
-        this->declare_parameter<std::string>("lidar_topic_agv", "/arco/ouster/points");
         this->declare_parameter<std::string>("radar_topic_agv", "/arco/radar/PointCloudDetection");
         this->declare_parameter<std::string>("radar_egovel_topic_agv", "/agv/Ego_Vel_Twist");
-        this->declare_parameter<std::string>("lidar_topic_uav", "/os1_cloud_node/points_non_dense");
         this->declare_parameter<std::string>("radar_topic_uav", "/drone/radar/PointCloudDetection");
         this->declare_parameter<std::string>("radar_egovel_topic_uav", "/uav/Ego_Vel_Twist");
 
@@ -230,13 +220,10 @@ private:
 
         // Modes
         this->declare_parameter<bool>("using_odom", true);
-        this->declare_parameter<bool>("using_lidar", false);
         this->declare_parameter<bool>("using_radar", true);
 
         // ICP variables
-        this->declare_parameter<double>("lidar_stdev", 0.05);
         this->declare_parameter<double>("radar_stdev", 0.1);
-        this->declare_parameter<int64_t>("icp_type_lidar", 1);  // 1: point-to-plane ICP; 2: generalized ICP
         this->declare_parameter<int64_t>("icp_type_radar", 2);
         this->declare_parameter<int64_t>("radar_history_size", 5);
 
@@ -261,12 +248,10 @@ private:
                         std::vector<double>{0.0, 0.0, 0.0, 0.0, 0.0, 0.0});
         this->declare_parameter<std::vector<double>>("imu_agv.position",
                         std::vector<double>{0.0, 0.0, 0.165, 0.0, 0.0, 0.0});
-        this->declare_parameter<std::vector<double>>("lidar_uav.position",
-                        std::vector<double>{0.21, 0.0, 0.25, 0.0, 0.0, 0.0});
+
         this->declare_parameter<std::vector<double>>("radar_uav.position",
                         std::vector<double>{-0.385, -0.02, -0.225, 0.0, 2.417, 3.14});
-        this->declare_parameter<std::vector<double>>("lidar_agv.position",
-                        std::vector<double>{0.3, 0.0, 0.45, 3.14, 0.0, 0.0});
+
         this->declare_parameter<std::vector<double>>("radar_agv.position",
                         std::vector<double>{0.45, 0.05, 0.65, 0.0, 0.0, 0.0});
 
@@ -277,20 +262,16 @@ private:
         this->get_parameter("opt_timer_rate", opt_timer_rate_);
         this->get_parameter("odom_topic_agv", odom_topic_agv_);
         this->get_parameter("odom_topic_uav", odom_topic_uav_);
-        this->get_parameter("lidar_topic_agv", pcl_topic_lidar_agv_);
-        this->get_parameter("lidar_topic_uav", pcl_topic_lidar_uav_);
+
         this->get_parameter("radar_topic_agv", pcl_topic_radar_agv_);
         this->get_parameter("radar_egovel_topic_agv", egovel_topic_radar_agv_);
         this->get_parameter("radar_topic_uav", pcl_topic_radar_uav_);
         this->get_parameter("radar_egovel_topic_uav", egovel_topic_radar_uav_);
         
         this->get_parameter("using_odom", using_odom_);
-        this->get_parameter("using_lidar", using_lidar_);
         this->get_parameter("using_radar", using_radar_);
         
-        this->get_parameter("icp_type_lidar", icp_type_lidar_);
         this->get_parameter("icp_type_radar", icp_type_radar_);
-        this->get_parameter("lidar_stdev", pointcloud_lidar_sigma_);
         this->get_parameter("radar_stdev", pointcloud_radar_sigma_);
         
         this->get_parameter("min_traveled_distance", min_traveled_distance_);
@@ -320,12 +301,10 @@ private:
                                   Eigen::Vector4d(uav_init_pose[0], uav_init_pose[1], uav_init_pose[2], uav_init_pose[5]));
 
         // Retrieve sensor placement vectors.
-        std::vector<double> lidar_uav_pos, radar_uav_pos, lidar_agv_pos, radar_agv_pos, imu_uav_pos, imu_agv_pos;
+        std::vector<double> radar_uav_pos, radar_agv_pos, imu_uav_pos, imu_agv_pos;
         this->get_parameter("imu_uav.position", imu_uav_pos);
         this->get_parameter("imu_agv.position", imu_agv_pos);
-        this->get_parameter("lidar_uav.position", lidar_uav_pos);
         this->get_parameter("radar_uav.position", radar_uav_pos);
-        this->get_parameter("lidar_agv.position", lidar_agv_pos);
         this->get_parameter("radar_agv.position", radar_agv_pos);
 
         // Now, build sensor transforms.
@@ -334,10 +313,6 @@ private:
                                   Eigen::Vector4d(imu_uav_pos[0], imu_uav_pos[1], imu_uav_pos[2], imu_uav_pos[5]));
         T_agv_imu_ = buildTransformationSE3(imu_agv_pos[3], imu_agv_pos[4],
                                   Eigen::Vector4d(imu_agv_pos[0], imu_agv_pos[1], imu_agv_pos[2], imu_agv_pos[5]));
-        T_uav_lidar_ = buildTransformationSE3(lidar_uav_pos[3], lidar_uav_pos[4],
-                                  Eigen::Vector4d(lidar_uav_pos[0], lidar_uav_pos[1], lidar_uav_pos[2], lidar_uav_pos[5]));
-        T_agv_lidar_ = buildTransformationSE3(lidar_agv_pos[3], lidar_agv_pos[4],
-                                  Eigen::Vector4d(lidar_agv_pos[0], lidar_agv_pos[1], lidar_agv_pos[2], lidar_agv_pos[5]));
         T_uav_radar_ = buildTransformationSE3(radar_uav_pos[3], radar_uav_pos[4],
                                   Eigen::Vector4d(radar_uav_pos[0], radar_uav_pos[1], radar_uav_pos[2], radar_uav_pos[5]));
         T_agv_radar_ = buildTransformationSE3(radar_agv_pos[3], radar_agv_pos[4],
@@ -347,20 +322,17 @@ private:
         RCLCPP_INFO(this->get_logger(), "FusionOptimizationNode parameters:");
         RCLCPP_INFO(this->get_logger(), "  odom_topic_agv: %s", odom_topic_agv_.c_str());
         RCLCPP_INFO(this->get_logger(), "  odom_topic_uav: %s", odom_topic_uav_.c_str());
-        RCLCPP_INFO(this->get_logger(), "  lidar_topic_agv: %s", pcl_topic_lidar_agv_.c_str());
         RCLCPP_INFO(this->get_logger(), "  radar_topic_agv: %s", pcl_topic_radar_agv_.c_str());
-        RCLCPP_INFO(this->get_logger(), "  lidar_topic_uav: %s", pcl_topic_lidar_uav_.c_str());
         RCLCPP_INFO(this->get_logger(), "  radar_topic_uav: %s", pcl_topic_radar_uav_.c_str());
         RCLCPP_INFO(this->get_logger(), "  opt_timer_rate: %f Hz", opt_timer_rate_);
         RCLCPP_INFO(this->get_logger(), "  min_traveled_distance: %f m", min_traveled_distance_);
         RCLCPP_INFO(this->get_logger(), "  min_traveled_angle: %f rad", min_traveled_angle_);
         RCLCPP_INFO(this->get_logger(), "  min_keyframes: %d, max_keyframes: %d", min_keyframes_, max_keyframes_);
-        RCLCPP_INFO(this->get_logger(), "  using_odom: %s, using_lidar: %s, using_radar: %s",
+        RCLCPP_INFO(this->get_logger(), "  using_odom: %s, using_radar: %s",
                     using_odom_ ? "true" : "false",
-                    using_lidar_ ? "true" : "false",
                     using_radar_ ? "true" : "false");
-        RCLCPP_INFO(this->get_logger(), "  lidar_sigma: %f, radar_sigma: %f", pointcloud_lidar_sigma_, pointcloud_radar_sigma_);
-        RCLCPP_INFO(this->get_logger(), "  icp_type_lidar: %d, icp_type_radar: %d", icp_type_lidar_, icp_type_radar_);
+        RCLCPP_INFO(this->get_logger(), " radar_sigma: %f", pointcloud_radar_sigma_);
+        RCLCPP_INFO(this->get_logger(), " icp_type_radar: %d", icp_type_radar_);
         RCLCPP_INFO(this->get_logger(), "  radar_history_size: %d", radar_history_size_);
         
         RCLCPP_INFO(this->get_logger(), "T_agv_anchor_prior:\n");
@@ -379,10 +351,7 @@ private:
         logTransformationMatrix(T_uav_imu_.matrix(), this->get_logger());
         RCLCPP_INFO(this->get_logger(), "T_agv_imu:\n");
         logTransformationMatrix(T_agv_imu_.matrix(), this->get_logger());
-        RCLCPP_INFO(this->get_logger(), "T_uav_lidar:\n");
-        logTransformationMatrix(T_uav_lidar_.matrix(), this->get_logger());
-        RCLCPP_INFO(this->get_logger(), "T_agv_lidar:\n");
-        logTransformationMatrix(T_agv_lidar_.matrix(), this->get_logger());
+        
         RCLCPP_INFO(this->get_logger(), "T_uav_radar:\n");
         logTransformationMatrix(T_uav_radar_.matrix(), this->get_logger());
         RCLCPP_INFO(this->get_logger(), "T_agv_radar:\n");
@@ -495,37 +464,6 @@ private:
         last_uav_odom_time_sec_ = rclcpp::Time(msg->header.stamp).seconds();
     
         // RCLCPP_INFO(this->get_logger(), "Updated AGV odometry from velocities");
-    }
-
-    /********************LIDAR Pointcloud callbacks ****************************/
-
-    void pclAgvLidarCb(const sensor_msgs::msg::PointCloud2::SharedPtr msg){
-        
-        if (!msg->data.empty()) {  // Ensure the incoming message has data
-            pcl::fromROSMsg(*msg, *agv_lidar_cloud_);
-            RCLCPP_DEBUG(this->get_logger(), "AGV cloud received with %zu points", agv_lidar_cloud_->points.size());
-            last_agv_lidar_time_sec_ = rclcpp::Time(msg->header.stamp).seconds();
-        } 
-
-        else {
-                RCLCPP_WARN(this->get_logger(), "Empty source point cloud received!");
-        }
-            return;
-    }
-
-    void pclUavLidarCb(const sensor_msgs::msg::PointCloud2::SharedPtr msg){
-
-        if (!msg->data.empty()) {  // Ensure the incoming message has data
-            pcl::fromROSMsg(*msg, *uav_lidar_cloud_);
-            RCLCPP_DEBUG(this->get_logger(), "UAV cloud received with %zu points", uav_lidar_cloud_->points.size());
-            last_uav_lidar_time_sec_ = rclcpp::Time(msg->header.stamp).seconds();
-        } 
-        
-        else {            
-            RCLCPP_WARN(this->get_logger(), "Empty target point cloud received!");
-        }
-        
-        return;
     }
 
     /********************RADAR Pointcloud callbacks ****************************/
@@ -724,7 +662,6 @@ private:
 
             //Get first measurements
             agv_measurements_.timestamp = current_time;
-            *(agv_measurements_.lidar_scan) = *(preprocessPointCloud(agv_lidar_cloud_, 50.0, 2.0, pointcloud_lidar_sigma_));
             *(agv_measurements_.radar_scan) = *(agv_radar_cloud_);
             // 2) grab latest radar ego-velocity from your subscriber
             agv_measurements_.radar_egovel = Eigen::Vector3d{
@@ -736,7 +673,6 @@ private:
             agv_measurements_.odom_covariance = agv_odom_covariance_;
 
             agv_measurements_.odom_ok  = current_time_sec - last_agv_odom_time_sec_ <= measurement_sync_thr_;
-            agv_measurements_.lidar_ok = current_time_sec - last_agv_lidar_time_sec_ <= measurement_sync_thr_;
             agv_measurements_.radar_ok = current_time_sec - last_agv_radar_time_sec_ <= measurement_sync_thr_;
             agv_measurements_.radar_velocity_ok = current_time_sec - last_agv_egovel_time_sec_ <= measurement_sync_thr_;
 
@@ -781,7 +717,6 @@ private:
             prev_agv_measurements_ = agv_measurements_;
 
             uav_measurements_.timestamp = current_time;
-            *(uav_measurements_.lidar_scan) = *(preprocessPointCloud(uav_lidar_cloud_, 50.0, 2.0, pointcloud_lidar_sigma_));
             *(uav_measurements_.radar_scan) = *(uav_radar_cloud_);
             uav_measurements_.radar_egovel = Eigen::Vector3d{
                 uav_radar_egovel_.twist.twist.linear.x,
@@ -792,7 +727,6 @@ private:
             uav_measurements_.odom_covariance = uav_odom_covariance_;
 
             uav_measurements_.odom_ok  = current_time_sec - last_uav_odom_time_sec_ <= measurement_sync_thr_;
-            uav_measurements_.lidar_ok = current_time_sec - last_uav_lidar_time_sec_ <= measurement_sync_thr_;
             uav_measurements_.radar_ok = current_time_sec - last_uav_radar_time_sec_ <= measurement_sync_thr_;
             uav_measurements_.radar_velocity_ok = current_time_sec - last_uav_egovel_time_sec_ <= measurement_sync_thr_;
 
@@ -821,7 +755,7 @@ private:
 
             uav_map_[uav_id_] = init_state_uav_;
 
-            uav_lidar_odom_pose_ = uav_radar_odom_pose_ = Sophus::SE3d(Eigen::Matrix4d::Identity());
+            uav_radar_odom_pose_ = Sophus::SE3d(Eigen::Matrix4d::Identity());
 
             //Create anchor node for UAV
             anchor_node_uav_.timestamp = current_time;
@@ -876,7 +810,6 @@ private:
             agv_id_++;
             
             agv_measurements_.timestamp = current_time;
-            *(agv_measurements_.lidar_scan) = *(preprocessPointCloud(agv_lidar_cloud_, 50.0, 2.0, pointcloud_lidar_sigma_));
             *(agv_measurements_.radar_scan) = *(agv_radar_cloud_);
             agv_measurements_.radar_egovel = Eigen::Vector3d{
                 agv_radar_egovel_.twist.twist.linear.x,
@@ -888,7 +821,6 @@ private:
             agv_measurements_.odom_covariance = agv_odom_covariance_;
 
             agv_measurements_.odom_ok  = current_time_sec - last_agv_odom_time_sec_ <= measurement_sync_thr_;
-            agv_measurements_.lidar_ok = current_time_sec - last_agv_lidar_time_sec_ <= measurement_sync_thr_;
             agv_measurements_.radar_ok = current_time_sec - last_agv_radar_time_sec_ <= measurement_sync_thr_;
             agv_measurements_.radar_velocity_ok = current_time_sec - last_agv_egovel_time_sec_ <= measurement_sync_thr_;
 
@@ -945,23 +877,6 @@ private:
                 proprioceptive_constraints_agv_.push_back(constraint_odom_agv);
             }
 
-            //AGV Lidar ICP constraints
-            if (using_lidar_ && !agv_measurements_.lidar_scan->points.empty() &&
-                !prev_agv_measurements_.lidar_scan->points.empty() && agv_measurements_.lidar_ok) {
-
-                    RCLCPP_WARN(this->get_logger(), "Computing Lidar ICP for AGV nodes %d and %d.", agv_id_ - 1, agv_id_);
-
-                    Eigen::Matrix4f T_icp = Eigen::Matrix4f::Identity();
-                    if(using_odom_ && !proprioceptive_constraints_agv_.empty()) T_icp = proprioceptive_constraints_agv_.back().t_T_s.cast<float>().matrix();
-
-                    if(!addPointCloudConstraint(prev_agv_measurements_.lidar_scan, agv_measurements_.lidar_scan,
-                        T_agv_lidar_, T_agv_lidar_, pointcloud_lidar_sigma_, icp_type_lidar_, 
-                        agv_id_ - 1, agv_id_, 
-                        extraceptive_constraints_agv_, false, &T_icp)){
-                            RCLCPP_WARN(this->get_logger(), "Failed to add constraint");
-                        }
-            }
-
             //AGV Radar ICP constraints
 
             if (using_radar_ && !agv_measurements_.radar_scan->points.empty() && agv_measurements_.radar_ok) {
@@ -1011,7 +926,6 @@ private:
 
             uav_measurements_.timestamp = current_time;
 
-            *(uav_measurements_.lidar_scan) = *(preprocessPointCloud(uav_lidar_cloud_, 50.0, 2.0, pointcloud_lidar_sigma_));
             *(uav_measurements_.radar_scan) = *(uav_radar_cloud_);
             uav_measurements_.radar_egovel = Eigen::Vector3d{
                 uav_radar_egovel_.twist.twist.linear.x,
@@ -1022,7 +936,6 @@ private:
             uav_measurements_.odom_covariance = uav_odom_covariance_;
 
             uav_measurements_.odom_ok  = current_time_sec - last_uav_odom_time_sec_ <= measurement_sync_thr_;
-            uav_measurements_.lidar_ok = current_time_sec - last_uav_lidar_time_sec_ <= measurement_sync_thr_;
             uav_measurements_.radar_ok = current_time_sec - last_uav_radar_time_sec_ <= measurement_sync_thr_;
             uav_measurements_.radar_velocity_ok = current_time_sec - last_uav_egovel_time_sec_ <= measurement_sync_thr_;
 
@@ -1076,25 +989,6 @@ private:
                                                                                     uav_measurements_.odom_covariance, prev_uav_measurements_.odom_covariance);
                 proprioceptive_constraints_uav_.push_back(constraint_odom_uav);
             }
-
-            //UAV Lidar ICP constraints
-            if (using_lidar_ && !uav_measurements_.lidar_scan->points.empty() &&
-                !prev_uav_measurements_.lidar_scan->points.empty() && uav_measurements_.lidar_ok) {
-
-                    RCLCPP_WARN(this->get_logger(), "Computing Lidar ICP for UAV nodes %d and %d.", uav_id_ - 1, uav_id_);
-                    
-                    Eigen::Matrix4f T_icp = Eigen::Matrix4f::Identity();
-                    if(using_odom_ && !proprioceptive_constraints_uav_.empty()) T_icp = proprioceptive_constraints_uav_.back().t_T_s.cast<float>().matrix();
-
-                    if(!addPointCloudConstraint(prev_uav_measurements_.lidar_scan, uav_measurements_.lidar_scan,
-                        T_uav_lidar_, T_uav_lidar_, pointcloud_lidar_sigma_, icp_type_lidar_, 
-                        uav_id_ - 1, uav_id_, 
-                        extraceptive_constraints_uav_, false, &T_icp)){
-                            RCLCPP_WARN(this->get_logger(), "Failed to add constraint");
-                        }
-
-            }
-
 
             //UAV Radar ICP constraints
             if (using_radar_ && !uav_measurements_.radar_scan->points.empty() && uav_measurements_.radar_ok) {
@@ -1171,30 +1065,7 @@ private:
             encounter_constraints_uwb_.push_back(uwb_constraint);
 
         }
-
-        // //********************Inter-robot LIDAR ICP constraints***********************//
-
-        if (using_lidar_ && !uav_measurements_.lidar_scan->points.empty() &&
-            !agv_measurements_.lidar_scan->points.empty() && agv_measurements_.lidar_ok) {
-                
-                Eigen::Matrix4f T_icp = Eigen::Matrix4f::Identity();
-                if(uwb_transform_available_) {
-                    Sophus::SE3d w_That_target = latest_relative_pose_SE3_.inverse() * uav_measurements_.odom_pose;
-                    Sophus::SE3d w_That_source = agv_measurements_.odom_pose;
-                    Sophus::SE3d That_icp = w_That_target.inverse() * w_That_source;
-                    //T_icp = latest_relative_pose_SE3_.cast<float>().matrix();
-                     T_icp = That_icp.cast<float>().matrix();
-                 }
-
-                if(!addPointCloudConstraint(agv_measurements_.lidar_scan, uav_measurements_.lidar_scan,
-                    T_agv_lidar_, T_uav_lidar_, pointcloud_lidar_sigma_, icp_type_lidar_, 
-                    agv_id_, uav_id_, 
-                    encounter_constraints_pointcloud_, false, &T_icp)){
-                        RCLCPP_WARN(this->get_logger(), "Failed to add constraint");
-                    }
-        }
-
-        
+       
         if(!(agv_id_ >= min_keyframes_ || uav_id_ >= min_keyframes_)){
             RCLCPP_INFO(this->get_logger(), "Sliding window not yet full!");
             return;
@@ -1939,7 +1810,6 @@ private:
     rclcpp::Subscription<nav_msgs::msg::Odometry>::SharedPtr uav_odom_sub_, agv_odom_sub_;
     rclcpp::Subscription<geometry_msgs::msg::Vector3Stamped>::SharedPtr uav_linear_vel_sub_, uav_angular_vel_sub_;
 
-    rclcpp::Subscription<sensor_msgs::msg::PointCloud2>::SharedPtr pcl_agv_lidar_sub_, pcl_uav_lidar_sub_;
     rclcpp::Subscription<sensor_msgs::msg::PointCloud2>::SharedPtr pcl_agv_radar_sub_, pcl_uav_radar_sub;
     rclcpp::Subscription<geometry_msgs::msg::TwistWithCovarianceStamped>::SharedPtr agv_egovel_sub_, uav_egovel_sub_;
     rclcpp::Subscription<geometry_msgs::msg::PoseWithCovarianceStamped>::SharedPtr optimized_tf_sub_;
@@ -1955,25 +1825,21 @@ private:
 
     //Params
     double opt_timer_rate_;
-    Sophus::SE3d T_uav_lidar_, T_agv_lidar_;
     Sophus::SE3d T_uav_radar_, T_agv_radar_;
     Sophus::SE3d T_uav_imu_, T_agv_imu_;
     Sophus::SE3d T_agv_anchor_prior_, T_uav_anchor_prior_;
-    double pointcloud_lidar_sigma_, pointcloud_radar_sigma_;
+    double pointcloud_radar_sigma_;
     std::string odom_topic_agv_, odom_topic_uav_;
-    std::string pcl_topic_lidar_agv_, pcl_topic_lidar_uav_;
     std::string pcl_topic_radar_agv_, pcl_topic_radar_uav_;
     std::string egovel_topic_radar_agv_, egovel_topic_radar_uav_;
-    int icp_type_lidar_, icp_type_radar_;
-    bool using_radar_, using_lidar_, using_odom_;
+    int icp_type_radar_;
+    bool using_radar_, using_odom_;
     double min_traveled_distance_, min_traveled_angle_;
     int max_keyframes_, min_keyframes_;
     int radar_history_size_;
 
 
     //Measurements
-    pcl::PointCloud<pcl::PointXYZ>::Ptr uav_lidar_cloud_{new pcl::PointCloud<pcl::PointXYZ>};
-    pcl::PointCloud<pcl::PointXYZ>::Ptr agv_lidar_cloud_{new pcl::PointCloud<pcl::PointXYZ>};
     pcl::PointCloud<pcl::PointXYZ>::Ptr uav_radar_cloud_{new pcl::PointCloud<pcl::PointXYZ>};
     pcl::PointCloud<pcl::PointXYZ>::Ptr agv_radar_cloud_{new pcl::PointCloud<pcl::PointXYZ>};
     bool uwb_transform_available_; 
@@ -2007,8 +1873,7 @@ private:
     Sophus::SE3d uav_odom_pose_, last_uav_odom_pose_;         // Current UAV odometry position and last used for optimization
     Sophus::SE3d agv_odom_pose_, last_agv_odom_pose_;        // Current AGV odometry position and last used for optimization
     Sophus::SE3d agv_init_pose_, uav_init_pose_;
-    Sophus::SE3d uav_lidar_odom_pose_, agv_lidar_odom_pose_;         // Current UAV Lidar odometry position
-    Sophus::SE3d uav_radar_odom_pose_, agv_radar_odom_pose_;         // Current UAV Lidar odometry position
+    Sophus::SE3d uav_radar_odom_pose_, agv_radar_odom_pose_;         // Current UAV Radar odometry position
 
     Eigen::Matrix<double, 6, 6> uav_odom_covariance_, agv_odom_covariance_ ;  // UAV and AGV odometry covariance
     Eigen::Quaterniond uav_quaternion_;
@@ -2018,7 +1883,6 @@ private:
     double last_agv_odom_time_sec_, last_uav_odom_time_sec_;
     double last_agv_radar_time_sec_, last_uav_radar_time_sec_;
     double last_agv_egovel_time_sec_, last_uav_egovel_time_sec_;
-    double last_agv_lidar_time_sec_, last_uav_lidar_time_sec_;
     double last_relative_pose_time_sec_, last_relative_pose_used_time_sec_;
 
     bool last_agv_odom_initialized_, last_uav_odom_initialized_;
