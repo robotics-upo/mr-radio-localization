@@ -35,6 +35,13 @@
 using namespace std::chrono_literals;
 using namespace px4_msgs::msg;
 
+
+static inline double wrapPi(double a) {
+    while (a >  M_PI) a -= 2.0*M_PI;
+    while (a < -M_PI) a += 2.0*M_PI;
+    return a;
+}
+
 class AGVOffboardControl : public rclcpp::Node
 {
 public:
@@ -57,7 +64,7 @@ private:
     std::string ros_odometry_topic_, ros_gt_topic_;
     std::string traj_file_;
     
-    double lookahead_distance_, kp_v_;
+    double lookahead_distance_, cruise_speed_;
     size_t current_index_ = 0;
     size_t offboard_counter_ = 0;
 
@@ -98,6 +105,8 @@ private:
     std::unordered_map<std::string, std::string> anchor_ids_;
     std::unordered_map<std::string, std::string> tag_ids_;
 
+    rclcpp::Time start_time_;
+    bool started_ = false;
 };
 
 AGVOffboardControl::AGVOffboardControl() : Node("agv_offboard_control")
@@ -114,7 +123,7 @@ AGVOffboardControl::AGVOffboardControl() : Node("agv_offboard_control")
     this->declare_parameter<std::string>("ros_gt_topic", "/agv/gt");
 
     this->declare_parameter<double>("lookahead_distance", 2.0);
-    this->declare_parameter<double>("kp_v", 0.5);
+    this->declare_parameter<double>("cruise_speed", 0.5);
 
     this->declare_parameter<std::vector<double>>("agv_origin", {0.0, 0.0, 0.0, 0.0, 0.0, 0.0});
 
@@ -140,7 +149,7 @@ AGVOffboardControl::AGVOffboardControl() : Node("agv_offboard_control")
     this->get_parameter("ros_gt_topic", ros_gt_topic_);
 
     this->get_parameter("lookahead_distance", lookahead_distance_);
-    this->get_parameter("kp_v", kp_v_);
+    this->get_parameter("cruise_speed", cruise_speed_);
 
 
     std::vector<double> agv_origin_vec;
@@ -184,6 +193,8 @@ AGVOffboardControl::AGVOffboardControl() : Node("agv_offboard_control")
     ros_odometry_publisher_ = this->create_publisher<nav_msgs::msg::Odometry>(ros_odometry_topic_, 10);
     ros_gt_publisher_ = this->create_publisher<geometry_msgs::msg::PoseStamped>(ros_gt_topic_, 10);
     distances_list_pub_ = this->create_publisher<eliko_messages::msg::DistancesList>("eliko/Distances", 10);
+
+    start_time_ = this->get_clock()->now();
 
     vehicle_odometry_subscriber_ = this->create_subscription<VehicleOdometry>(
         vehicle_odometry_topic_, rclcpp::SensorDataQoS(),
@@ -315,13 +326,27 @@ AGVOffboardControl::AGVOffboardControl() : Node("agv_offboard_control")
 
 void AGVOffboardControl::timer_callback()
 {
+
     if (++offboard_counter_ == 10) {
         publish_vehicle_command(VehicleCommand::VEHICLE_CMD_DO_SET_MODE, 1, 6);
         publish_vehicle_command(VehicleCommand::VEHICLE_CMD_COMPONENT_ARM_DISARM, 1);
+        
+        start_time_ = this->get_clock()->now();
+    }
+
+    else if (!started_ && offboard_counter_ > 10){
+        //Wait a bit for the drone to take off
+        auto now = this->get_clock()->now();
+        if ((now - start_time_).seconds() >= 5.0) {
+            started_ = true;
+            RCLCPP_INFO(this->get_logger(), "AGV trajectory setpoint publishing started after 5s delay.");
+        }
     }
 
     publish_offboard_control_mode();
-    publish_trajectory_setpoint();
+
+    //Start publishing setpoints
+    if(started_) publish_trajectory_setpoint();
 }
 
 void AGVOffboardControl::load_trajectory(const std::string &filename)
@@ -396,8 +421,8 @@ void AGVOffboardControl::publish_trajectory_setpoint()
     const double uy = (distance > 0.0) ? dy / distance : 0.0;
 
     // Controller in WORLD ENU
-    const double vx_world_enu = kp_v_ * distance * ux;
-    const double vy_world_enu = kp_v_ * distance * uy;
+    const double vx_world_enu = cruise_speed_ * ux;
+    const double vy_world_enu = cruise_speed_ * uy;
     const double vz_world_enu = 0.0;
 
     // Desired facing yaw in WORLD ENU
@@ -428,7 +453,7 @@ void AGVOffboardControl::publish_trajectory_setpoint()
         static_cast<float>(v_local_ned.z())
     };
 
-    msg.yaw = static_cast<float>(yaw_ned);
+    msg.yaw = static_cast<float>(wrapPi(yaw_ned));
     msg.timestamp = this->get_clock()->now().nanoseconds() / 1000;
 
     trajectory_setpoint_publisher_->publish(msg);

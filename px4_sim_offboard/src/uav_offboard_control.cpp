@@ -69,10 +69,16 @@
 
 #include "ament_index_cpp/get_package_share_directory.hpp"
 
-
 using namespace std::chrono;
 using namespace std::chrono_literals;
 using namespace px4_msgs::msg;
+
+
+static inline double wrapPi(double a) {
+    while (a >  M_PI) a -= 2.0*M_PI;
+    while (a < -M_PI) a += 2.0*M_PI;
+    return a;
+}
 
 class UAVOffboardControl : public rclcpp::Node
 {
@@ -91,8 +97,7 @@ public:
 		this->declare_parameter<std::string>("ros_gt_topic", "/uav/gt");
 
 		this->declare_parameter<double>("lookahead_distance", 2.0);
-		this->declare_parameter<double>("kp_v", 1.0);
-		this->declare_parameter<double>("kp_w", 0.1);
+		this->declare_parameter<double>("cruise_speed", 0.5);
 
 		this->declare_parameter<std::vector<double>>("uav_origin", {0.0, 0.0, 0.0, 0.0, 0.0, 0.0});
 
@@ -115,8 +120,7 @@ public:
 		this->get_parameter("ros_odometry_topic", ros_odometry_topic_);
 		this->get_parameter("ros_gt_topic", ros_gt_topic_);
 
-		this->get_parameter("kp_v", kp_v_);
-		this->get_parameter("kp_w", kp_w_);
+		this->get_parameter("cruise_speed", cruise_speed_);
 
 		std::vector<double> uav_origin_vec;
 		this->get_parameter("uav_origin", uav_origin_vec);
@@ -323,8 +327,7 @@ private:
 	size_t current_target_idx_ = 0;
 	size_t closest_idx_ = 0;
 	double lookahead_distance_ = 2.0;  // meters
-	double kp_v_ = 1.0;         // proportional gain
-	double kp_w_ = 0.1;
+	double cruise_speed_ = 0.5;         // proportional gain
 
 	bool hover_reached_ = false;
 	bool land_sent_ = false;  // flag to ensure LAND command is sent only once
@@ -459,7 +462,7 @@ void UAVOffboardControl::publish_trajectory_setpoint()
 		msg.position = {static_cast<float>(p_local_ned.x()),
 						static_cast<float>(p_local_ned.y()),
 						static_cast<float>(p_local_ned.z())};
-		msg.yaw = static_cast<float>(yaw_ned);
+		msg.yaw = static_cast<float>(wrapPi(yaw_ned));
 		msg.timestamp = this->get_clock()->now().nanoseconds() / 1000;
 		trajectory_setpoint_publisher_->publish(msg);
 
@@ -546,12 +549,10 @@ void UAVOffboardControl::publish_trajectory_setpoint()
 	double uz = ez / dist;
 
 	// Compute commanded velocity magnitude
-	double max_vel = 1.5;
-	double vel_mag = std::min(kp_v_ * dist, max_vel);	// double vel_mag = 0.5; //track at constant velocity
 	// Apply velocity vector
-	double vx = vel_mag * ux;
-	double vy = vel_mag * uy;
-	double vz = vel_mag * uz;
+	double vx = cruise_speed_ * ux;
+	double vy = cruise_speed_ * uy;
+	double vz = cruise_speed_ * uz;
 
 	// v_world_enu from your controller (vx, vy, vz in world ENU)
 	Eigen::Vector3d v_world_enu(vx, vy, vz);
@@ -576,7 +577,7 @@ void UAVOffboardControl::publish_trajectory_setpoint()
 	msg.velocity = {static_cast<float>(v_local_ned.x()),
 					static_cast<float>(v_local_ned.y()),
 					static_cast<float>(v_local_ned.z())};
-	msg.yaw = static_cast<float>(yaw_ned);
+	msg.yaw = static_cast<float>(wrapPi(yaw_ned));
 	msg.timestamp = this->get_clock()->now().nanoseconds() / 1000;
 
 	trajectory_setpoint_publisher_->publish(msg);

@@ -9,8 +9,7 @@ agv_offboard_control:
     ros_odometry_topic: "/agv/odom"
     ros_gt_topic: "/agv/gt"
     lookahead_distance: 2.0
-    kp_v: 0.5 # Velocity magnitude in m/s
-    kp_w: 0.25
+    cruise_speed: 0.5
     agv_origin: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0] #x y z r p y #spawning location of the AGV in Gazebo(ENU)
     anchors:
       a1:
