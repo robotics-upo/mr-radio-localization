@@ -60,10 +60,10 @@ public:
     rclcpp::SensorDataQoS qos; // Use a QoS profile compatible with sensor data
 
     if(debug_){
-        dll_agv_sub_ = this->create_subscription<geometry_msgs::msg::PoseStamped>(
+        dll_agv_sub_ = this->create_subscription<geometry_msgs::msg::PoseWithCovarianceStamped>(
         "/dll_node_arco/pose_estimation", qos, std::bind(&ElikoGlobalOptNode::agvDllCb, this, std::placeholders::_1));
 
-        dll_uav_sub_ = this->create_subscription<geometry_msgs::msg::PoseStamped>(
+        dll_uav_sub_ = this->create_subscription<geometry_msgs::msg::PoseWithCovarianceStamped>(
         "/dll_node/pose_estimation", qos, std::bind(&ElikoGlobalOptNode::uavDllCb, this, std::placeholders::_1));
     }
 
@@ -77,6 +77,8 @@ public:
     
     // Create publisher/broadcaster for optimized transformation
     tf_publisher_ = this->create_publisher<geometry_msgs::msg::PoseWithCovarianceStamped>("eliko_optimization_node/optimized_T", 10);
+    tf_publisher_noprior_ = this->create_publisher<geometry_msgs::msg::PoseWithCovarianceStamped>("eliko_optimization_node/optimized_T_nopr", 10);
+
     tf_ransac_publisher_ = this->create_publisher<geometry_msgs::msg::PoseWithCovarianceStamped>("eliko_optimization_node/ransac_optimized_T", 10);
 
     tf_broadcaster_ = std::make_shared<tf2_ros::TransformBroadcaster>(this);
@@ -444,33 +446,33 @@ private:
 
     /*********DLL callbacks: used instead of odometry when you want accurate poses **********/
 
-    void agvDllCb(const geometry_msgs::msg::PoseStamped::SharedPtr msg) {
+    void agvDllCb(const geometry_msgs::msg::PoseWithCovarianceStamped::SharedPtr msg) {
 
         Eigen::Quaterniond q(
-            msg->pose.orientation.w,
-            msg->pose.orientation.x,
-            msg->pose.orientation.y,
-            msg->pose.orientation.z
+            msg->pose.pose.orientation.w,
+            msg->pose.pose.orientation.x,
+            msg->pose.pose.orientation.y,
+            msg->pose.pose.orientation.z
         );
         Eigen::Vector3d t(
-            msg->pose.position.x,
-            msg->pose.position.y,
-            msg->pose.position.z
+            msg->pose.pose.position.x,
+            msg->pose.pose.position.y,
+            msg->pose.pose.position.z
         );
         agv_gt_pose_ = Sophus::SE3d(q, t);
     }
 
-    void uavDllCb(const geometry_msgs::msg::PoseStamped::SharedPtr msg) {
+    void uavDllCb(const geometry_msgs::msg::PoseWithCovarianceStamped::SharedPtr msg) {
         Eigen::Quaterniond q(
-            msg->pose.orientation.w,
-            msg->pose.orientation.x,
-            msg->pose.orientation.y,
-            msg->pose.orientation.z
+            msg->pose.pose.orientation.w,
+            msg->pose.pose.orientation.x,
+            msg->pose.pose.orientation.y,
+            msg->pose.pose.orientation.z
         );
         Eigen::Vector3d t(
-            msg->pose.position.x,
-            msg->pose.position.y,
-            msg->pose.position.z
+            msg->pose.pose.position.x,
+            msg->pose.pose.position.y,
+            msg->pose.pose.position.z
         );
         uav_gt_pose_ = Sophus::SE3d(q, t);
     }
@@ -632,7 +634,35 @@ private:
         predicted_motion_covariance(2,2) = std::pow(predicted_drift_translation, 2.0);
         predicted_motion_covariance(3,3) = std::pow(predicted_drift_rotation, 2.0);
 
+        //*****************Nonlinear WLS refinement with all measurements ****************************/
+
+        //Update odom for next optimization
+        uav_delta_translation_ = agv_delta_translation_ = uav_delta_rotation_ = agv_delta_rotation_ = 0.0;
+
+        //Optimize    
+        RCLCPP_INFO(this->get_logger(), "[Eliko global_opt node] Optimizing trajectory of %ld measurements", global_measurements_.size());
         
+        // /////////////////Run it with no prior
+        // if(runOptimization(current_time, opt_state_noprior_, predicted_motion_covariance, false)){
+            
+        //     if(moving_average_){
+        //         // /*Run moving average*/
+        //         auto smoothed_state = movingAverage(opt_state_noprior_, moving_average_max_samples_, moving_average_states_noprior_);
+        //         //Update for initial estimation of following step
+        //         opt_state_noprior_.state = smoothed_state;
+        //     }
+
+        //     opt_state_noprior_.pose = buildTransformationSE3(opt_state_noprior_.roll, opt_state_noprior_.pitch, opt_state_noprior_.state);
+        //     geometry_msgs::msg::PoseWithCovarianceStamped msg = buildPoseMsg(opt_state_noprior_.pose, opt_state_noprior_.covariance + predicted_motion_covariance, opt_state_noprior_.timestamp, uav_odom_frame_id_);
+        //     tf_publisher_noprior_->publish(msg);
+
+        //     last_optimization_noprior_latest_stamp_ = global_measurements_.back().timestamp;
+        // }
+        // else{
+        //     RCLCPP_INFO(this->get_logger(), "[Eliko global_opt node] Optimizer did not converge");
+        // }
+
+                
         //*****************Calculate initial solution ****************************/
 
         Eigen::MatrixXd M;
@@ -645,19 +675,13 @@ private:
                 tf_ransac_publisher_->publish(msg);
             }
         }
-        //*****************Nonlinear WLS refinement with all measurements ****************************/
 
-        //Update odom for next optimization
-        uav_delta_translation_ = agv_delta_translation_ = uav_delta_rotation_ = agv_delta_rotation_ = 0.0;
-
-        //Optimize    
-        RCLCPP_INFO(this->get_logger(), "[Eliko global_opt node] Optimizing trajectory of %ld measurements", global_measurements_.size());
         //Update transforms after convergence
-        if(runOptimization(current_time, predicted_motion_covariance, init_prior)){
+        if(runOptimization(current_time, opt_state_, predicted_motion_covariance, init_prior)){
             
             if(moving_average_){
                 // /*Run moving average*/
-                auto smoothed_state = movingAverage(opt_state_, moving_average_max_samples_);
+                auto smoothed_state = movingAverage(opt_state_, moving_average_max_samples_, moving_average_states_);
                 //Update for initial estimation of following step
                 opt_state_.state = smoothed_state;
             }
@@ -753,11 +777,11 @@ private:
         if (useRANSAC) {
             size_t num_iters = 100;
             size_t min_samples = 10;
-            double inlier_threshold = 0.25;  // meters
+            double inlier_threshold = 0.5;
             size_t best_inliers = 0;
             Eigen::Vector4d best_state;
             double inlier_ratio = 0.0;
-            double min_inlier_ratio = 0.7;
+            double min_inlier_ratio = 0.6;
             bool found_valid = false;
 
             for (size_t iter = 0; iter < num_iters; ++iter) {
@@ -801,7 +825,7 @@ private:
                         init_state.state[2] = refined_solution[2];
                         init_state.state[3] = std::atan2(refined_solution[4], refined_solution[3]);
                         init_state.pose = buildTransformationSE3(init_state.roll, init_state.pitch, init_state.state);
-                        init_state.covariance = Eigen::Matrix4d::Identity() * 0.1;
+                        init_state.covariance = Eigen::Matrix4d::Identity() * 1e-6;
 
                         RCLCPP_INFO_STREAM(rclcpp::get_logger("eliko_global_opt_node"),
                             "Refined RANSAC solution with " << inlier_set.size() << " inliers:\n"
@@ -839,15 +863,15 @@ private:
         return true;
     }
 
-    Eigen::Vector4d movingAverage(const State &sample, const size_t &max_samples) {
+    Eigen::Vector4d movingAverage(const State &sample, const size_t &max_samples, std::deque<State> &moving_average_states) {
         
             // Add the new sample with timestamp
-            moving_average_states_.push_back(sample);
+            moving_average_states.push_back(sample);
 
             // Remove samples that are too old or if we exceed the window size
-            while (!moving_average_states_.empty() &&
-                moving_average_states_.size() > max_samples) {
-                moving_average_states_.pop_front();
+            while (!moving_average_states.empty() &&
+                moving_average_states.size() > max_samples) {
+                moving_average_states.pop_front();
             }
 
             // Initialize smoothed values
@@ -864,7 +888,7 @@ private:
             double weight = 1.0;  // Start with a weight of 1.0 for the most recent sample
 
             // Iterate over samples in reverse order (from newest to oldest)
-            for (auto it = moving_average_states_.rbegin(); it != moving_average_states_.rend(); ++it) {
+            for (auto it = moving_average_states.rbegin(); it != moving_average_states.rend(); ++it) {
                 // Apply the weight to each sample's translation and accumulate
                 smoothed_state[0] += weight * it->state[0];
                 smoothed_state[1] += weight * it->state[1];
@@ -896,7 +920,7 @@ private:
     }
 
     // Run the optimization once all measurements are received
-    bool runOptimization(const rclcpp::Time &current_time, const Eigen::Matrix4d& motion_covariance, const bool& init_prior) {
+    bool runOptimization(const rclcpp::Time &current_time, State &current_state, const Eigen::Matrix4d& motion_covariance, const bool& init_prior) {
 
             ceres::Problem problem;
 
@@ -905,7 +929,7 @@ private:
             // if(init_prior) opt_state = init_state_;
             // else opt_state = opt_state_;
 
-            opt_state = opt_state_;
+            opt_state = current_state;
 
             //Update the timestamp
             opt_state.timestamp = current_time;
@@ -925,7 +949,7 @@ private:
 
             //Set prior using linear initial solution
             if(init_prior){
-                Eigen::Matrix4d prior_covariance = motion_covariance + Eigen::Matrix4d::Identity() * std::pow(measurement_stdev_,2.0);
+                Eigen::Matrix4d prior_covariance = Eigen::Matrix4d::Identity() * 1e-6; //std::pow(measurement_stdev_,2.0);
                 Sophus::SE3d prior_T = buildTransformationSE3(init_state_.roll, init_state_.pitch, init_state_.state);
                 //Add the prior residual with the full covariance
                 ceres::CostFunction* prior_cost = PriorCostFunction::Create(prior_T, opt_state.roll, opt_state.pitch, prior_covariance);
@@ -939,8 +963,10 @@ private:
                 Eigen::Vector3d anchor_pos = measurement.anchor_odom_pose;
                 Eigen::Vector3d tag_pos = measurement.tag_odom_pose;
 
+                double measurement_stdev = measurement_stdev_;
+                // if(init_prior) measurement_stdev*=100.0;
                 ceres::CostFunction* cost_function = UWBCostFunction::Create(
-                    anchor_pos, tag_pos, measurement.distance, opt_state.roll, opt_state.pitch, measurement_stdev_);
+                    anchor_pos, tag_pos, measurement.distance, opt_state.roll, opt_state.pitch, measurement_stdev);
                 problem.AddResidualBlock(cost_function, robust_loss, opt_state.state.data());
             }
 
@@ -948,7 +974,7 @@ private:
             // Configure solver options
             ceres::Solver::Options options;
             options.linear_solver_type = ceres::DENSE_QR; // ceres::SPARSE_NORMAL_CHOLESKY,  ceres::DENSE_QR
-            options.num_threads = 4;
+            options.num_threads = 6;
             options.use_nonmonotonic_steps = true;  // Help escape plateaus
             options.max_consecutive_nonmonotonic_steps = 10; //default is 5
             options.max_num_iterations = 100;
@@ -986,7 +1012,7 @@ private:
                     opt_state.covariance = opt_covariance;  // Add this to your State struct if needed
 
                     //Update global state variable
-                    opt_state_ = opt_state;
+                    current_state = opt_state;
 
                     return true;
 
@@ -1005,7 +1031,7 @@ private:
     // Subscriptions
     rclcpp::Subscription<eliko_messages::msg::DistancesList>::SharedPtr eliko_distances_sub_;
     rclcpp::Subscription<nav_msgs::msg::Odometry>::SharedPtr agv_odom_sub_, uav_odom_sub_;
-    rclcpp::Subscription<geometry_msgs::msg::PoseStamped>::SharedPtr dll_agv_sub_, dll_uav_sub_;
+    rclcpp::Subscription<geometry_msgs::msg::PoseWithCovarianceStamped>::SharedPtr dll_agv_sub_, dll_uav_sub_;
     rclcpp::Publisher<std_msgs::msg::Float32MultiArray>::SharedPtr range_pub_;
 
     // Timers
@@ -1014,7 +1040,7 @@ private:
     std::deque<UWBMeasurement> global_measurements_;
     
     // Publishers/Broadcasters
-    rclcpp::Publisher<geometry_msgs::msg::PoseWithCovarianceStamped>::SharedPtr tf_publisher_, tf_ransac_publisher_;
+    rclcpp::Publisher<geometry_msgs::msg::PoseWithCovarianceStamped>::SharedPtr tf_publisher_, tf_publisher_noprior_, tf_ransac_publisher_;
     std::shared_ptr<tf2_ros::TransformBroadcaster> tf_broadcaster_;
 
     //Parameters
@@ -1037,9 +1063,9 @@ private:
     std::string agv_body_frame_id_, uav_body_frame_id_;
     std::string uav_opt_frame_id_, agv_opt_frame_id_;
 
-    State opt_state_;
+    State opt_state_, opt_state_noprior_;
     State init_state_;
-    std::deque<State> moving_average_states_;
+    std::deque<State> moving_average_states_, moving_average_states_noprior_;
 
     Sophus::SE3d uav_odom_pose_, last_uav_odom_pose_;         // Current UAV odometry position and last used for optimization
     Sophus::SE3d agv_odom_pose_, last_agv_odom_pose_;        // Current AGV odometry position and last used for optimization
@@ -1056,7 +1082,7 @@ private:
 
     double odom_error_distance_, odom_error_angle_;
 
-    rclcpp::Time last_optimization_latest_stamp_;
+    rclcpp::Time last_optimization_latest_stamp_, last_optimization_noprior_latest_stamp_;
 
     //Timing metrics
     int total_solves_;
