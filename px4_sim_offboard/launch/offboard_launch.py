@@ -52,5 +52,12 @@ def generate_launch_description():
             name='ros_gz_parameter_bridge',
             output='screen',
             arguments=['--ros-args', '-p', f'config_file:={uwb_bridge_config}']
+        ),
+
+       Node(
+        package='uwb_simulator',
+        executable='clock_publisher',
+        name='clock_publisher'
         )
+
     ])

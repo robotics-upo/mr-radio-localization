@@ -4,18 +4,23 @@ PX4_DIR=~/PX4-Autopilot
 ROS_WS=~/radio_ws
 QGC_PATH=~/Desktop/QGroundControl-x86_64.AppImage
 
+# # # Robot base poses: [x, y, z, roll, pitch, yaw]
+# # agv_pose = [13.351, 27.385, 0.636, 0.001, 0.001, 3.079]
+# # uav_pose = [15.938, 22.979, 0.903, 0.000, 0.000, 0.028]
+
 # UAV initial pose (x, y, z, roll, pitch, yaw)
-UAV_X=0
-UAV_Y=2
-UAV_Z=0
+UAV_X=0.5
+UAV_Y=-0.5
+UAV_Z=0.0
 UAV_ROLL=0
+
 UAV_PITCH=0
-UAV_YAW=0
+UAV_YAW=0.524
 
 # Rover initial pose (x, y, z, roll, pitch, yaw)
-ROVER_X=0
-ROVER_Y=0
-ROVER_Z=0
+ROVER_X=0.0
+ROVER_Y=0.0
+ROVER_Z=0.0
 ROVER_ROLL=0
 ROVER_PITCH=0
 ROVER_YAW=0
@@ -29,12 +34,10 @@ graceful_shutdown() {
   if tmux has-session -t "$SESSION" 2>/dev/null; then
     echo "[CLEANUP] Stopping ros2 bag…"
     tmux send-keys -t $SESSION:1.3 C-c
-    sleep 3   # give it time to finalize files
-
     # 2) Stop your other ROS nodes cleanly (optional)
     tmux send-keys -t $SESSION:1.2 C-c  # uwb_localization
     tmux send-keys -t $SESSION:0.4 C-c  # offboard_launch.py
-    sleep 1
+    sleep 10
 
     # 3) Now kill simulators last
     echo "[CLEANUP] Killing simulators…"
@@ -90,12 +93,31 @@ tmux select-layout -t $SESSION:1 tiled
 tmux send-keys -t $SESSION:1.0 "sleep 27 && source $ROS_WS/install/setup.zsh && ros2 topic echo /agv/odom" C-m
 tmux send-keys -t $SESSION:1.1 "sleep 27 && source $ROS_WS/install/setup.zsh && ros2 topic echo /uav/odom" C-m
 
-# UWB localization launch
-tmux send-keys -t $SESSION:1.2 "sleep 30 && cd $ROS_WS && source install/setup.zsh && ros2 launch uwb_localization localization.launch.py" C-m
+# UWB localization launch (to simulate and optimize at the same time)
+# tmux send-keys -t $SESSION:1.2 "sleep 30 && cd $ROS_WS && source install/setup.zsh && ros2 launch uwb_localization localization.launch.py" C-m
 
-#Record all ROS 2 topics
-tmux send-keys -t $SESSION:1.3 "sleep 30 && cd $ROS_WS && source install/setup.zsh && ros2 bag record -a" C-m
+# #Record all ROS 2 topics (to simulate and optimize at the same tim)
+# tmux send-keys -t $SESSION:1.3 "sleep 30 && cd $ROS_WS && source install/setup.zsh && ros2 bag record \
+#   /uav/gt \
+#   /agv/gt \
+#   /uav/odom \
+#   /agv/odom \
+#   /eliko_optimization_node/optimized_T \
+#   /eliko_optimization_node/optimized_T_nopr \
+#   /eliko_optimization_node/ransac_optimized_T \
+#   /pose_graph_node/uav_anchor \
+#   /pose_graph_node/agv_anchor" C-m
+
+#Record all ROS 2 topics (Post-processing version)
+tmux send-keys -t $SESSION:1.3 "sleep 30 && cd $ROS_WS && source install/setup.zsh && ros2 bag record \
+  /uav/gt \
+  /agv/gt \
+  /uav/odom \
+  /agv/odom \
+  /eliko/Distances " C-m
 
 
 # Attach
 tmux attach-session -t $SESSION
+
+
