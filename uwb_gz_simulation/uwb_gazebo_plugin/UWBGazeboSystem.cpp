@@ -104,11 +104,18 @@ void UWBGazeboSystem::PreUpdate(const gz::sim::UpdateInfo &info,
 			double dist = tagPose.Pos().Distance(anchorPose.Pos()) * 100.0; // Convert to cm
 			dist += noise_dist_(rng_);  // Add zero-mean Gaussian noise
 
-			// With small probability, inject an outlier with exp. bias
-			if (outlier_flag_(rng_)) {
-				double bias_m = outlier_bias_m_(rng_);
-				dist += bias_m * 100.0;
+			// Build stable key per anchor–tag pair
+			const std::string key = "a" + anchorName + "t" + tagName;
+
+			// Draw and cache a persistent bias for this pair (in cm)
+			auto it = this->pairBiasCm_.find(key);
+			if (it == this->pairBiasCm_.end())
+			{
+				it = this->pairBiasCm_.emplace(key, this->biasCmDist_(this->rng_)).first;
 			}
+
+			// // Apply the persistent bias
+			// dist += it->second;
 
 			// Keep distance physically valid
 			if (dist < 0.0) dist = 0.0;

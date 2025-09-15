@@ -35,11 +35,15 @@ private:
   std::string modelAnchorPrefix_ = "r1_rover";
 
   std::default_random_engine rng_;
-  std::normal_distribution<double> noise_dist_{0.0, 10.0};  // zero-mean gaussian noise 10cm stdev
+  std::normal_distribution<double> noise_dist_{0.0, 0.12};  // zero-mean gaussian noise 10cm stdev
   // Randomness (you already have rng_ and noise_dist_)
   std::bernoulli_distribution outlier_flag_{0.02}; // 2% outliers
   std::exponential_distribution<double> outlier_bias_m_{1.0};
+
+  std::unordered_map<std::string, double> pairBiasCm_;
+  std::uniform_real_distribution<double> biasCmDist_{-27.0, 20.0};
+
   // Probability of a measurement dropout (no publish)
-  std::bernoulli_distribution dropout_flag_{0.005}; // 0.5% chance to skip a measurement
+  std::bernoulli_distribution dropout_flag_{0.02}; // 0.5% chance to skip a measurement
 };
 }
