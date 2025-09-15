@@ -272,6 +272,8 @@ private:
   double uav_translation_{0.0}, agv_translation_{0.0};
   double uav_rotation_{0.0}, agv_rotation_{0.0};
 
+  rclcpp::Time graph_start_time_;
+
   // Metrics
   int total_solves_{0};
   double total_solver_time_{0.0};

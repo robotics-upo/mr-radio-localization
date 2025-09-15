@@ -12,7 +12,10 @@ def generate_launch_description():
     package_dir = get_package_share_directory('uwb_localization')
 
     config = os.path.join(package_dir, 'config', 'params.yaml')
-           
+
+    # Put here the path to the simulation bag you want to use
+    path_to_bag = "/home/amarsil/radio_ws/datasets_sim/dataset_lemniscate"
+        
     node1 = Node(
                 package='uwb_localization',
                 executable='global_opt_node_eliko',
@@ -27,14 +30,15 @@ def generate_launch_description():
         parameters=[config]
         )
     
-    clock_pub = Node(
-        package='uwb_simulator',
-        executable='clock_publisher',
-        name='clock_publisher',
-        parameters=[config]
-        )
+    bag_full = ExecuteProcess(
+        cmd=['ros2', 'bag', 'play', path_to_bag, '--clock'],
+        output='screen'
+    )
 
+    # nodes_to_execute = [node1, node2]
+    nodes_to_execute = [node1]
 
-    nodes_to_execute = [node1, node2, clock_pub]
+    nodes_to_execute.append(bag_full)
+
     
     return LaunchDescription(nodes_to_execute)

@@ -13,9 +13,8 @@ def generate_launch_description():
 
     config = os.path.join(package_dir, 'config', 'params.yaml')
 
-    path_to_ground_truth = "/home/amarsil/tfm_ws/bags/bags_con_los_experimentos/experiment1_gt/ground_truth"
-    path_to_experiment =  "/home/amarsil/tfm_ws/bags/bags_con_los_experimentos/original_experiments/rosbag_experiment1_drone"
-    path_to_full_bag =  "/home/amarsil/tfm_ws/bags/bags_con_los_experimentos/experiment1_gt/experiment1_no_odom_arco_gt"
+    #Put here the path to the dataset bag you want to use
+    path_to_bag = "/home/amarsil/radio_ws/dataset/experiment1_gt_v2"
 
     node1 = Node(
                 package='uwb_localization',
@@ -45,21 +44,11 @@ def generate_launch_description():
         parameters=[config]
         )
 
-    bag_gt = ExecuteProcess(
-        cmd=['ros2', 'bag', 'play', path_to_ground_truth, '--clock'],
-        output='screen'
-    )
-
-    bag_experiment = ExecuteProcess(
-        cmd=['ros2', 'bag', 'play', path_to_experiment, '--clock'],
-        output='screen'
-    )
-
     bag_full = ExecuteProcess(
-        cmd=['ros2', 'bag', 'play', path_to_full_bag, '--clock'],
+        cmd=['ros2', 'bag', 'play', path_to_bag, '--clock'],
         output='screen'
     )
 
-    nodes_to_execute = [node1, node2, node3, node4, bag_gt, bag_experiment]
+    nodes_to_execute = [node1, node2, node3, node4, bag_full]
     
     return LaunchDescription(nodes_to_execute)

@@ -14,17 +14,18 @@ from scipy.interpolate import interp1d
 from scipy.signal import savgol_filter
 
 
-
+# Flag to compare three relative transformation estimation methods
+sim_compare = False
 
 # === for paper‐quality bigger fonts ===
 mpl.rcParams.update({
-    'font.size':         14,   # base font size
-    'axes.labelsize':    14,   # x/y label
-    'axes.titlesize':    16,   # subplot title
-    'xtick.labelsize':   12,   # tick numbers
-    'ytick.labelsize':   12,
-    'legend.fontsize':   12,
-    'figure.titlesize':  18    # overall figure title
+    'font.size':         28,   # base font size
+    'axes.labelsize':    28,   # x/y label
+    'axes.titlesize':    28,   # subplot title
+    'xtick.labelsize':   28,   # tick numbers
+    'ytick.labelsize':   28,
+    'legend.fontsize':   28,
+    'figure.titlesize':  28    # overall figure title
 })
 
 
@@ -150,7 +151,7 @@ def plot_3d_scatter(path, data_frame_ref, data_frame_ref_odom, data_frame_target
 
     # Plot ground truth and odom source trajectory
     ax.plot(data_frame_ref[cols_ref[1]], data_frame_ref[cols_ref[2]], data_frame_ref[cols_ref[3]], c='r', label='GT source', linewidth=2)
-    # For the source odometry (e.g., AGV), use the source odom origin:
+    # For the source odometry (e.g., UGV), use the source odom origin:
     # Extract local odom data
     odom_source_local = data_frame_ref_odom[[cols_ref_odom[1], cols_ref_odom[2], cols_ref_odom[3]]].values.T  # shape (3, N)
     T_source = source_odom_origin
@@ -182,7 +183,7 @@ def plot_3d_scatter(path, data_frame_ref, data_frame_ref_odom, data_frame_target
     ax.set_xlabel("X (m)")
     ax.set_ylabel("Y (m)")
     ax.set_zlabel("Z (m)")
-    ax.legend()
+    # ax.legend()
 
     plt.savefig(path + '/pose_3D.png', bbox_inches='tight')
 
@@ -193,130 +194,235 @@ def plot_3d_scatter(path, data_frame_ref, data_frame_ref_odom, data_frame_target
     plt.show()
 
 
-def plot_transform(path, df_experiment, df_covariance, cols_experiment, cols_covariance, t0, source_odom_origin = None, target_odom_origin = None):
+def plot_transform(path,
+                   df_experiment,
+                   df_covariance,
+                   cols_experiment,
+                   cols_covariance,
+                   t0,
+                   source_odom_origin=None,
+                   target_odom_origin=None,
+                   df_experiment_linear=None,
+                   cols_experiment_linear=None,
+                   df_experiment_nopr=None,
+                   cols_experiment_nopr=None):
 
     gt_available = False
-    if(source_odom_origin is not None and target_odom_origin is not None):
+    if (source_odom_origin is not None) and (target_odom_origin is not None):
+        print("Source odom origin:\n", source_odom_origin)
+        print("Target odom origin:\n", target_odom_origin)
+        print("Inverse Target odom origin:\n", np.linalg.inv(target_odom_origin))
         T_t_s = np.linalg.inv(target_odom_origin) @ source_odom_origin
         print("T_t_s (Transformation from source to target):\n", T_t_s)
-        # Extract constant ground truth transform from source to target
         t_t_s_translation = T_t_s[:3, 3]
         t_t_s_yaw = R.from_matrix(T_t_s[:3, :3]).as_euler('zyx')[0]
         gt_available = True
 
+    # copy & normalize time
+    df_experiment = df_experiment.copy()
+    df_covariance = df_covariance.copy()
+    df_experiment[cols_experiment[0]] -= t0
+    df_covariance[cols_covariance[0]] -= t0
+
+    has_linear = (df_experiment_linear is not None and
+                  cols_experiment_linear is not None and
+                  not df_experiment_linear.empty)
+    if has_linear:
+        print("Linear TF found")
+        df_experiment_linear = df_experiment_linear.copy()
+        df_experiment_linear[cols_experiment_linear[0]] -= t0
+    
+    has_nopr = (df_experiment_nopr is not None and
+                cols_experiment_nopr is not None and
+                not df_experiment_nopr.empty)
+    if has_nopr:
+        print("No-prior TF found")
+        df_experiment_nopr = df_experiment_nopr.copy()
+        df_experiment_nopr[cols_experiment_nopr[0]] -= t0
+
+    # std (only for optimized)
+    std_x   = np.sqrt(np.array(df_covariance[cols_covariance[1]]))
+    std_y   = np.sqrt(np.array(df_covariance[cols_covariance[2]]))
+    std_z   = np.sqrt(np.array(df_covariance[cols_covariance[3]]))
+    std_yaw = np.sqrt(np.array(df_covariance[cols_covariance[4]]))
+
+    timestamps_opt = np.array(df_experiment[cols_experiment[0]])
+
+    # # ====== TIME SERIES PLOTS ======
     fig, axes = plt.subplots(4, 1, figsize=(15, 15))
     plt.suptitle("Temporal Evolution of T_t_s")
 
-    # Subtract the first element of the timestamp column to start from 0
-    #df_experiment[cols_experiment[0]] -= df_experiment[cols_experiment[0]].iloc[0]
-    df_experiment[cols_experiment[0]] -= t0
-    #df_covariance[cols_experiment[0]] -= df_covariance[cols_experiment[0]].iloc[0]
-    df_covariance[cols_experiment[0]] -= t0
- 
-    # Compute standard deviations (square root of diagonal covariance elements)
-    std_x = np.sqrt(np.array(df_covariance[cols_covariance[1]]))  # Covariance_x
-    std_y = np.sqrt(np.array(df_covariance[cols_covariance[2]]))  # Covariance_y
-    std_z = np.sqrt(np.array(df_covariance[cols_covariance[3]]))  # Covariance_z
-    std_yaw = np.sqrt(np.array(df_covariance[cols_covariance[4]]))  # Covariance_z
+    # --- X ---
+    if gt_available:
+        axes[0].plot(timestamps_opt, [t_t_s_translation[0]] * len(timestamps_opt), 'r--', label='GT x')
 
+    axes[0].plot(timestamps_opt, np.array(df_experiment[cols_experiment[1]]), 'bo', label='opt x')
+    # axes[0].fill_between(timestamps_opt,
+    #                      np.array(df_experiment[cols_experiment[1]]) - 2.0 * std_x,
+    #                      np.array(df_experiment[cols_experiment[1]]) + 2.0 * std_x,
+    #                      color='blue', alpha=0.2, label='opt ±2σ')
 
-    # # Subtract the first element of the timestamp column to start from 0
-    # df_experiment[cols_experiment[0]] *= 1e-6
+    if has_linear:
+        axes[0].plot(np.array(df_experiment_linear[cols_experiment_linear[0]]),
+                     np.array(df_experiment_linear[cols_experiment_linear[1]]),
+                     'g^', label='linear x')
 
-    # Create a constant reference line over the same time span
-    timestamps = np.array(df_experiment[cols_experiment[0]])
-    if(gt_available): axes[0].plot(timestamps, [t_t_s_translation[0]] * len(timestamps), 'r--', label='GT x')
-
-    axes[0].plot(timestamps, np.array(df_experiment[cols_experiment[1]]), 'bo', label = 'pose_opt')
-
-
-    axes[0].fill_between(timestamps,
-                         np.array(df_experiment[cols_experiment[1]]) - 2.0*std_x,
-                         np.array(df_experiment[cols_experiment[1]]) + 2.0*std_x,
-                         color='blue', alpha=0.2, label='±2σ Uncertainty')
-    axes[0].legend()
-    #plt.xlabel("Timestamp")
     axes[0].set_ylabel("X(m)")
     axes[0].grid()
+    axes[0].legend()
 
-    if(gt_available): axes[1].plot(timestamps, [t_t_s_translation[1]] * len(timestamps), 'r--', label='GT y')
-    axes[1].plot(timestamps, np.array(df_experiment[cols_experiment[2]]), 'bo')
+    # --- Y ---
+    if gt_available:
+        axes[1].plot(timestamps_opt, [t_t_s_translation[1]] * len(timestamps_opt), 'r--', label='GT y')
 
-    axes[1].fill_between(timestamps,
-                         np.array(df_experiment[cols_experiment[2]]) - 2.0*std_y,
-                         np.array(df_experiment[cols_experiment[2]]) + 2.0*std_y,
-                         color='blue', alpha=0.2, label='±2σ Uncertainty')
+    axes[1].plot(timestamps_opt, np.array(df_experiment[cols_experiment[2]]), 'bo', label='opt y')
+    # axes[1].fill_between(timestamps_opt,
+    #                      np.array(df_experiment[cols_experiment[2]]) - 2.0 * std_y,
+    #                      np.array(df_experiment[cols_experiment[2]]) + 2.0 * std_y,
+    #                      color='blue', alpha=0.2, label='opt ±2σ')
+
+    if has_linear:
+        axes[1].plot(np.array(df_experiment_linear[cols_experiment_linear[0]]),
+                     np.array(df_experiment_linear[cols_experiment_linear[2]]),
+                     'g^', label='linear y')
+
     axes[1].set_ylabel("Y(m)")
     axes[1].grid()
+    axes[1].legend()
 
-    if(gt_available): axes[2].plot(timestamps, [t_t_s_translation[2]] * len(timestamps), 'r--', label='GT z')
-    axes[2].plot(timestamps, np.array(df_experiment[cols_experiment[3]]), 'bo')
+    # --- Z ---
+    if gt_available:
+        axes[2].plot(timestamps_opt, [t_t_s_translation[2]] * len(timestamps_opt), 'r--', label='GT z')
 
+    axes[2].plot(timestamps_opt, np.array(df_experiment[cols_experiment[3]]), 'bo', label='opt z')
+    # axes[2].fill_between(timestamps_opt,
+    #                      np.array(df_experiment[cols_experiment[3]]) - 2.0 * std_z,
+    #                      np.array(df_experiment[cols_experiment[3]]) + 2.0 * std_z,
+    #                      color='blue', alpha=0.2, label='opt ±2σ')
 
-    axes[2].fill_between(timestamps,
-                         np.array(df_experiment[cols_experiment[3]]) - 2.0*std_z,
-                         np.array(df_experiment[cols_experiment[3]]) + 2.0*std_z,
-                         color='blue', alpha=0.2, label='±2σ Uncertainty')
+    if has_linear:
+        axes[2].plot(np.array(df_experiment_linear[cols_experiment_linear[0]]),
+                     np.array(df_experiment_linear[cols_experiment_linear[3]]),
+                     'g^', label='linear z')
+
     axes[2].set_ylabel("Z(m)")
     axes[2].grid()
+    axes[2].legend()
 
-    if(gt_available): axes[3].plot(timestamps, [t_t_s_yaw] * len(timestamps), 'r--', label='GT yaw')
-    axes[3].plot(timestamps, np.array(df_experiment[cols_experiment[-1]]), 'bo')
+    # --- Yaw ---
+    if gt_available:
+        axes[3].plot(timestamps_opt, [t_t_s_yaw] * len(timestamps_opt), 'r--', label='GT yaw')
 
-    axes[3].fill_between(timestamps,
-                         np.array(df_experiment[cols_experiment[-1]]) - 2.0*std_yaw,
-                         np.array(df_experiment[cols_experiment[-1]]) + 2.0*std_yaw,
-                         color='blue', alpha=0.2, label='±2σ Uncertainty')
+    axes[3].plot(timestamps_opt, np.array(df_experiment[cols_experiment[-1]]), 'bo', label='opt yaw')
+    # axes[3].fill_between(timestamps_opt,
+    #                      np.array(df_experiment[cols_experiment[-1]]) - 2.0 * std_yaw,
+    #                      np.array(df_experiment[cols_experiment[-1]]) + 2.0 * std_yaw,
+    #                      color='blue', alpha=0.2, label='opt ±2σ')
+
+    if has_linear:
+        axes[3].plot(np.array(df_experiment_linear[cols_experiment_linear[0]]),
+                     np.array(df_experiment_linear[cols_experiment_linear[-1]]),
+                     'g^', label='linear yaw')
+
     axes[3].set_ylabel("Yaw(rad)")
-    axes[3].grid()
-
     axes[3].set_xlabel("Time(s)")
-
-    # Add legend to yaw plot for clarity
+    axes[3].grid()
     axes[3].legend()
 
     plt.savefig(path + '/t_That_s.png', bbox_inches='tight')
-
     plt.show()
 
-    # === Plot RMSE errors over time ===
+    # ====== RMSE PLOTS (BOTH SERIES) ======
+    # Only possible if GT is available
+    if gt_available:
+        # --- Helper to compute per-sample error norms vs the fixed GT transform T_t_s ---
+        def series_errors(T_t_s, df_ser, cols_ser):
+            """
+            Args:
+            T_t_s: 4x4 ground-truth transform from source->target (fixed for the run)
+            df_ser: DataFrame with [t, x, y, z, qx, qy, qz, qw, yaw] (like your cols_* lists)
+            cols_ser: column list in the same order as your series (timestamp is cols_ser[0])
 
-    translation_errors = []
-    rotation_errors = []
+            Returns:
+            (trans_error_norms [m], rot_error_norms [rad]) as numpy arrays
+            """
+            if T_t_s is None:
+                raise ValueError("T_t_s is None: cannot compute errors without ground-truth transform.")
 
-    for i in range(len(df_experiment)):
-        est_pos = df_experiment[[cols_experiment[1], cols_experiment[2], cols_experiment[3]]].iloc[i].values
-        est_quat = df_experiment[[cols_experiment[4], cols_experiment[5], cols_experiment[6], cols_experiment[7]]].iloc[i].values
-        T_est = np.eye(4)
-        T_est[:3, 3] = est_pos
-        T_est[:3, :3] = R.from_quat(est_quat).as_matrix()
+            errs_t = []
+            errs_R = []
+            T_t_s_inv = np.linalg.inv(T_t_s)  # precompute once
 
-        T_error = np.linalg.inv(T_t_s) @ T_est
-        trans_error = T_error[:3, 3]
-        rot_error = R.from_matrix(T_error[:3, :3]).as_rotvec()
+            for i in range(len(df_ser)):
+                est_pos = df_ser[[cols_ser[1], cols_ser[2], cols_ser[3]]].iloc[i].values
+                est_quat = df_ser[[cols_ser[4], cols_ser[5], cols_ser[6], cols_ser[7]]].iloc[i].values
 
-        translation_errors.append(np.linalg.norm(trans_error))
-        rotation_errors.append(np.linalg.norm(rot_error))  # radians
+                T_est = np.eye(4)
+                T_est[:3, 3] = est_pos
+                T_est[:3, :3] = R.from_quat(est_quat).as_matrix()
 
-    translation_errors = translation_errors
-    rotation_errors = rotation_errors
+                # Error wrt fixed GT transform
+                T_error = T_t_s_inv @ T_est
+                trans_error = T_error[:3, 3]
+                rot_error = R.from_matrix(T_error[:3, :3]).as_rotvec()
 
-    fig2, axes2 = plt.subplots(2, 1, figsize=(15, 10))
-    fig2.suptitle("Relative Transform RMSE")
+                errs_t.append(np.linalg.norm(trans_error))     # meters
+                errs_R.append(np.linalg.norm(rot_error))       # radians
+            return np.array(errs_t), np.array(errs_R)
 
-    axes2[0].plot(timestamps, np.rad2deg(rotation_errors), '-o')
-    axes2[0].set_ylabel("Rotational Error (º)")
-    axes2[0].grid()
-    axes2[0].legend()
+         # optimized
+        trans_err_opt, rot_err_opt = series_errors(T_t_s, df_experiment, cols_experiment)
+        mean_trans_opt = np.sqrt(np.mean(trans_err_opt))
+        mean_rot_opt = np.sqrt(np.mean(rot_err_opt))
+        print(f"[Optimized] Mean Translational RMSE = {mean_trans_opt:.4f} m, "
+              f"Mean Rotational RMSE = {np.rad2deg(mean_rot_opt):.4f} º")
+        
+         # linear
+        if has_linear:
+            trans_err_lin, rot_err_lin = series_errors(T_t_s, df_experiment_linear, cols_experiment_linear)
+            mean_trans_lin = np.sqrt(np.mean(trans_err_lin))
+            mean_rot_lin = np.sqrt(np.mean(rot_err_lin))
+            print(f"[Linear]    Mean Translational RMSE = {mean_trans_lin:.4f} m, "
+                  f"Mean Rotational RMSE = {np.rad2deg(mean_rot_lin):.4f} º")
+        
+        # NEW: no-prior
+        if has_nopr:
+            trans_err_nopr, rot_err_nopr = series_errors(T_t_s, df_experiment_nopr, cols_experiment_nopr)
+            mean_trans_nopr = np.sqrt(np.mean(trans_err_nopr))
+            mean_rot_nopr = np.sqrt(np.mean(rot_err_nopr))
+            print(f"[No-Prior]  Mean Translational RMSE = {mean_trans_nopr:.4f} m, "
+                  f"Mean Rotational RMSE = {np.rad2deg(mean_rot_nopr):.4f} º")
 
-    axes2[1].plot(timestamps, translation_errors, '-o')
-    axes2[1].set_ylabel("Translational Error (m)")
-    axes2[1].set_xlabel("Time (s)")
-    axes2[1].grid()
-    axes2[1].legend()
+        fig2, axes2 = plt.subplots(2, 1, figsize=(15, 10))
 
-    plt.savefig(path + '/t_That_s_errors.png', bbox_inches='tight')
-    plt.show()
+         # Rotational error (degrees)
+        axes2[0].plot(timestamps_opt, np.rad2deg(rot_err_opt), '-o', label='ours + linear prior')
+        if has_linear:
+            axes2[0].plot(np.array(df_experiment_linear[cols_experiment_linear[0]]),
+                          np.rad2deg(rot_err_lin), '-^', label='linear method')
+        if has_nopr:
+            axes2[0].plot(np.array(df_experiment_nopr[cols_experiment_nopr[0]]),
+                          np.rad2deg(rot_err_nopr), '-s', label='ours (no prior)')
+        axes2[0].set_ylabel("Rotational Error (º)")
+        axes2[0].grid()
+        # axes2[0].legend()
+
+        # Translational error (m)
+        axes2[1].plot(timestamps_opt, trans_err_opt, '-o', label='ours + linear prior')
+        if has_linear:
+            axes2[1].plot(np.array(df_experiment_linear[cols_experiment_linear[0]]),
+                          trans_err_lin, '-^', label='linear method')
+        if has_nopr:
+            axes2[1].plot(np.array(df_experiment_nopr[cols_experiment_nopr[0]]),
+                          trans_err_nopr, '-s', label='ours (no prior)')
+        axes2[1].set_ylabel("Translational Error (m)")
+        axes2[1].set_xlabel("Time (s)")
+        axes2[1].grid()
+        # axes2[1].legend()
+
+        plt.savefig(path + '/t_That_s_errors.png', bbox_inches='tight')
+        plt.show()
+        return axes2
 
 def plot_metrics(path, df_metrics, cols_metrics, t0, title, filename):
 
@@ -328,11 +434,9 @@ def plot_metrics(path, df_metrics, cols_metrics, t0, title, filename):
     # # Subtract the first element of the timestamp column to start from 0
     # df_metrics[cols_metrics[0]] *= 1e-6
 
-    plt.title(title)
-
     axes[0].plot(np.array(df_metrics[cols_metrics[0]]), np.array(df_metrics[cols_metrics[3]]), c='r', label = 'rmse')
 
-    axes[0].legend()
+    # axes[0].legend()
     #plt.xlabel("Timestamp")
     axes[0].set_ylabel("Rotational error (º)")
     axes[0].grid()
@@ -401,8 +505,25 @@ def plot_experiment_data(path_experiment_data, path_folder, experiment_type = "s
         metrics_traj_rmse_R_data = '/optimization/traj_metrics/data[2]'
         metrics_traj_rmse_t_data = '/optimization/traj_metrics/data[3]'
 
-    else:
+    elif(experiment_type == "dataset"):
 
+        source_gt_x_data = f'{agv_gt_topic_name}/pose/pose/position/x'
+        source_gt_y_data = f'{agv_gt_topic_name}/pose/pose/position/y'
+        source_gt_z_data = f'{agv_gt_topic_name}/pose/pose/position/z'
+        source_gt_q0_data = f'{agv_gt_topic_name}/pose/pose/orientation/x'
+        source_gt_q1_data = f'{agv_gt_topic_name}/pose/pose/orientation/y'
+        source_gt_q2_data = f'{agv_gt_topic_name}/pose/pose/orientation/z'
+        source_gt_q3_data = f'{agv_gt_topic_name}/pose/pose/orientation/w'
+
+        target_gt_x_data = f'{uav_gt_topic_name}/pose/pose/position/x'
+        target_gt_y_data = f'{uav_gt_topic_name}/pose/pose/position/y'
+        target_gt_z_data = f'{uav_gt_topic_name}/pose/pose/position/z'
+        target_gt_q0_data = f'{uav_gt_topic_name}/pose/pose/orientation/x'
+        target_gt_q1_data = f'{uav_gt_topic_name}/pose/pose/orientation/y'
+        target_gt_q2_data = f'{uav_gt_topic_name}/pose/pose/orientation/z'
+        target_gt_q3_data = f'{uav_gt_topic_name}/pose/pose/orientation/w'
+    else:
+        
         source_gt_x_data = f'{agv_gt_topic_name}/pose/position/x'
         source_gt_y_data = f'{agv_gt_topic_name}/pose/position/y'
         source_gt_z_data = f'{agv_gt_topic_name}/pose/position/z'
@@ -419,7 +540,6 @@ def plot_experiment_data(path_experiment_data, path_folder, experiment_type = "s
         target_gt_q2_data = f'{uav_gt_topic_name}/pose/orientation/z'
         target_gt_q3_data = f'{uav_gt_topic_name}/pose/orientation/w'
         
-
     max_timestamp = None
 
     target_odom_cov_x = f'{odom_topic_uav}/pose/covariance/[0;0]'
@@ -463,6 +583,24 @@ def plot_experiment_data(path_experiment_data, path_folder, experiment_type = "s
     opt_T_target_source_q1_data = '/eliko_optimization_node/optimized_T/pose/pose/orientation/y'
     opt_T_target_source_q2_data = '/eliko_optimization_node/optimized_T/pose/pose/orientation/z'
     opt_T_target_source_q3_data = '/eliko_optimization_node/optimized_T/pose/pose/orientation/w'
+
+    # RANSAC optimized transform 
+    linear_T_target_source_x_data = '/eliko_optimization_node/ransac_optimized_T/pose/pose/position/x'
+    linear_T_target_source_y_data = '/eliko_optimization_node/ransac_optimized_T/pose/pose/position/y'
+    linear_T_target_source_z_data = '/eliko_optimization_node/ransac_optimized_T/pose/pose/position/z'
+    linear_T_target_source_q0_data = '/eliko_optimization_node/ransac_optimized_T/pose/pose/orientation/x'
+    linear_T_target_source_q1_data = '/eliko_optimization_node/ransac_optimized_T/pose/pose/orientation/y'
+    linear_T_target_source_q2_data = '/eliko_optimization_node/ransac_optimized_T/pose/pose/orientation/z'
+    linear_T_target_source_q3_data = '/eliko_optimization_node/ransac_optimized_T/pose/pose/orientation/w'
+
+    # Relative transform with no prior
+    opt_T_target_source_no_prior_x_data = '/eliko_optimization_node/optimized_T_nopr/pose/pose/position/x'
+    opt_T_target_source_no_prior_y_data = '/eliko_optimization_node/optimized_T_nopr/pose/pose/position/y'
+    opt_T_target_source_no_prior_z_data = '/eliko_optimization_node/optimized_T_nopr/pose/pose/position/z'
+    opt_T_target_source_no_prior_q0_data = '/eliko_optimization_node/optimized_T_nopr/pose/pose/orientation/x'  
+    opt_T_target_source_no_prior_q1_data = '/eliko_optimization_node/optimized_T_nopr/pose/pose/orientation/y'
+    opt_T_target_source_no_prior_q2_data = '/eliko_optimization_node/optimized_T_nopr/pose/pose/orientation/z'
+    opt_T_target_source_no_prior_q3_data = '/eliko_optimization_node/optimized_T_nopr/pose/pose/orientation/w'
 
     covariance_x = '/eliko_optimization_node/optimized_T/pose/covariance[0]'
     covariance_y = '/eliko_optimization_node/optimized_T/pose/covariance[7]'
@@ -509,19 +647,6 @@ def plot_experiment_data(path_experiment_data, path_folder, experiment_type = "s
     agv_csv_path = path_folder + "/agv_pose_graph.csv"
     uav_csv_path = path_folder + "/uav_pose_graph.csv"
 
-    pose_graph_agv_df = read_pandas_df(agv_csv_path, pose_graph_agv_cols, timestamp_col="timestamp", max_timestamp=max_timestamp)
-    pose_graph_uav_df = read_pandas_df(uav_csv_path, pose_graph_uav_cols, timestamp_col="timestamp", max_timestamp=max_timestamp)
-
-    print("AGV pose graph shape:", pose_graph_agv_df.shape)
-    print("UAV pose graph shape:", pose_graph_uav_df.shape)
-
-    poses_agv = load_pose_graph(pose_graph_agv_df, pose_graph_agv_cols)
-    poses_uav = load_pose_graph(pose_graph_uav_df, pose_graph_uav_cols)
-
-    #Get the anchors
-    anchor_target_df = read_pandas_df(path_experiment_data, anchor_target_uav_cols, timestamp_col=time_data_setpoint, max_timestamp=max_timestamp)
-    anchor_source_df = read_pandas_df(path_experiment_data, anchor_source_agv_cols, timestamp_col=time_data_setpoint, max_timestamp=max_timestamp)
-
     #Get odometry data
     columns_source_odom_data = [time_data_setpoint, source_odom_x_data, source_odom_y_data, source_odom_z_data, source_odom_q0_data, source_odom_q1_data,source_odom_q2_data, source_odom_q3_data   ]
     source_odom_data_df = read_pandas_df(path_experiment_data, columns_source_odom_data, 
@@ -539,71 +664,9 @@ def plot_experiment_data(path_experiment_data, path_folder, experiment_type = "s
 
     covariance_odom_data_df = read_pandas_df(path_experiment_data, columns_odom_covariance, 
                                         timestamp_col=time_data_setpoint, max_timestamp=max_timestamp)
-    
-    # Get the relative transform
-    columns_t_That_s_data = [time_data_setpoint, opt_T_target_source_x_data, opt_T_target_source_y_data, opt_T_target_source_z_data, opt_T_target_source_q0_data, opt_T_target_source_q1_data, opt_T_target_source_q2_data, opt_T_target_source_q3_data]
 
-    t_That_s_data_df = read_pandas_df(path_experiment_data, columns_t_That_s_data, 
-                                      timestamp_col=time_data_setpoint, max_timestamp=max_timestamp)
 
-    # #Insert the initial solution (identity transform) as the first row.
-    # if not t_That_s_data_df.empty:
-    #     initial_timestamp = t_That_s_data_df[time_data_setpoint].iloc[0]
-    # else:
-    #     initial_timestamp = 0  # or set a desired default timestamp
-
-    # initial_row = {
-    #     time_data_setpoint: initial_timestamp - 0.5,
-    #     opt_T_target_source_x_data: 0.0,
-    #     opt_T_target_source_y_data: 0.0,
-    #     opt_T_target_source_z_data: 0.0,
-    #     opt_T_target_source_q0_data: 0.0,
-    #     opt_T_target_source_q1_data: 0.0,
-    #     opt_T_target_source_q2_data: 0.0,
-    #     opt_T_target_source_q3_data: 1.0
-    # }
-    # initial_df = pd.DataFrame([initial_row])
-    # t_That_s_data_df = pd.concat([initial_df, t_That_s_data_df], ignore_index=True)
-
-    #Append yaw to the last column of the estimated transform
-    t_That_s_data_df = add_yaw_to_df(t_That_s_data_df,
-                               opt_T_target_source_q0_data,
-                               opt_T_target_source_q1_data,
-                               opt_T_target_source_q2_data,
-                               opt_T_target_source_q3_data)
-    columns_t_That_s_data = columns_t_That_s_data + ["yaw"]
-
-    #Get relative transform covariance
-    columns_covariance = [time_data_setpoint, covariance_x, covariance_y, covariance_z, covariance_yaw]
-    covariance_data_df = read_pandas_df(path_experiment_data, columns_covariance, 
-                                        timestamp_col=time_data_setpoint, max_timestamp=max_timestamp)
-
-    # # Insert the initial covariance row (identity covariance, i.e. all ones) so that it aligns with the
-    # # identity row you add to the optimized transform dataframe.
-    # if not covariance_data_df.empty:
-    #     initial_timestamp_cov = covariance_data_df[time_data_setpoint].iloc[0]
-    # else:
-    #     initial_timestamp_cov = 0  # or another default value
-    # initial_cov_row = {
-    #     time_data_setpoint: initial_timestamp_cov - 0.5,
-    #     covariance_x: 1.0,
-    #     covariance_y: 1.0,
-    #     covariance_z: 1.0,
-    #     covariance_yaw: 1.0
-    # }
-
-    # initial_cov_df = pd.DataFrame([initial_cov_row])
-    # covariance_data_df = pd.concat([initial_cov_df, covariance_data_df], ignore_index=True)
-
-    if(experiment_type == "dataset"):
-        #Get the radar velocities
-        radar_source_df = read_pandas_df(path_experiment_data, radar_source_cols, 
-                                        timestamp_col=time_data_setpoint, max_timestamp=max_timestamp)
-        radar_target_df = read_pandas_df(path_experiment_data, radar_target_cols, 
-                                        timestamp_col=time_data_setpoint, max_timestamp=max_timestamp)
-    
-
-    # Plot 3D representation
+    # Gather ground truth data
     columns_source_gt_data = [time_data_setpoint, source_gt_x_data, source_gt_y_data, source_gt_z_data, source_gt_q0_data, source_gt_q1_data,source_gt_q2_data, source_gt_q3_data   ]
     
     columns_target_gt_data = [time_data_setpoint, target_gt_x_data, target_gt_y_data, target_gt_z_data, target_gt_q0_data , target_gt_q1_data ,target_gt_q2_data ,target_gt_q3_data ]
@@ -615,12 +678,13 @@ def plot_experiment_data(path_experiment_data, path_folder, experiment_type = "s
     target_gt_data_df = read_pandas_df(path_experiment_data, columns_target_gt_data, 
                                         timestamp_col=time_data_setpoint, max_timestamp=max_timestamp)
     
-    # Extract origin from the first AGV GT pose
+    # Extract origin from the first UGV GT pose
     first_agv_row = source_gt_data_df.iloc[0]
     agv_pos = first_agv_row[[source_gt_x_data, source_gt_y_data, source_gt_z_data]].values
     agv_quat = first_agv_row[[source_gt_q0_data, source_gt_q1_data, source_gt_q2_data, source_gt_q3_data]].values
     agv_rpy = R.from_quat(agv_quat).as_euler('zyx', degrees=False)  # yaw, pitch, roll
     source_odom_origin = pose_to_matrix(np.concatenate((agv_pos, agv_rpy[::-1])))  # [x, y, z, roll, pitch, yaw]
+    source_odom_origin = pose_to_matrix([0.0,0.0,0.0,0.0,0.0,0.0])  # [x, y, z, roll, pitch, yaw]
 
     # Extract origin from the first UAV GT pose
     first_uav_row = target_gt_data_df.iloc[0]
@@ -628,8 +692,93 @@ def plot_experiment_data(path_experiment_data, path_folder, experiment_type = "s
     uav_quat = first_uav_row[[target_gt_q0_data, target_gt_q1_data, target_gt_q2_data, target_gt_q3_data]].values
     uav_rpy = R.from_quat(uav_quat).as_euler('zyx', degrees=False)
     target_odom_origin = pose_to_matrix(np.concatenate((uav_pos, uav_rpy[::-1])))  # [x, y, z, roll, pitch, yaw]
-    
+    # target_odom_origin = pose_to_matrix([5.0,-5.0,0.0,0.0,0.0,0.150])  # [x, y, z, roll, pitch, yaw]
+    # target_odom_origin = pose_to_matrix([0.5,-0.5,0.0,0.0,0.0,0.150])  # [x, y, z, roll, pitch, yaw]
+    target_odom_origin = pose_to_matrix([0.5,-0.5,0.0,0.0,0.0,0.524])  # [x, y, z, roll, pitch, yaw]
+
     t0 = target_gt_data_df[columns_target_gt_data[0]].iloc[0]
+    
+    ################# Relative transformation plots ######################
+
+    # Get the relative transform
+    columns_t_That_s_data = [time_data_setpoint, opt_T_target_source_x_data, opt_T_target_source_y_data, opt_T_target_source_z_data, opt_T_target_source_q0_data, opt_T_target_source_q1_data, opt_T_target_source_q2_data, opt_T_target_source_q3_data]
+    
+    t_That_s_data_df = read_pandas_df(path_experiment_data, columns_t_That_s_data, 
+                                      timestamp_col=time_data_setpoint, max_timestamp=max_timestamp)
+    
+    if sim_compare:
+        columns_linear_t_That_s_data = [time_data_setpoint, linear_T_target_source_x_data, linear_T_target_source_y_data, linear_T_target_source_z_data, linear_T_target_source_q0_data, linear_T_target_source_q1_data, linear_T_target_source_q2_data, linear_T_target_source_q3_data]
+
+        # Linear method w RANSAC
+        linear_t_That_s_data_df = read_pandas_df(path_experiment_data, columns_linear_t_That_s_data, 
+                                        timestamp_col=time_data_setpoint, max_timestamp=max_timestamp)
+        
+        # Relative transform no prior
+        columns_t_That_s_nopr_data = [time_data_setpoint, opt_T_target_source_no_prior_x_data, opt_T_target_source_no_prior_y_data, opt_T_target_source_no_prior_z_data, opt_T_target_source_no_prior_q0_data, opt_T_target_source_no_prior_q1_data, opt_T_target_source_no_prior_q2_data, opt_T_target_source_no_prior_q3_data]
+        t_That_s_nopr_data_df = read_pandas_df(path_experiment_data, columns_t_That_s_nopr_data, 
+                                        timestamp_col=time_data_setpoint, max_timestamp=max_timestamp)
+    
+        #And to the no prior variant
+        t_That_s_nopr_data_df = add_yaw_to_df(t_That_s_nopr_data_df,
+                                opt_T_target_source_no_prior_q0_data,    
+                                opt_T_target_source_no_prior_q1_data,
+                                opt_T_target_source_no_prior_q2_data,
+                                opt_T_target_source_no_prior_q3_data)
+        columns_t_That_s_nopr_data = columns_t_That_s_nopr_data + ["yaw"]
+
+        # #same for the ransac variant
+        linear_t_That_s_data_df = add_yaw_to_df(linear_t_That_s_data_df,
+                                linear_T_target_source_q0_data,
+                                linear_T_target_source_q1_data,
+                                linear_T_target_source_q2_data,
+                                linear_T_target_source_q3_data)
+        columns_linear_t_That_s_data = columns_linear_t_That_s_data + ["yaw"]
+   
+
+    #Append yaw to the last column of the estimated transform
+    t_That_s_data_df = add_yaw_to_df(t_That_s_data_df,
+                               opt_T_target_source_q0_data,
+                               opt_T_target_source_q1_data,
+                               opt_T_target_source_q2_data,
+                               opt_T_target_source_q3_data)
+    columns_t_That_s_data = columns_t_That_s_data + ["yaw"]
+
+
+    #Get relative transform covariance
+    columns_covariance = [time_data_setpoint, covariance_x, covariance_y, covariance_z, covariance_yaw]
+    covariance_data_df = read_pandas_df(path_experiment_data, columns_covariance, 
+                                        timestamp_col=time_data_setpoint, max_timestamp=max_timestamp)
+
+
+    if sim_compare:
+        plot_transform(path_folder, t_That_s_data_df, covariance_data_df, columns_t_That_s_data, columns_covariance, t0, source_odom_origin, target_odom_origin, linear_t_That_s_data_df, columns_linear_t_That_s_data, t_That_s_nopr_data_df, columns_t_That_s_nopr_data)
+    else:
+        plot_transform(path_folder, t_That_s_data_df, covariance_data_df, columns_t_That_s_data, columns_covariance, t0, source_odom_origin, target_odom_origin)
+
+    
+    ############################################# Pose-Graph plots ###############################################
+
+    pose_graph_agv_df = read_pandas_df(agv_csv_path, pose_graph_agv_cols, timestamp_col="timestamp", max_timestamp=max_timestamp)
+    pose_graph_uav_df = read_pandas_df(uav_csv_path, pose_graph_uav_cols, timestamp_col="timestamp", max_timestamp=max_timestamp)
+
+    print("UGV pose graph shape:", pose_graph_agv_df.shape)
+    print("UAV pose graph shape:", pose_graph_uav_df.shape)
+
+    poses_agv = load_pose_graph(pose_graph_agv_df, pose_graph_agv_cols)
+    poses_uav = load_pose_graph(pose_graph_uav_df, pose_graph_uav_cols)
+
+    #Get the anchors
+    anchor_target_df = read_pandas_df(path_experiment_data, anchor_target_uav_cols, timestamp_col=time_data_setpoint, max_timestamp=max_timestamp)
+    anchor_source_df = read_pandas_df(path_experiment_data, anchor_source_agv_cols, timestamp_col=time_data_setpoint, max_timestamp=max_timestamp)
+    
+    
+    if(experiment_type == "dataset"):
+        #Get the radar velocities
+        radar_source_df = read_pandas_df(path_experiment_data, radar_source_cols, 
+                                        timestamp_col=time_data_setpoint, max_timestamp=max_timestamp)
+        radar_target_df = read_pandas_df(path_experiment_data, radar_target_cols, 
+                                        timestamp_col=time_data_setpoint, max_timestamp=max_timestamp)
+    
 
     if experiment_type == "basic_sim":
 
@@ -650,11 +799,12 @@ def plot_experiment_data(path_experiment_data, path_folder, experiment_type = "s
     poses_uav_world = compute_poses_local_to_world(time_data_setpoint, poses_uav, anchor_target_df, anchor_target_uav_cols, use_last=True, use_gt = False, gt_anchor = target_odom_origin)
     poses_agv_world = compute_poses_local_to_world(time_data_setpoint, poses_agv, anchor_source_df, anchor_source_agv_cols, use_last=True, use_gt = False, gt_anchor = source_odom_origin)
     
+
     #plot posegraphs
-    plot_posegraph_temporal(path_folder, "posegraph_agv_world_poses", "AGV global trajectory wrt time", poses_agv_world, source_gt_data_df, columns_source_gt_data)
+    plot_posegraph_temporal(path_folder, "posegraph_agv_world_poses", "UGV global trajectory wrt time", poses_agv_world, source_gt_data_df, columns_source_gt_data)
     plot_posegraph_temporal(path_folder, "posegraph_uav_world_poses", "UAV global trajectory wrt time", poses_uav_world, target_gt_data_df, columns_target_gt_data)
     
-    plot_posegraph_temporal(path_folder, "posegraph_agv_local_poses", "AGV local trajectory wrt time", poses_agv, source_gt_data_df, columns_source_gt_data, source_odom_origin)
+    plot_posegraph_temporal(path_folder, "posegraph_agv_local_poses", "UGV local trajectory wrt time", poses_agv, source_gt_data_df, columns_source_gt_data, source_odom_origin)
     plot_posegraph_temporal(path_folder, "posegraph_uav_local_poses", "UAV local trajectory wrt time", poses_uav, target_gt_data_df, columns_target_gt_data, target_odom_origin)
     
     plot_posegraphs_3d(path_folder, "posegraph_3d_poses", poses_agv_world, poses_uav_world, source_gt_data_df, target_gt_data_df, columns_source_gt_data, columns_target_gt_data)
@@ -668,17 +818,15 @@ def plot_experiment_data(path_experiment_data, path_folder, experiment_type = "s
 
     rmse_agv_pos, rmse_agv_yaw = compute_rmse(poses_agv_world, source_gt_data_df, pose_graph_agv_cols, columns_source_gt_data)
     rmse_uav_pos, rmse_uav_yaw = compute_rmse(poses_uav_world, target_gt_data_df, pose_graph_uav_cols, columns_target_gt_data)
-    print(f'RMSE AGV ----> Translation: {rmse_agv_pos} m, Rotation: {np.rad2deg(rmse_agv_yaw)} º')
+    print(f'RMSE UGV ----> Translation: {rmse_agv_pos} m, Rotation: {np.rad2deg(rmse_agv_yaw)} º')
     print(f'RMSE UAV ----> Translation: {rmse_uav_pos} m, Rotation: {np.rad2deg(rmse_uav_yaw)} º')
-
-    plot_transform(path_folder, t_That_s_data_df, covariance_data_df, columns_t_That_s_data, columns_covariance, t0, source_odom_origin, target_odom_origin)
-
+    
     if(experiment_type == "dataset"):
         #Plot radar
-        plot_radar_velocities(path_folder, radar_source_df, radar_source_cols, label="AGV Radar", filename="radar_velocity_agv", gt_df = source_gt_data_df, 
+        plot_radar_velocities(path_folder, radar_source_df, radar_source_cols, label="UGV Radar", filename="radar_velocity_agv", gt_df = source_gt_data_df, 
                             gt_cols = columns_source_gt_data, gt_origin = source_odom_origin,
-                            odom_df=source_odom_vel_data_df, odom_cols=columns_source_odom_vel_data)
-        plot_radar_velocities(path_folder, radar_target_df, radar_target_cols, label="UAV Radar", filename="radar_velocity_uav", gt_df = target_gt_data_df, gt_cols = columns_target_gt_data, gt_origin = target_odom_origin)    
+                            odom_df=source_odom_vel_data_df, odom_cols=columns_source_odom_vel_data, t_max=max_timestamp)
+        plot_radar_velocities(path_folder, radar_target_df, radar_target_cols, label="UAV Radar", filename="radar_velocity_uav", gt_df = target_gt_data_df, gt_cols = columns_target_gt_data, gt_origin = target_odom_origin, t_max=max_timestamp)    
      
 
 
@@ -735,16 +883,16 @@ def compute_rmse(pose_graph, gt_df, pose_graph_cols, gt_cols):
 
 def plot_posegraphs_3d(path, filename, poses_agv, poses_uav, gt_agv = None, gt_uav = None, cols_gt_agv = None, cols_gt_uav = None):
     """
-    Plots the 3D trajectories for both AGV and UAV.
+    Plots the 3D trajectories for both UGV and UAV.
 
     Parameters:
-        poses_agv (dict): Dictionary of AGV poses. Each key is an index and each value is a dict with:
+        poses_agv (dict): Dictionary of UGV poses. Each key is an index and each value is a dict with:
                           - 'timestamp': float (seconds)
                           - 'position': np.array of shape (3,)
                           - 'orientation': np.array of shape (4,) [optional]
         poses_uav (dict): Dictionary of UAV poses, with the same structure as poses_agv.
     """
-    # Filter valid AGV poses (i.e. non-None and non-NaN timestamp and valid position)
+    # Filter valid UGV poses (i.e. non-None and non-NaN timestamp and valid position)
     agv_data = []
     for idx, pose in poses_agv.items():
         if (pose.get('timestamp') is not None and 
@@ -752,7 +900,7 @@ def plot_posegraphs_3d(path, filename, poses_agv, poses_uav, gt_agv = None, gt_u
             not np.isnan(pose['timestamp'])):
             agv_data.append((pose['timestamp'], pose['position']))
     if len(agv_data) == 0:
-        print("No valid AGV poses found.")
+        print("No valid UGV poses found.")
         return
     agv_data.sort(key=lambda x: x[0])
     # Stack positions: each element is a (3,) vector.
@@ -775,32 +923,66 @@ def plot_posegraphs_3d(path, filename, poses_agv, poses_uav, gt_agv = None, gt_u
     fig = plt.figure(figsize=(10, 8))
     ax = fig.add_subplot(111, projection='3d')
     
-    # Plot AGV trajectory (e.g., red)
+    # Plot UGV trajectory (e.g., red)
     ax.plot(agv_positions[:, 0], agv_positions[:, 1], agv_positions[:, 2],
-            '-o', color='red', label='AGV Trajectory')
+            '-o', color='red', label='UGV Trajectory')
     
     # Plot UAV trajectory (e.g., blue)
     ax.plot(uav_positions[:, 0], uav_positions[:, 1], uav_positions[:, 2],
             '-o', color='blue', label='UAV Trajectory')
     
     if gt_agv is not None and cols_gt_agv is not None:
-        ax.plot(gt_agv[cols_gt_agv[1]], gt_agv[cols_gt_agv[2]], gt_agv[cols_gt_agv[3]], c='r', label='GT AGV', linewidth=2)
-        # # Highlight AGV GT start
+        ax.plot(gt_agv[cols_gt_agv[1]], gt_agv[cols_gt_agv[2]], gt_agv[cols_gt_agv[3]], c='r', label='GT UGV', linewidth=2)
+        # # Highlight UGV GT start
         ax.scatter(gt_agv[cols_gt_agv[1]].iloc[0], gt_agv[cols_gt_agv[2]].iloc[0], gt_agv[cols_gt_agv[3]].iloc[0],
-                   color='red', marker='*', s=140, label='Start AGV')
+                   color='red', marker='*', s=140, label='Start UGV')
 
     if gt_uav is not None and cols_gt_uav is not None:
         ax.plot(gt_uav[cols_gt_uav[1]], gt_uav[cols_gt_uav[2]], gt_uav[cols_gt_uav[3]], c='b', label='GT UAV', linewidth=2)
         #  # Highlight UAV GT start
         ax.scatter(gt_uav[cols_gt_uav[1]].iloc[0], gt_uav[cols_gt_uav[2]].iloc[0], gt_uav[cols_gt_uav[3]].iloc[0],
                    color='blue', marker='*', s=140, label='Start UAV')
+    
+        # --- Make 3D axes have consistent scale (equal aspect) ---
+    # Collect all points that appear in the plot
+    pts = [agv_positions, uav_positions]
+    if gt_agv is not None and cols_gt_agv is not None:
+        pts.append(np.vstack([
+            gt_agv[cols_gt_agv[1]].to_numpy(),
+            gt_agv[cols_gt_agv[2]].to_numpy(),
+            gt_agv[cols_gt_agv[3]].to_numpy()
+        ]).T)
+    if gt_uav is not None and cols_gt_uav is not None:
+        pts.append(np.vstack([
+            gt_uav[cols_gt_uav[1]].to_numpy(),
+            gt_uav[cols_gt_uav[2]].to_numpy(),
+            gt_uav[cols_gt_uav[3]].to_numpy()
+        ]).T)
 
-    ax.set_xlabel("X (m)")
-    ax.set_ylabel("Y (m)")
-    ax.set_zlabel("Z (m)")
-    ax.legend()
-    plt.title("3D Trajectories of AGV and UAV")
-    plt.tight_layout()
+    all_pts = np.vstack(pts)  # shape (N, 3)
+
+    x_min, y_min, z_min = all_pts.min(axis=0)
+    x_max, y_max, z_max = all_pts.max(axis=0)
+
+    x_mid = 0.5 * (x_min + x_max)
+    y_mid = 0.5 * (y_min + y_max)
+    z_mid = 0.5 * (z_min + z_max)
+
+    # Choose a common half-range (add a tiny epsilon to avoid zero-size axis)
+    half_range = 0.5 * max(x_max - x_min, y_max - y_min, z_max - z_min, 1e-9)
+
+    ax.set_xlim(x_mid - half_range, x_mid + half_range)
+    ax.set_ylim(y_mid - half_range, y_mid + half_range)
+    ax.set_zlim(z_mid - half_range, z_mid + half_range)
+
+    # For Matplotlib ≥ 3.3: force equal aspect cube
+    ax.set_box_aspect((1, 1, 1))
+
+    ax.set_xlabel("X (m)", labelpad=20)
+    ax.set_ylabel("Y (m)", labelpad=20)
+    ax.set_zlabel("Z (m)", labelpad=20)
+    # ax.legend()
+    # plt.tight_layout()
 
     plt.savefig(path + f'/{filename}.svg', format = 'svg', bbox_inches='tight')
     plt.savefig(path + f'/{filename}.png', format = 'png', bbox_inches='tight')
@@ -928,8 +1110,6 @@ def plot_posegraph_temporal(path, filename, title, poses, gt = None, cols_gt = N
         axs[3].plot(np.array(gt[cols_gt[0]]), gt_yaw, c='r', label = 'target ref')
 
     
-    plt.suptitle(title)
-
     plt.savefig(path + f'/{filename}.svg', format = 'svg', bbox_inches='tight')
     plt.savefig(path + f'/{filename}.png', format = 'png', bbox_inches='tight')
 
@@ -937,15 +1117,15 @@ def plot_posegraph_temporal(path, filename, title, poses, gt = None, cols_gt = N
 
 def plot_posegraphs_3d_side_by_side(path, filename, poses_agv, poses_uav, gt_agv=None, gt_uav=None, cols_gt_agv=None, cols_gt_uav=None):
     """
-    Plots the 3D local trajectories for AGV and UAV side-by-side in different subplots.
+    Plots the 3D local trajectories for UGV and UAV side-by-side in different subplots.
     Estimated poses are plotted as blue lines with blue dots. Ground truth is plotted as red solid lines.
 
     Parameters:
-        poses_agv (dict): AGV local trajectory as a dictionary.
+        poses_agv (dict): UGV local trajectory as a dictionary.
         poses_uav (dict): UAV local trajectory as a dictionary.
-        gt_agv (pd.DataFrame, optional): Local ground truth DataFrame for AGV.
+        gt_agv (pd.DataFrame, optional): Local ground truth DataFrame for UGV.
         gt_uav (pd.DataFrame, optional): Local ground truth DataFrame for UAV.
-        cols_gt_agv (list, optional): Column names for AGV GT [timestamp, x, y, z, qx, qy, qz, qw].
+        cols_gt_agv (list, optional): Column names for UGV GT [timestamp, x, y, z, qx, qy, qz, qw].
         cols_gt_uav (list, optional): Column names for UAV GT [timestamp, x, y, z, qx, qy, qz, qw].
     """
     def extract_positions(poses):
@@ -958,26 +1138,25 @@ def plot_posegraphs_3d_side_by_side(path, filename, poses_agv, poses_uav, gt_agv
     uav_positions = extract_positions(poses_uav)
 
     if agv_positions is None or uav_positions is None:
-        print("No valid AGV or UAV poses found.")
+        print("No valid UGV or UAV poses found.")
         return
 
     fig = plt.figure(figsize=(14, 6))
     ax_agv = fig.add_subplot(121, projection='3d')
     ax_uav = fig.add_subplot(122, projection='3d')
 
-    # AGV subplot
+    # UGV subplot
     ax_agv.plot(agv_positions[:, 0], agv_positions[:, 1], agv_positions[:, 2],
-                color='blue', marker='o', linestyle='-', label='AGV Estimated')
+                color='blue', marker='o', linestyle='-', label='UGV Estimated')
     if gt_agv is not None and cols_gt_agv is not None:
         ax_agv.plot(gt_agv[cols_gt_agv[1]], gt_agv[cols_gt_agv[2]], gt_agv[cols_gt_agv[3]],
-                    color='red', linestyle='-', linewidth=2, label='AGV Ground Truth')
+                    color='red', linestyle='-', linewidth=2, label='UGV Ground Truth')
 
-    ax_agv.set_title("AGV Local Trajectory")
     ax_agv.set_xlabel("X (m)")
     ax_agv.set_ylabel("Y (m)")
     ax_agv.set_zlabel("Z (m)")
     ax_agv.view_init(elev=90, azim=90)  # Top-down XY view
-    ax_agv.legend()
+    # ax_agv.legend()
     ax_agv.grid()
 
     # UAV subplot
@@ -987,14 +1166,12 @@ def plot_posegraphs_3d_side_by_side(path, filename, poses_agv, poses_uav, gt_agv
         ax_uav.plot(gt_uav[cols_gt_uav[1]], gt_uav[cols_gt_uav[2]], gt_uav[cols_gt_uav[3]],
                     color='red', linestyle='-', linewidth=2, label='UAV Ground Truth')
 
-    ax_uav.set_title("UAV Local Trajectory")
     ax_uav.set_xlabel("X (m)")
     ax_uav.set_ylabel("Y (m)")
     ax_uav.set_zlabel("Z (m)")
-    ax_uav.legend()
+    # ax_uav.legend()
     ax_uav.grid()
 
-    plt.suptitle("3D Local Trajectories: Estimated vs Ground Truth")
     plt.tight_layout()
     plt.savefig(path + f'/{filename}.png', format='png', bbox_inches='tight')
     plt.savefig(path + f'/{filename}.svg', format='svg', bbox_inches='tight')
@@ -1004,7 +1181,7 @@ def plot_posegraphs_3d_side_by_side(path, filename, poses_agv, poses_uav, gt_agv
 
 def plot_radar_velocities(path, radar_df, cols_radar, label="Radar", filename="radar_velocity",
                           gt_df=None, gt_cols=None, gt_origin=None,
-                          odom_df=None, odom_cols=None):
+                          odom_df=None, odom_cols=None, t_max=None):
     """
     Plots smoothed radar linear velocities over time and optionally compares to
     estimated ground truth velocities and/or odometry velocities.
@@ -1023,13 +1200,14 @@ def plot_radar_velocities(path, radar_df, cols_radar, label="Radar", filename="r
     """
     radar_df = radar_df.copy()
     radar_df[cols_radar[0]] -= radar_df[cols_radar[0]].iloc[0]
+    if t_max is not None:
+        radar_df = radar_df[radar_df[cols_radar[0]] <= t_max]
     time = radar_df[cols_radar[0]].values
     vx = radar_df[cols_radar[1]].rolling(window=10, center=True).mean()
     vy = radar_df[cols_radar[2]].rolling(window=10, center=True).mean()
     vz = radar_df[cols_radar[3]].rolling(window=10, center=True).mean()
 
     fig, axes = plt.subplots(3, 1, figsize=(15, 12), sharex=True)
-    plt.suptitle(f"{label} Linear Velocities (Smoothed)")
 
     # === Optional: Odometry velocity ===
     if odom_df is not None and odom_cols is not None:
@@ -1079,32 +1257,32 @@ def plot_radar_velocities(path, radar_df, cols_radar, label="Radar", filename="r
     # === Plot X ===
     axes[0].plot(time, vx, color='b', label=f"{label} Vx")
     if gt_available:
-        axes[0].plot(uniform_time, vx_gt, color='r', linestyle='--', label='GT Vx')
+        axes[0].plot(uniform_time, vx_gt, color='r', linestyle='--', linewidth='2.0', label='GT Vx')
     if odom_available:
-        axes[0].plot(odom_time, vx_odom, color='g', linestyle='--', label='Odom Vx')
+        axes[0].plot(odom_time, vx_odom, color='r', linestyle='--', linewidth='2.0', label='GT Vx')
     axes[0].set_ylabel("Vx (m/s)")
-    axes[0].legend()
+    # axes[0].legend()
     axes[0].grid()
 
     # === Plot Y ===
     axes[1].plot(time, vy, color='b', label=f"{label} Vy")
     if gt_available:
-        axes[1].plot(uniform_time, vy_gt, color='r', linestyle='--', label='GT Vy')
+        axes[1].plot(uniform_time, vy_gt, color='r', linestyle='--', linewidth='2.0', label='GT Vy')
     if odom_available:
-        axes[1].plot(odom_time, vy_odom, color='g', linestyle='--', label='Odom Vy')
+        axes[1].plot(odom_time, vy_odom, color='r', linestyle='--', linewidth='2.0', label='GT Vy')
     axes[1].set_ylabel("Vy (m/s)")
-    axes[1].legend()
+    # axes[1].legend()
     axes[1].grid()
 
     # === Plot Z ===
     axes[2].plot(time, vz, color='b', label=f"{label} Vz")
     if gt_available:
-        axes[2].plot(uniform_time, vz_gt, color='r', linestyle='--', label='GT Vz')
+        axes[2].plot(uniform_time, vz_gt, color='r', linestyle='--', linewidth='2.0', label='GT Vz')
     if odom_available:
-        axes[2].plot(odom_time, vz_odom, color='g', linestyle='--', label='Odom Vz')
+        axes[2].plot(odom_time, vz_odom, color='r', linestyle='--',  linewidth='2.0', label='GT Vz')
     axes[2].set_ylabel("Vz (m/s)")
     axes[2].set_xlabel("Time (s)")
-    axes[2].legend()
+    # axes[2].legend()
     axes[2].grid()
 
     plt.savefig(path + f"/{filename}.png", bbox_inches='tight')
@@ -1223,6 +1401,7 @@ def transform_gt_to_local(gt_df, cols_gt, T_world_to_local):
     new_df[cols_gt[2]] = local_pos[:, 1]
     new_df[cols_gt[3]] = local_pos[:, 2]
     return new_df
+
 
 def main():
 

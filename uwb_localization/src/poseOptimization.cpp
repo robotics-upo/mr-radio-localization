@@ -863,7 +863,7 @@ bool PoseOptimizationNode::runPosegraphOptimization(MapOfStates &agv_map, MapOfS
     // Configure solver options
     ceres::Solver::Options options;
     options.linear_solver_type = ceres::SPARSE_NORMAL_CHOLESKY; // ceres::SPARSE_NORMAL_CHOLESKY,  ceres::DENSE_QR
-    options.num_threads = 4;
+    options.num_threads = 12;
     options.use_nonmonotonic_steps = true;  // Help escape plateaus
     options.max_num_iterations = 100;
     // Logging
@@ -1038,6 +1038,7 @@ bool PoseOptimizationNode::addPointCloudConstraint(
 
         if (fitness >= 2.0 || fitness <= 0.0) return false;
         c.covariance = (2.0 * fitness + 1e-6) * Eigen::Matrix4d::Identity();
+        c.covariance(2,2) *= 10.0;  // inflate z variance only
         RCLCPP_INFO(this->get_logger(), "GICP converged with score: %f", fitness);
         logTransformationMatrix(c.t_T_s.matrix(), this->get_logger());
     } 
@@ -1195,6 +1196,8 @@ void PoseOptimizationNode::globalOptCb() {
 
             graph_initialized_ = true;
 
+            graph_start_time_ = current_time;
+
             RCLCPP_INFO(this->get_logger(), "Initialization done!");
 
             return;
@@ -1277,8 +1280,10 @@ void PoseOptimizationNode::globalOptCb() {
                 Sophus::SE3d odom_T_t_agv = agv_measurements_.odom_pose;
                 constraint_odom_agv.t_T_s = odom_T_t_agv.inverse()*odom_T_s_agv;
 
-                constraint_odom_agv.covariance = computeRelativeOdometryCovariance(agv_measurements_.odom_pose, prev_agv_measurements_.odom_pose,
-                                                                                    agv_measurements_.odom_covariance, prev_agv_measurements_.odom_covariance);
+                // constraint_odom_agv.covariance = computeRelativeOdometryCovariance(agv_measurements_.odom_pose, prev_agv_measurements_.odom_pose,
+                //                                                                     agv_measurements_.odom_covariance, prev_agv_measurements_.odom_covariance);
+
+                constraint_odom_agv.covariance = Eigen::Matrix4d::Identity()*0.1;
 
                 proprioceptive_constraints_agv_.push_back(constraint_odom_agv);
             }
@@ -1391,8 +1396,10 @@ void PoseOptimizationNode::globalOptCb() {
                 Sophus::SE3d odom_T_t_uav = uav_measurements_.odom_pose;
                 constraint_odom_uav.t_T_s = odom_T_t_uav.inverse()*odom_T_s_uav;
 
-                constraint_odom_uav.covariance = computeRelativeOdometryCovariance(uav_measurements_.odom_pose, prev_uav_measurements_.odom_pose,
-                                                                                    uav_measurements_.odom_covariance, prev_uav_measurements_.odom_covariance);
+                // constraint_odom_uav.covariance = computeRelativeOdometryCovariance(uav_measurements_.odom_pose, prev_uav_measurements_.odom_pose,
+                //                                                                     uav_measurements_.odom_covariance, prev_uav_measurements_.odom_covariance);
+                
+                constraint_odom_uav.covariance = Eigen::Matrix4d::Identity()*0.1;
                 proprioceptive_constraints_uav_.push_back(constraint_odom_uav);
             }
 
