@@ -66,6 +66,7 @@
 #include <fstream>
 #include <sstream>
 #include <vector>
+#include <random>
 
 #include "ament_index_cpp/get_package_share_directory.hpp"
 
@@ -95,6 +96,8 @@ public:
 		this->declare_parameter<std::string>("trajectory_csv_file", "trajectory_lemniscate_uav.csv");
 		this->declare_parameter<std::string>("ros_odometry_topic", "/uav/odom");
 		this->declare_parameter<std::string>("ros_gt_topic", "/uav/gt");
+		this->declare_parameter<double>("odom_error_position", 0.0);
+		this->declare_parameter<double>("odom_error_angle", 0.0);
 
 		this->declare_parameter<double>("lookahead_distance", 2.0);
 		this->declare_parameter<double>("cruise_speed", 0.5);
@@ -120,7 +123,13 @@ public:
 		this->get_parameter("ros_odometry_topic", ros_odometry_topic_);
 		this->get_parameter("ros_gt_topic", ros_gt_topic_);
 
+		this->get_parameter("odom_error_position", odom_error_position_);
+		this->get_parameter("odom_error_angle", odom_error_angle_);
+
 		this->get_parameter("cruise_speed", cruise_speed_);
+
+		pos_scale_err_ = odom_error_position_ / 100.0;
+		yaw_scale_err_ = odom_error_angle_   / 100.0;
 
 		std::vector<double> uav_origin_vec;
 		this->get_parameter("uav_origin", uav_origin_vec);
@@ -153,6 +162,9 @@ public:
 
 		ros_odometry_publisher_ = this->create_publisher<nav_msgs::msg::Odometry>(ros_odometry_topic_, 10);
 		ros_gt_publisher_ = this->create_publisher<geometry_msgs::msg::PoseStamped>(ros_gt_topic_, 10);
+
+		start_time_ = this->get_clock()->now();
+
 		// Set QoS to match PX4 publisher
 		rclcpp::QoS qos_profile = rclcpp::SensorDataQoS();
 
@@ -160,100 +172,183 @@ public:
 			vehicle_odometry_topic_, qos_profile,
 			[this](const px4_msgs::msg::VehicleOdometry::SharedPtr msg) {
 
+			// --- PX4 NED -> ROS ENU (unchanged) ---
+			Eigen::Quaterniond q_ned(msg->q[0], msg->q[1], msg->q[2], msg->q[3]);
+			Eigen::Quaterniond q_enu = px4_ros_com::frame_transforms::px4_to_ros_orientation(q_ned);
 
-				// Convert orientation
-                Eigen::Quaterniond q_ned(msg->q[0], msg->q[1], msg->q[2], msg->q[3]);
-                Eigen::Quaterniond q_enu = px4_ros_com::frame_transforms::px4_to_ros_orientation(q_ned);
+			Eigen::Vector3d pos_ned(msg->position[0], msg->position[1], msg->position[2]);
+			Eigen::Vector3d pos_enu = px4_ros_com::frame_transforms::ned_to_enu_local_frame(pos_ned);
 
-                // Convert position and velocity
-                Eigen::Vector3d pos_ned(msg->position[0], msg->position[1], msg->position[2]);
-                Eigen::Vector3d pos_enu = px4_ros_com::frame_transforms::ned_to_enu_local_frame(pos_ned);
+			Eigen::Vector3d vel_ned(msg->velocity[0], msg->velocity[1], msg->velocity[2]);
+			Eigen::Vector3d vel_enu = px4_ros_com::frame_transforms::ned_to_enu_local_frame(vel_ned);
 
-                Eigen::Vector3d vel_ned(msg->velocity[0], msg->velocity[1], msg->velocity[2]);
-                Eigen::Vector3d vel_enu = px4_ros_com::frame_transforms::ned_to_enu_local_frame(vel_ned);
+			// True ENU yaw from quaternion 
+			const Eigen::Vector3d rpy_true = q_enu.toRotationMatrix().eulerAngles(2, 1, 0); // ZYX 
+			const double yaw_true = rpy_true[0]; 
+			const double pitch_true = rpy_true[1]; 
+			const double roll_true = rpy_true[2];
 
-				// Construct a nav_msgs/Odometry message
-				nav_msgs::msg::Odometry odom_msg;
-				odom_msg.header.stamp = this->get_clock()->now();
-				odom_msg.header.frame_id = "/uav/odom";  // or "odom" or "world"
-				odom_msg.child_frame_id = "/uav/base_link";  // or "uav_base"
+			if (!have_prev_odom_) {
+				last_pos_true_enu_ = pos_enu;
+				q_last_true_enu_   = q_enu;
+            	last_yaw_true_     = yaw_true;
 
-				odom_msg.pose.pose.position.x = pos_enu.x();
-                odom_msg.pose.pose.position.y = pos_enu.y();
-                odom_msg.pose.pose.position.z = pos_enu.z();
+				// // // Initialize noisy odometry to the true pose
+				pos_noisy_enu_ = pos_enu;
+				yaw_noisy_     = yaw_true;
 
-                odom_msg.pose.pose.orientation.x = q_enu.x();
-                odom_msg.pose.pose.orientation.y = q_enu.y();
-                odom_msg.pose.pose.orientation.z = q_enu.z();
-                odom_msg.pose.pose.orientation.w = q_enu.w();
+				have_prev_odom_ = true;
+				return;
+			}
 
-                odom_msg.twist.twist.linear.x = vel_enu.x();
-                odom_msg.twist.twist.linear.y = vel_enu.y();
-                odom_msg.twist.twist.linear.z = vel_enu.z();
+			// 1) True world increment
+			Eigen::Vector3d dpos_true_enu = pos_enu - last_pos_true_enu_;
 
-                odom_msg.twist.twist.angular.x = msg->angular_velocity[1];
-                odom_msg.twist.twist.angular.y = msg->angular_velocity[0];
-                odom_msg.twist.twist.angular.z = -msg->angular_velocity[2];
+			Eigen::Matrix3d R_last_true_enu = q_last_true_enu_.toRotationMatrix();
+			Eigen::Vector3d dpos_true_body = R_last_true_enu.transpose() * dpos_true_enu;
 
-				// Fill pose covariance (position + orientation)
-				odom_msg.pose.covariance = {
-					msg->position_variance[0], 0, 0, 0, 0, 0,
-					0, msg->position_variance[1], 0, 0, 0, 0,
-					0, 0, msg->position_variance[2], 0, 0, 0,
-					0, 0, 0, msg->orientation_variance[0], 0, 0,
-					0, 0, 0, 0, msg->orientation_variance[1], 0,
-					0, 0, 0, 0, 0, msg->orientation_variance[2]
-				};
+			// 3) Add body-frame noise / scale
+			Eigen::Vector3d sigma_body(
+				pos_scale_err_ * std::abs(dpos_true_body.x()),
+				pos_scale_err_ * std::abs(dpos_true_body.y()),
+				pos_scale_err_ * std::abs(dpos_true_body.z()));
+			Eigen::Vector3d dpos_noisy_body = dpos_true_body + Eigen::Vector3d(
+				sigma_body.x() * odom_noise_(rng_),
+				sigma_body.y() * odom_noise_(rng_),
+				sigma_body.z() * odom_noise_(rng_));
 
-				// Fill twist covariance (linear velocity)
-				odom_msg.twist.covariance = {
-					msg->velocity_variance[0], 0, 0, 0, 0, 0,
-					0, msg->velocity_variance[1], 0, 0, 0, 0,
-					0, 0, msg->velocity_variance[2], 0, 0, 0,
-					0, 0, 0, 0.0, 0, 0,
-					0, 0, 0, 0, 0.0, 0,
-					0, 0, 0, 0, 0, 0.0
-				};
+			// Yaw increment
+			double dyaw_true = wrapPi(yaw_true - last_yaw_true_);
+			double dyaw_noisy = dyaw_true + (yaw_scale_err_ * std::abs(dyaw_true)) * odom_noise_(rng_);
 
-				// Publish the converted message
-				ros_odometry_publisher_->publish(odom_msg);
-			});
+			// 4) Update the *estimated* orientation first
+			yaw_noisy_ = wrapPi(yaw_noisy_ + dyaw_noisy);
+
+			Eigen::Quaterniond q_noisy_enu =
+            Eigen::AngleAxisd(yaw_noisy_, Eigen::Vector3d::UnitZ()) *
+            Eigen::AngleAxisd(pitch_true, Eigen::Vector3d::UnitY()) *
+            Eigen::AngleAxisd(roll_true,  Eigen::Vector3d::UnitX());
+
+			Eigen::Matrix3d R_est_enu =
+				(Eigen::AngleAxisd(yaw_noisy_, Eigen::Vector3d::UnitZ()) *
+				Eigen::AngleAxisd(pitch_true, Eigen::Vector3d::UnitY()) *
+				Eigen::AngleAxisd(roll_true,  Eigen::Vector3d::UnitX())).toRotationMatrix();
+
+			pos_noisy_enu_ += R_est_enu * dpos_noisy_body;
+			
+			// Save true for next step
+			last_pos_true_enu_ = pos_enu;
+			q_last_true_enu_   = q_enu;
+			last_yaw_true_ = yaw_true;
+
+			// --- Fill and publish Odometry (NOISY pose) ---
+			nav_msgs::msg::Odometry odom_msg;
+			odom_msg.header.stamp = this->get_clock()->now();
+			odom_msg.header.frame_id = "/uav/odom";
+			odom_msg.child_frame_id = "/uav/base_link";
+
+			// NOISY position
+			odom_msg.pose.pose.position.x = pos_noisy_enu_.x();
+			odom_msg.pose.pose.position.y = pos_noisy_enu_.y();
+			odom_msg.pose.pose.position.z = pos_noisy_enu_.z();
+
+			// NOISY orientation (yaw only perturbed)
+			odom_msg.pose.pose.orientation.x = q_noisy_enu.x();
+			odom_msg.pose.pose.orientation.y = q_noisy_enu.y();
+			odom_msg.pose.pose.orientation.z = q_noisy_enu.z();
+			odom_msg.pose.pose.orientation.w = q_noisy_enu.w();
+
+			// Keep linear velocity as the true ENU velocity (you can noise this too if desired)
+			odom_msg.twist.twist.linear.x = vel_enu.x();
+			odom_msg.twist.twist.linear.y = vel_enu.y();
+			odom_msg.twist.twist.linear.z = vel_enu.z();
+
+			// Keep angular velocity mapping as you had (PX4 -> ENU swap/sign)
+			odom_msg.twist.twist.angular.x = msg->angular_velocity[1];
+			odom_msg.twist.twist.angular.y = msg->angular_velocity[0];
+			odom_msg.twist.twist.angular.z = -msg->angular_velocity[2];
+
+
+			// Covariances: you can keep PX4 variances or inflate slightly since we add noise.
+			odom_msg.pose.covariance = {
+				msg->position_variance[0], 0, 0, 0, 0, 0,
+				0, msg->position_variance[1], 0, 0, 0, 0,
+				0, 0, msg->position_variance[2], 0, 0, 0,
+				0, 0, 0, msg->orientation_variance[0], 0, 0,
+				0, 0, 0, 0, msg->orientation_variance[1], 0,
+				0, 0, 0, 0, 0, msg->orientation_variance[2]
+			};
+
+			odom_msg.twist.covariance = {
+				msg->velocity_variance[0], 0, 0, 0, 0, 0,
+				0, msg->velocity_variance[1], 0, 0, 0, 0,
+				0, 0, msg->velocity_variance[2], 0, 0, 0,
+				0, 0, 0, 0.0, 0, 0,
+				0, 0, 0, 0, 0.0, 0,
+				0, 0, 0, 0, 0, 0.0
+			};
+
+			ros_odometry_publisher_->publish(odom_msg);
+		});
 
 		vehicle_local_position_subscriber_ = this->create_subscription<px4_msgs::msg::VehicleLocalPosition>(
 			vehicle_local_position_topic_, qos_profile,
 			[this](const px4_msgs::msg::VehicleLocalPosition::SharedPtr msg) {
-				geometry_msgs::msg::PoseStamped pose_msg;
 
-				// Header
-				pose_msg.header.stamp = this->get_clock()->now();
-				pose_msg.header.frame_id = "map";  // or "world", depending on your convention
+				// Initialize/reset counter tracking
+				if (last_heading_reset_counter_ < 0) {
+					last_heading_reset_counter_ = msg->heading_reset_counter;
+				}
 
-				// PX4 local position is NED, origin at arming/start.
-      			Eigen::Vector3d pos_ned(msg->x, msg->y, msg->z);
-				
-				// Convert to ENU (local)
-				Eigen::Vector3d pos_enu_local =
-					px4_ros_com::frame_transforms::ned_to_enu_local_frame(pos_ned);
+				// If EKF has applied a reset, accumulate delta_heading (NED frame)
+				if (msg->heading_reset_counter != last_heading_reset_counter_) {
+					heading_reset_accum_ += msg->delta_heading;  // NED
+					last_heading_reset_counter_ = msg->heading_reset_counter;
+				}
 
-				// Rotate by origin orientation, then translate by origin position to get world/map
-				Eigen::Vector3d pos_enu_world = origin_q_enu_ * pos_enu_local + origin_pos_enu_;
+				if (last_xy_reset_counter_ < 0) last_xy_reset_counter_ = msg->xy_reset_counter;
+				if (last_z_reset_counter_  < 0) last_z_reset_counter_  = msg->z_reset_counter;
 
-				pose_msg.pose.position.x = pos_enu_world.x();
-				pose_msg.pose.position.y = pos_enu_world.y();
-				pose_msg.pose.position.z = pos_enu_world.z();
+				if (msg->xy_reset_counter != last_xy_reset_counter_) {
+					xy_reset_accum_.x() += msg->delta_xy[0];  // meters, NED x
+					xy_reset_accum_.y() += msg->delta_xy[1];  // meters, NED y
+					last_xy_reset_counter_ = msg->xy_reset_counter;
+				}
+				if (msg->z_reset_counter != last_z_reset_counter_) {
+					z_reset_accum_ += msg->delta_z;           // meters, NED z
+					last_z_reset_counter_ = msg->z_reset_counter;
+				}
 
-				// Orientation: PX4 gives heading (yaw in NED). Build NED yaw quaternion,
+				// // Compose **continuous** local NED position
+				// Eigen::Vector3d pos_ned(
+				// 	msg->x + xy_reset_accum_.x(),
+				// 	msg->y + xy_reset_accum_.y(),
+				// 	msg->z + z_reset_accum_
+				// );
+
+				// Compose **continuous** local NED position
+				Eigen::Vector3d pos_ned(
+					msg->x,
+					msg->y,
+					msg->z
+				);
+
+				// --- Convert to local ENU, then compose with world origin ---
+				Eigen::Vector3d pos_enu_local  = px4_ros_com::frame_transforms::ned_to_enu_local_frame(pos_ned);
+				Eigen::Vector3d pos_enu_world  = origin_q_enu_ * pos_enu_local + origin_pos_enu_;
+
 				// convert to ENU, then compose with origin orientation.
-				Eigen::Quaterniond q_heading_ned(Eigen::AngleAxisd(msg->heading, Eigen::Vector3d::UnitZ()));
+				Eigen::Quaterniond q_heading_ned(Eigen::AngleAxisd(wrapPi(msg->heading), Eigen::Vector3d::UnitZ()));
 				Eigen::Quaterniond q_heading_enu =
 					px4_ros_com::frame_transforms::px4_to_ros_orientation(q_heading_ned);
 
+				// compose with world origin orientation
 				Eigen::Quaterniond q_world_enu = origin_q_enu_ * q_heading_enu;
 
-				// Extract ENU yaw from q_world_enu
-				Eigen::Vector3d rpy = q_world_enu.toRotationMatrix().eulerAngles(2, 1, 0); // ZYX
-				double yaw_world_enu = rpy[0];
-				 // UPDATE current pose in WORLD ENU
+				// Extract world ENU yaw (for your controller state)
+				double yaw_world_enu = wrapPi(yaw_from_quat_enu(q_world_enu));
+
+				// ---- Update current pose in WORLD ENU ----
 				{
 					std::lock_guard<std::mutex> lock(position_mutex_);
 					current_pose_[0] = pos_enu_world.x();
@@ -261,6 +356,16 @@ public:
 					current_pose_[2] = pos_enu_world.z();
 					current_pose_[3] = yaw_world_enu;
 				}
+
+
+				geometry_msgs::msg::PoseStamped pose_msg;
+				// Header
+				pose_msg.header.stamp = this->get_clock()->now();
+				pose_msg.header.frame_id = "map";  // or "world", depending on your convention
+
+				pose_msg.pose.position.x = pos_enu_world.x();
+				pose_msg.pose.position.y = pos_enu_world.y();
+				pose_msg.pose.position.z = pos_enu_world.z();
 
 				pose_msg.pose.orientation.x = q_world_enu.x();
 				pose_msg.pose.orientation.y = q_world_enu.y();
@@ -281,6 +386,16 @@ public:
 
 				// Arm the vehicle
 				this->arm();
+				start_time_ = this->get_clock()->now();
+
+			}
+
+			if (!started_ && offboard_setpoint_counter_ >= 10){
+				//Wait a bit for the drone to take off
+				auto now = this->get_clock()->now();
+				if ((now - start_time_).seconds() >= 2.0) {
+					started_ = true;
+				}
 			}
 
 			// offboard_control_mode needs to be paired with trajectory_setpoint
@@ -300,6 +415,13 @@ public:
 	void land();
 
 private:
+
+	static inline double yaw_from_quat_enu(const Eigen::Quaterniond &q)
+	{
+		Eigen::Vector3d eul = q.toRotationMatrix().eulerAngles(2, 1, 0);
+		return eul[0];
+	}
+
 	rclcpp::TimerBase::SharedPtr timer_;
 
 	rclcpp::Publisher<OffboardControlMode>::SharedPtr offboard_control_mode_publisher_;
@@ -328,6 +450,8 @@ private:
 	size_t closest_idx_ = 0;
 	double lookahead_distance_ = 2.0;  // meters
 	double cruise_speed_ = 0.5;         // proportional gain
+	double odom_error_position_ = 0.0; // %,  meters for every 100 meters traveled
+	double odom_error_angle_ = 0.0; // % degrees for every 100
 
 	bool hover_reached_ = false;
 	bool land_sent_ = false;  // flag to ensure LAND command is sent only once
@@ -336,6 +460,36 @@ private:
 
 	Eigen::Vector3d origin_pos_enu_{0.0, 0.0, 0.0};
 	Eigen::Quaterniond origin_q_enu_{1.0, 0.0, 0.0, 0.0}; // w,x,y,z
+
+	// --- Odometry noise state ---
+	bool have_prev_odom_{false};
+	Eigen::Vector3d last_pos_true_enu_{0.0, 0.0, 0.0};
+	Eigen::Quaterniond q_last_true_enu_{1,0,0,0}; 
+
+	double last_yaw_true_{0.0};     // ENU yaw
+
+	Eigen::Vector3d pos_noisy_enu_{0.0, 0.0, 0.0}; // integrated noisy position
+
+	double yaw_noisy_{0.0};                        // integrated noisy yaw (ENU)
+
+	// scale biases (as percentages). 1.0 == 1% scale error.
+	double pos_scale_err_{0.0};                    // = odom_error_position_ / 100.0
+	double yaw_scale_err_{0.0};                    // = odom_error_angle_   / 100.0
+
+	// RNG for Gaussian noise
+	std::mt19937 rng_{std::random_device{}()};
+	std::normal_distribution<double> odom_noise_{0.0, 1.0};
+
+	int    last_heading_reset_counter_{-1};
+	double heading_reset_accum_{0.0};   // sum of delta_heading since start
+
+	int last_xy_reset_counter_{-1};
+	int last_z_reset_counter_{-1};
+	Eigen::Vector2d xy_reset_accum_{0.0, 0.0};
+	double z_reset_accum_{0.0};
+
+    rclcpp::Time start_time_;
+    bool started_ = false;
 
 };
 
@@ -413,14 +567,8 @@ void UAVOffboardControl::land()
 void UAVOffboardControl::publish_offboard_control_mode()
 {
 	OffboardControlMode msg{};
-	if(!hover_reached_){
-		msg.position = true;
-		msg.velocity = false;
-	}
-	else{
-		msg.position = false;
-		msg.velocity = true;
-	}
+	msg.position = true;
+	msg.velocity = true;
 	msg.acceleration = false;
 	msg.attitude = false;
 	msg.body_rate = false;
@@ -433,6 +581,9 @@ void UAVOffboardControl::publish_offboard_control_mode()
  */
 void UAVOffboardControl::publish_trajectory_setpoint()
 {
+	
+	if(!started_) return;
+
 	std::array<double, 4> pose;
 	{
 		std::lock_guard<std::mutex> lock(position_mutex_);
@@ -504,10 +655,11 @@ void UAVOffboardControl::publish_trajectory_setpoint()
 		}
 	}
 
+	size_t start = new_closest_idx;
 	double accum_dist = 0.0;
-	size_t new_target_idx = closest_idx_;
+	size_t new_target_idx = start;
 
-	for (size_t i = closest_idx_ + 1; i < trajectory_.size(); ++i) {
+	for (size_t i = start + 1; i < trajectory_.size(); ++i) {
 		double dx = trajectory_[i][0] - trajectory_[i-1][0];
 		double dy = trajectory_[i][1] - trajectory_[i-1][1];
 		double dz = trajectory_[i][2] - trajectory_[i-1][2];
@@ -538,25 +690,34 @@ void UAVOffboardControl::publish_trajectory_setpoint()
 	);
 
 	// If we're very near the end of the path, trigger LAND (once)
-	if ((closest_idx_ >= 0.9*trajectory_.size()) && dist_to_end <= 0.25) {
+	if ((closest_idx_ >= 0.8*trajectory_.size()) && dist < 0.4) {
 		land();
 		return;
 	}
 
-	// Compute unit direction vector
-	double ux = ex / dist;
-	double uy = ey / dist;
-	double uz = ez / dist;
+	double vx = 0.0, vy = 0.0, vz = 0.0;
+	if (dist > 1e-3) {
+		const double vmag = std::min(cruise_speed_, dist * 0.8); // taper near goal
+		double ux = ex / dist, uy = ey / dist, uz = ez / dist;
+		vx = vmag * ux; vy = vmag * uy; vz = vmag * uz;
+	}
 
-	// Compute commanded velocity magnitude
-	// Apply velocity vector
-	double vx = cruise_speed_ * ux;
-	double vy = cruise_speed_ * uy;
-	double vz = cruise_speed_ * uz;
+	// // --- Full position setpoint (target point in world ENU -> local NED) ---
+	// Predict next position in world ENU with dt = 0.1 s
+    constexpr double dt = 0.1; // seconds (timer period)
+    Eigen::Vector3d p_pred_world_enu(
+        pose[0] + vx * dt,
+        pose[1] + vy * dt,
+        target[2]
+    );
+
+	 // Convert predicted position to local NED
+    Eigen::Vector3d p_pred_local_enu = origin_q_enu_.inverse() * (p_pred_world_enu - origin_pos_enu_);
+    Eigen::Vector3d p_pred_local_ned = px4_ros_com::frame_transforms::enu_to_ned_local_frame(p_pred_local_enu);
+
 
 	// v_world_enu from your controller (vx, vy, vz in world ENU)
 	Eigen::Vector3d v_world_enu(vx, vy, vz);
-
 	// Transform velocity to local ENU then to local NED
 	Eigen::Vector3d v_local_enu = origin_q_enu_.inverse() * v_world_enu;
 	Eigen::Vector3d v_local_ned = px4_ros_com::frame_transforms::enu_to_ned_local_frame(v_local_enu);
@@ -573,7 +734,11 @@ void UAVOffboardControl::publish_trajectory_setpoint()
 	// Build setpoint
 	TrajectorySetpoint msg{};
 	auto nan = std::numeric_limits<float>::quiet_NaN();
-	msg.position = {nan, nan, nan};  // velocity mode
+    
+	// msg.position = {static_cast<float>(p_pred_local_ned.x()),
+    //                 static_cast<float>(p_pred_local_ned.y()),
+    //                 static_cast<float>(p_pred_local_ned.z())};
+	msg.position = {nan, nan, nan}; // PX4 ignores position if velocity is set
 	msg.velocity = {static_cast<float>(v_local_ned.x()),
 					static_cast<float>(v_local_ned.y()),
 					static_cast<float>(v_local_ned.z())};
@@ -609,7 +774,9 @@ int main(int argc, char *argv[])
 	std::cout << "Starting offboard control node..." << std::endl;
 	setvbuf(stdout, NULL, _IONBF, BUFSIZ);
 	rclcpp::init(argc, argv);
-	rclcpp::spin(std::make_shared<UAVOffboardControl>());
+	auto node = std::make_shared<UAVOffboardControl>();
+	node->set_parameter(rclcpp::Parameter("use_sim_time", true));
+	rclcpp::spin(node);
 
 	rclcpp::shutdown();
 	return 0;
