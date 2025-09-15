@@ -25,11 +25,15 @@ This repository contains two ROS2 packages:
 
 * ```uwb_localization```: includes the UWB-based relative transformation estimation node and the pose-graph optimization node with radar constraints. The ```config``` folder in this package contains the parameter file for these two nodes.
 
-![](images/TFM_architecture.drawio.png)
+![](images/real_diagram.drawio.png)
 
 * ```uwb_simulator```: includes the odometry simulation node and the measurement simulation node.  The ```config``` folder in this package contains the parameter file for these two nodes.
 
-![](images/TFM_diagram_simulation.drawio.png)
+![](images/basic_sim_diagram_simulation.drawio.png)
+
+* ```uwb_gz_simulator```: includes the UWB plugin and modified UAV and UGV models to be inserted in PX4 SITL (see instructions below).  The ```px4_sim_offboard``` package contains the nodes that control the vehicles and parse telemetry to ROS standard messages compatible with the localization system.
+
+![](images/SITL_simulation.drawio.png)
 
 
 ## Launch files
