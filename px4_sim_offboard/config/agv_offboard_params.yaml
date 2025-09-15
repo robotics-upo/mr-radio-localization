@@ -1,0 +1,33 @@
+agv_offboard_control:
+  ros__parameters:
+    offboard_control_mode_topic: "/px4_2/fmu/in/offboard_control_mode"
+    trajectory_setpoint_topic: "/px4_2/fmu/in/trajectory_setpoint"
+    vehicle_command_topic: "/px4_2/fmu/in/vehicle_command"
+    vehicle_odometry_topic: "/px4_2/fmu/out/vehicle_odometry"
+    vehicle_local_position_topic: "/px4_2/fmu/out/vehicle_local_position_v1"
+    trajectory_csv_file: "trajectory_lemniscate_agv.csv"
+    ros_odometry_topic: "/agv/odom"
+    ros_gt_topic: "/agv/gt"
+    lookahead_distance: 2.0
+    cruise_speed: 0.5
+    agv_origin: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0] #x y z r p y #spawning location of the AGV in Gazebo(ENU)
+    anchors:
+      a1:
+        id: "0x0009D6"
+        position: [-0.32, 0.3, 0.875]
+      a2:
+        id: "0x0009E5"
+        position: [0.32, -0.3, 0.875]
+      a3:
+        id: "0x0016FA"
+        position: [0.32, 0.3, 0.33]
+      a4:
+        id: "0x0016CF"
+        position: [-0.32, -0.3, 0.33]
+    tags:
+      t1:
+        id: "0x001155"
+        position: [-0.24, -0.24, -0.06]
+      t2:
+        id: "0x001397"
+        position: [0.24, 0.24, -0.06]
