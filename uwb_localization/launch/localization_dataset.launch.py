@@ -13,8 +13,9 @@ def generate_launch_description():
 
     config = os.path.join(package_dir, 'config', 'params.yaml')
 
-    #Put here the path to the dataset bag you want to use
-    path_to_bag = "/home/amarsil/radio_ws/dataset/experiment1_gt_v2"
+    # Put here the path to the simulation bag you want to use, inside the  /bags folder
+    bag_name = "dataset_lemniscate"
+    path_to_bag = os.path.join(package_dir, 'bags', bag_name)
 
     node1 = Node(
                 package='uwb_localization',

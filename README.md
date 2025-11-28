@@ -3,9 +3,9 @@
 ### Abstract
 Radio-based methods such as Ultra-Wideband (UWB) and RAdio Detection And Ranging (RADAR), which have traditionally seen limited adoption in robotics, are experiencing a boost in popularity thanks to their robustness to harsh environmental conditions and cluttered environments. This work proposes a multi-robot UGV-UAV localization system that leverages the two technologies with inexpensive and readily-available sensors (Inertial Measurement Units, or IMUs, and wheel encoders) to estimate the relative position of an aerial robot with respect to a ground robot. The first stage of the system pipeline includes a nonlinear optimization framework to trilaterate the location of the aerial platform based on UWB range data, and a RADAR pre-processing module with loosely coupled ego-motion estimation which has been adapted for a multi-robot scenario. Then, the pre-processed RADAR data as well as the relative transformation are fed to a pose-graph optimization framework with odometry and inter-robot constraints. The system, implemented for the Robotic Operating System (ROS 2) with the Ceres optimizer, has been validated in Software-in-the-Loop (SITL) simulations and in a real-world dataset. The relative localization module outperforms state-of-the-art closed-form methods which are less robust to noise. Our SITL environment includes a custom Gazebo plugin for generating realistic UWB measurements modeled after real data.  Conveniently, the proposed factor graph formulation makes the system readily extensible to full Simultaneous Localization And Mapping (SLAM).  Finally, all the code and experimental data have been made publicly available to support reproducibility and to serve as a common open dataset for benchmarking.
 
-## Dependencies
+## Basic Dependencies
 
-* [ROS2 Humble](https://docs.ros.org/en/humble/index.html)
+* ROS 2 [Humble](https://docs.ros.org/en/humble/index.html) or [Jazzy](https://docs.ros.org/en/jazzy/index.html)
 * [Ceres Solver](https://github.com/ceres-solver/ceres-solver)
 * [Sophus](https://github.com/strasdat/Sophus)
 * [pcl_ros](https://github.com/ros-perception/perception_pcl)
@@ -15,6 +15,16 @@ Radio-based methods such as Ultra-Wideband (UWB) and RAdio Detection And Ranging
 * [4D-Radar-Odom](https://github.com/robotics-upo/4D-Radar-Odom/tree/arco-drone-integration) branch ```arco_drone_integration```.
 
 Clone this repository along with the dependency packages to your ROS 2 workspace and compile with the standard ```colcon build``` command.
+
+## Additional Dependencies (for PX4 SITL only)
+
+* [Gazebo Harmonic](https://gazebosim.org/docs/harmonic/ros_installation/).
+* [QGC](https://docs.qgroundcontrol.com/master/en/qgc-user-guide/releases/daily_builds.html)
+* [PX4 Toolchain](https://docs.px4.io/main/en/dev_setup/dev_env_linux_ubuntu.html)
+* [tmux](https://github.com/tmux/tmux/wiki/Installing)
+
+**Disclaimer**: the PX4 SITL simulation has been tested with ROS 2 Jazzy only, the rest of the implementation has been tested in both ROS 2 Humble and ROS 2 Jazzy. Specific installation instructions for the SITL environment are found below.
+
 
 ## Main components
 

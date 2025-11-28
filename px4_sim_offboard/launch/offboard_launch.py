@@ -26,7 +26,13 @@ def generate_launch_description():
         'ros_gz_bridge.launch.py'
     )
 
-    uwb_bridge_config = '/home/amarsil/radio_ws/src/mr-radio-localization/uwb_gz_simulation/uwb_bridge.yaml'
+    # Path to uwb_bridge config (relative to px4_sim_offboard package)
+    uwb_bridge_config = os.path.join(
+        get_package_share_directory('px4_sim_offboard'),
+        '..',
+        'uwb_gz_simulation',
+        'uwb_bridge.yaml'
+    )
 
 
     return LaunchDescription([
