@@ -114,3 +114,7 @@ sudo chmod +x simulator_launcher.sh
 ```
 
 Note that the simulator takes a while to load. After about 30 seconds, you should see the two robots start to move. 
+
+# Run localization with recorded data
+
+Both launch files ```localization.launch.py``` and ```localization_dataset.launch.py``` in the main package ```uwb_localization``` look for bag files with a name provided by the user in the ```bags/``` folder. The first launch file is intended to be used with simulated data, and the second launch file has some extra processing for real experiment data. 
