@@ -1,5 +1,3 @@
-# mr-radio-localization
-
 <h1 align="center"><a href="https://arxiv.org/html/2509.20081v1" style="text-decoration:none;color:inherit;">Radio-based Multi-Robot Odometry and Relative Localization</a></h1>
 
 <div align="center">
@@ -57,7 +55,7 @@ This repository contains two ROS2 packages:
 ``` 
 ros2 launch uwb_localization localization.launch.py
 ```
-**Note**: the real-world dataset has not yet been made public, but it will be made available soon. In the meantime, you can try the simulated version. 
+**Note**: You can find and download the real-world dataset as a .bag file in [Hardvard Dataverse](https://dataverse.harvard.edu/dataset.xhtml?persistentId=doi:10.7910/DVN/KNKWMJ).
 
 To launch the simulated scenario with just UWB and generic odometry, type:
 ``` 
@@ -131,3 +129,5 @@ Both launch files ```localization.launch.py``` and ```localization_dataset.launc
 
 This work was supported by the grants PICRAH 4.0 0 (PLEC2023-010353): funded by the Spanish Ministry of Science and Innovation and the Spanish Research Agency (MCIN/AEI/10.13039/501100011033); and COBUILD (PID2024-161069OB-C31), funded by the Spanish Ministry of
 Science, Innovation and Universities, the Spanish Research Agency (MICIU/AEI/10.13039/501100011033) and the European Regional Development Fund (FEDER, UE).
+
+![](images/fondos_proyectos.png)
