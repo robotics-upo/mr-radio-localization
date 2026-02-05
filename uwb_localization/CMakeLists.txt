@@ -154,6 +154,7 @@ install(TARGETS
 install(DIRECTORY include/ DESTINATION include)
 install(DIRECTORY launch DESTINATION share/${PROJECT_NAME})
 install(DIRECTORY config DESTINATION share/${PROJECT_NAME})
+install(DIRECTORY bags DESTINATION share/${PROJECT_NAME})
 
 
 if(BUILD_TESTING)
