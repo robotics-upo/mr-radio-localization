@@ -1,3 +1,4 @@
+
 <h1 align="center"><a href="https://arxiv.org/abs/2509.26558" style="text-decoration:none;color:inherit;">Radio-based Multi-Robot Odometry and Relative Localization</a></h1>
 
 <div align="center">
@@ -6,12 +7,14 @@
   </a>
 </div>
 
+❗ **This work has been accepted to ICRA 2026!**
+
 ### Abstract
 Radio-based methods such as Ultra-Wideband (UWB) and RAdio Detection And Ranging (RADAR), which have traditionally seen limited adoption in robotics, are experiencing a boost in popularity thanks to their robustness to harsh environmental conditions and cluttered environments. This work proposes a multi-robot UGV-UAV localization system that leverages the two technologies with inexpensive and readily-available sensors (Inertial Measurement Units, or IMUs, and wheel encoders) to estimate the relative position of an aerial robot with respect to a ground robot. The first stage of the system pipeline includes a nonlinear optimization framework to trilaterate the location of the aerial platform based on UWB range data, and a RADAR pre-processing module with loosely coupled ego-motion estimation which has been adapted for a multi-robot scenario. Then, the pre-processed RADAR data as well as the relative transformation are fed to a pose-graph optimization framework with odometry and inter-robot constraints. The system, implemented for the Robotic Operating System (ROS 2) with the Ceres optimizer, has been validated in Software-in-the-Loop (SITL) simulations and in a real-world dataset. The relative localization module outperforms state-of-the-art closed-form methods which are less robust to noise. Our SITL environment includes a custom Gazebo plugin for generating realistic UWB measurements modeled after real data.  Conveniently, the proposed factor graph formulation makes the system readily extensible to full Simultaneous Localization And Mapping (SLAM).  Finally, all the code and experimental data have been made publicly available to support reproducibility and to serve as a common open dataset for benchmarking.
 
 ## Basic Dependencies
 
-* ROS 2 [Humble](https://docs.ros.org/en/humble/index.html) or [Jazzy](https://docs.ros.org/en/jazzy/index.html)
+* Ubuntu 22.04 LTS and ROS 2 [Humble](https://docs.ros.org/en/humble/index.html) or Ubuntu 24.04 LTS and ROS 2 [Jazzy](https://docs.ros.org/en/jazzy/index.html)
 * [Ceres Solver](https://github.com/ceres-solver/ceres-solver)
 * [Sophus](https://github.com/strasdat/Sophus)
 * [pcl_ros](https://github.com/ros-perception/perception_pcl)
@@ -20,7 +23,9 @@ Radio-based methods such as Ultra-Wideband (UWB) and RAdio Detection And Ranging
 * [ars548_ros](https://github.com/robotics-upo/ars548_ros)
 * [4D-Radar-Odom](https://github.com/robotics-upo/4D-Radar-Odom/tree/arco-drone-integration) branch ```arco_drone_integration```.
 
-Clone this repository along with the dependency packages to your ROS 2 workspace and compile with the standard ```colcon build``` command.
+Clone this repository along with the dependency packages to your ROS 2 workspace and compile with the standard ```colcon build``` command. Please follow the links above to the mentioned packages for specific setup instructions for each of them. 
+
+**Note**: to use the SITL implementation of this package, we recommend setting up the simulation environment first and then setting up this package. Specific installation instructions for the SITL environment are found below.
 
 ## Additional Dependencies (for PX4 SITL only)
 
@@ -29,7 +34,7 @@ Clone this repository along with the dependency packages to your ROS 2 workspace
 * [PX4 Toolchain](https://docs.px4.io/main/en/dev_setup/dev_env_linux_ubuntu.html)
 * [tmux](https://github.com/tmux/tmux/wiki/Installing)
 
-**Disclaimer**: the PX4 SITL simulation has been tested with ROS 2 Jazzy only, the rest of the implementation has been tested in both ROS 2 Humble and ROS 2 Jazzy. Specific installation instructions for the SITL environment are found below.
+**Disclaimer**: the PX4 SITL simulation has been tested with ROS 2 Jazzy only, the rest of the implementation has been tested in both ROS 2 Humble and ROS 2 Jazzy.
 
 
 ## Main components
@@ -83,19 +88,19 @@ This package includes an enhanced simulator for relative localization which is i
 
 5) Set up Micro [XRCE-DDS](https://docs.px4.io/main/en/ros2/user_guide.html#setup-micro-xrce-dds-agent-client) Agent & Client for PX4-ROS2 communication.
 
-6) Build and run ROS2 [Workspace](https://docs.px4.io/main/en/ros2/user_guide.html#build-ros-2-workspace). To check that everything is working, we strongly encourage to also test the [multi-vehicle](https://docs.px4.io/main/en/sim_gazebo_gz/multi_vehicle_simulation.html) simulation example with ROS2 and Gazebo.
+6) Build and source ROS2 [Workspace](https://docs.px4.io/main/en/ros2/user_guide.html#build-ros-2-workspace). To check that everything is working, we strongly encourage to also test the [multi-vehicle](https://docs.px4.io/main/en/sim_gazebo_gz/multi_vehicle_simulation.html) simulation example with ROS2 and Gazebo.
 
 7) Copy the contents of the ```models``` folder in ```uwb_gz_simulation``` into ```/path/to/PX4-Autopilot/Tools/simulation/gz/models```
 
 8) Add the custom plugin (steps taken from [template](https://github.com/PX4/PX4-Autopilot/tree/main/src/modules/simulation/gz_plugins/template_plugin) plugin instructions) 
     
-    8.1: Copy the folder ```uwb_gazebo_plugin``` into ```/path/to/PX4-Autopilot/modules/simulation/gz_plugins```, and include the plugin for compilation by adding the following lines to the top-level```CMakeLists.txt```. 
+    8.1: Copy the folder ```uwb_gazebo_plugin``` into ```/path/to/PX4-Autopilot/modules/simulation/gz_plugins```, and include the plugin for compilation by adding the following lines to the top-level ```CMakeLists.txt```. 
 
 ```cmake
     add_subdirectory(uwb_gazebo_plugin)
     add_custom_target(px4_gz_plugins ALL DEPENDS OpticalFlowSystem MovingPlatformController TemplatePlugin GenericMotorModelPlugin BuoyancySystemPlugin SpacecraftThrusterModelPlugin UWBGazeboPlugin)
 ```
-    8.2: Then, load the plugin by including this line in ```/path/to/PX4-Autopilot/src/modules/simulation/gz_bridge/server.config```.
+    8.2: Then, load the plugin by including this line in `/path/to/PX4-Autopilot/src/modules/simulation/gz_bridge/server.config`.
 
 ```xml
 <plugin entity_name="*" entity_type="world" filename="libUWBGazeboPlugin.so" name="custom::UWBGazeboSystem"/>
@@ -109,9 +114,11 @@ make px4_sitl
 
 10) Install [tmux](https://github.com/tmux/tmux/wiki/Installing) 
 
-11) Update ```simulator_launcher.sh``` with the paths to your ROS 2 workspace, your PX4-Autopilot installation folder and the location of the QGC executable. By default, the script assumes that PX4 and the ROS 2 ws are on the root folder, and QGC is in ```~/Desktop```. 
+11) Add this package and its dependencies to your workspace.
 
-12) Give permissions to the simulator script and execute it: 
+12) Update ```simulator_launcher.sh``` with the paths to your ROS 2 workspace, your PX4-Autopilot installation folder and the location of the QGC executable. By default, the script assumes that PX4 and the ROS 2 ws are on the root folder, and QGC is in ```~/Desktop```. 
+
+13) Give permissions to the simulator script and execute it: 
 
 ```
 cd <ros2_ws>/mr-radio-localization
@@ -124,6 +131,36 @@ Note that the simulator takes a while to load. After about 30 seconds, you shoul
 # Run localization with recorded data
 
 Both launch files ```localization.launch.py``` and ```localization_dataset.launch.py``` in the main package ```uwb_localization``` look for bag files with a name provided by the user in the ```bags/``` folder. The first launch file is intended to be used with simulated data, and the second launch file has some extra processing for real experiment data. 
+
+# Troubleshooting
+
+* At the moment, compilation of package ``uwb_localization`` may fail due to CMake not being able to find the ``Sophus`` library when it has been installed from package repositories (e.g ``vcpkg`` or ``apt``). To overcome this, please install ``Sophus`` from source following these steps, then compile the workspace again.
+```
+git clone https://github.com/strasdat/Sophus.git
+cd Sophus
+mkdir build && cd build
+cmake ..
+sudo make install
+```
+
+* Make sure you have set up the [ars_548](https://github.com/robotics-upo/ars548_ros) package following the instructions in the repo, particularly don't forget to install ``tclap`` which may cause compilation errors if it is not correctly set up.
+
+```
+sudo apt-get install libtclap-dev
+```
+
+* When using the SITL, if you have a common workspace with all dependencies listed in this repo, the first time you run ``colcon build`` it may fail due to CMake being unable to find ``px4_ros_com``. Please make sure you have first compiled and sourced the PX4 dependencies, then compile the rest of the packages:
+
+```
+cd <your_ws>
+colcon build --packages-select px4_msgs px4_ros_com
+source install/setup.bash
+colcon build
+source install/setup.bash
+```
+
+**COMING SOON**: We are preparing docker images with a complete functional setup to avoid these issues, and they will be ready soon. Please stay put. 
+
 
 # Acknowledgements
 

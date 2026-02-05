@@ -16,7 +16,13 @@ setup(
         (os.path.join('share', package_name, 'config'), glob('config/*.yaml'))
     ],
     
-    install_requires=['setuptools'],
+    install_requires=[
+        'setuptools',
+        'numpy',
+        'matplotlib',
+        'scipy',
+        'tf-transformations'
+    ],
     zip_safe=True,
     maintainer='adren',
     maintainer_email='andresmarsil77@gmail.com',

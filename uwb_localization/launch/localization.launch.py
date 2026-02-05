@@ -36,10 +36,6 @@ def generate_launch_description():
         output='screen'
     )
 
-    # nodes_to_execute = [node1, node2]
-    nodes_to_execute = [node1]
-
-    nodes_to_execute.append(bag_full)
-
+    nodes_to_execute = [node1, node2, bag_full]
     
     return LaunchDescription(nodes_to_execute)
