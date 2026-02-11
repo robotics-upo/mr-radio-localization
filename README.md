@@ -60,7 +60,7 @@ This repository contains two ROS2 packages:
 ``` 
 ros2 launch uwb_localization localization_dataset.launch.py
 ```
-**Note**: You can find and download the real-world dataset as a .bag file in [Hardvard Dataverse](https://dataverse.harvard.edu/dataset.xhtml?persistentId=doi:10.7910/DVN/KNKWMJ).
+**Note**: You can find and download the real-world dataset as a .bag file in [Harvard Dataverse](https://dataverse.harvard.edu/dataset.xhtml?persistentId=doi:10.7910/DVN/KNKWMJ). The original dataset was recorded in ROS 2 Humble and as a consequence has the SQLite ``.db3`` format. If you are using ROS Jazzy, you may have to convert it first to the new standard ``.mcap`` format with [this tool](https://mcap.dev/guides/getting-started/ros-2). 
 
 The second launcher ``localization.launch.py`` executes just the main system (without the radar odometry nodes) and is used in the SITL scenario which is launched as part of the tmux script ``simulator_launcher.sh``. 
 
