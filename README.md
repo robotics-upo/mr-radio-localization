@@ -56,17 +56,21 @@ This repository contains two ROS2 packages:
 
 ## Launch files
 
-```uwb_localization``` contains two launch files. To launch the real world dataset experiment (which includes radar odometry), type:
+```uwb_localization``` contains three launch files. To launch the real world dataset experiment (which includes radar odometry), type:
 ``` 
-ros2 launch uwb_localization localization.launch.py
+ros2 launch uwb_localization localization_dataset.launch.py
 ```
 **Note**: You can find and download the real-world dataset as a .bag file in [Hardvard Dataverse](https://dataverse.harvard.edu/dataset.xhtml?persistentId=doi:10.7910/DVN/KNKWMJ).
 
-To launch the simulated scenario with just UWB and generic odometry, type:
+The second launcher ``localization.launch.py`` executes just the main system (without the radar odometry nodes) and is used in the SITL scenario which is launched as part of the tmux script ``simulator_launcher.sh``. 
+
+
+The third and final launcher is a basic simulated scenario with just UWB and generic odometry (no SITL). To use it, type:
 ``` 
 ros2 launch uwb_localization localization_sim.launch.py
 
 ```
+
 
 ## PX4 SITL Simulator
 
@@ -94,7 +98,7 @@ This package includes an enhanced simulator for relative localization which is i
 
 8) Add the custom plugin (steps taken from [template](https://github.com/PX4/PX4-Autopilot/tree/main/src/modules/simulation/gz_plugins/template_plugin) plugin instructions) 
     
-    8.1: Copy the folder ```uwb_gazebo_plugin``` into ```/path/to/PX4-Autopilot/modules/simulation/gz_plugins```, and include the plugin for compilation by adding the following lines to the top-level ```CMakeLists.txt```. 
+    8.1: Copy the folder ```uwb_gazebo_plugin``` into ```/path/to/PX4-Autopilot/src/modules/simulation/gz_plugins```, and include the plugin for compilation by adding the following lines to the top-level ```CMakeLists.txt```. 
 
 ```cmake
     add_subdirectory(uwb_gazebo_plugin)

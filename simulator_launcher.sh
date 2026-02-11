@@ -94,7 +94,7 @@ tmux send-keys -t $SESSION:1.0 "sleep 27 && source $ROS_WS/install/setup.zsh && 
 tmux send-keys -t $SESSION:1.1 "sleep 27 && source $ROS_WS/install/setup.zsh && ros2 topic echo /uav/odom" C-m
 
 # UWB localization launch (to simulate and optimize at the same time)
-# tmux send-keys -t $SESSION:1.2 "sleep 30 && cd $ROS_WS && source install/setup.zsh && ros2 launch uwb_localization localization.launch.py" C-m
+tmux send-keys -t $SESSION:1.2 "sleep 30 && cd $ROS_WS && source install/setup.zsh && ros2 launch uwb_localization localization.launch.py" C-m
 
 # #Record all ROS 2 topics (to simulate and optimize at the same tim)
 # tmux send-keys -t $SESSION:1.3 "sleep 30 && cd $ROS_WS && source install/setup.zsh && ros2 bag record \

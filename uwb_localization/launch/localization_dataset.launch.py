@@ -10,11 +10,10 @@ from launch.actions import ExecuteProcess
 def generate_launch_description():
 
     package_dir = get_package_share_directory('uwb_localization')
-
     config = os.path.join(package_dir, 'config', 'params.yaml')
 
     # Put here the path to the simulation bag you want to use, inside the  /bags folder
-    bag_name = "dataset_lemniscate"
+    bag_name = "experiment1_gt_v2_0/experiment1_gt_v2_0.mcap"
     path_to_bag = os.path.join(package_dir, 'bags', bag_name)
 
     node1 = Node(
@@ -50,6 +49,42 @@ def generate_launch_description():
         output='screen'
     )
 
-    nodes_to_execute = [node1, node2, node3, node4, bag_full]
+    # Radar nodes
+    
+    package_dir = get_package_share_directory('radar_odom')
+    config_uav = os.path.join(package_dir, 'config', 'config_uav.yaml')
+    config_agv = os.path.join(package_dir, 'config', 'config_agv.yaml')
+
+    uav_radar_pcl_processor = Node(
+        package='radar_odom',
+        executable='radar_pcl_processor',
+        output='screen',
+        name='uav_radar_pcl_processor',
+        remappings = [
+            ('/filtered_pointcloud', 'uav/filtered_pointcloud'),
+            ('/Ego_Vel_Twist', 'uav/Ego_Vel_Twist'),
+            ('/inlier_pointcloud', 'uav/inlier_pointcloud'),
+            ('/outlier_pointcloud', 'uav/outlier_pointcloud'),
+            ('/raw_pointcloud', 'uav/raw_pointcloud')
+        ],
+        parameters=[config_uav]
+    )
+
+    agv_radar_pcl_processor = Node(
+        package='radar_odom',
+        executable='radar_pcl_processor',
+        output='screen',
+        name='agv_radar_pcl_processor',
+        remappings = [
+            ('/filtered_pointcloud', 'agv/filtered_pointcloud'),
+            ('/Ego_Vel_Twist', 'agv/Ego_Vel_Twist'),
+            ('/inlier_pointcloud', 'agv/inlier_pointcloud'),
+            ('/outlier_pointcloud', 'agv/outlier_pointcloud'),
+            ('/raw_pointcloud', 'agv/raw_pointcloud')
+        ],
+        parameters=[config_agv]
+    )
+
+    nodes_to_execute = [node1, node2, node3, node4, bag_full, uav_radar_pcl_processor, agv_radar_pcl_processor]
     
     return LaunchDescription(nodes_to_execute)
