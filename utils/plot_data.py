@@ -540,8 +540,11 @@ def plot_experiment_data(path_experiment_data, path_folder, experiment_type = "s
         target_gt_q2_data = f'{uav_gt_topic_name}/pose/orientation/z'
         target_gt_q3_data = f'{uav_gt_topic_name}/pose/orientation/w'
         
-    max_timestamp = None
-
+    # Per-robot plotting windows (seconds)
+    max_timestamp_agv = 120.0
+    max_timestamp_uav = 175.0
+    # Keep shared/global plots on a common overlap window.
+    max_timestamp = min(max_timestamp_agv, max_timestamp_uav)
     target_odom_cov_x = f'{odom_topic_uav}/pose/covariance/[0;0]'
     target_odom_cov_y = f'{odom_topic_uav}/pose/covariance/[1;1]'
     target_odom_cov_z = f'{odom_topic_uav}/pose/covariance/[2;2]'
@@ -650,15 +653,15 @@ def plot_experiment_data(path_experiment_data, path_folder, experiment_type = "s
     #Get odometry data
     columns_source_odom_data = [time_data_setpoint, source_odom_x_data, source_odom_y_data, source_odom_z_data, source_odom_q0_data, source_odom_q1_data,source_odom_q2_data, source_odom_q3_data   ]
     source_odom_data_df = read_pandas_df(path_experiment_data, columns_source_odom_data, 
-                                           timestamp_col=time_data_setpoint, max_timestamp=max_timestamp)
+                                           timestamp_col=time_data_setpoint, max_timestamp=max_timestamp_agv)
     
     columns_source_odom_vel_data = [time_data_setpoint, source_odom_vx_data, source_odom_vy_data, source_odom_vz_data]
     source_odom_vel_data_df = read_pandas_df(path_experiment_data, columns_source_odom_vel_data, 
-                                           timestamp_col=time_data_setpoint, max_timestamp=max_timestamp)
+                                           timestamp_col=time_data_setpoint, max_timestamp=max_timestamp_agv)
     
     columns_target_odom_data = [time_data_setpoint, target_odom_x_data, target_odom_y_data, target_odom_z_data, target_odom_q0_data , target_odom_q1_data ,target_odom_q2_data ,target_odom_q3_data ]
     target_odom_data_df = read_pandas_df(path_experiment_data, columns_target_odom_data, 
-                                           timestamp_col=time_data_setpoint, max_timestamp=max_timestamp)
+                                           timestamp_col=time_data_setpoint, max_timestamp=max_timestamp_uav)
     
     columns_odom_covariance = [time_data_setpoint, target_odom_cov_x, target_odom_cov_y, target_odom_cov_z, target_odom_cov_yaw]
 
@@ -672,11 +675,11 @@ def plot_experiment_data(path_experiment_data, path_folder, experiment_type = "s
     columns_target_gt_data = [time_data_setpoint, target_gt_x_data, target_gt_y_data, target_gt_z_data, target_gt_q0_data , target_gt_q1_data ,target_gt_q2_data ,target_gt_q3_data ]
     
     source_gt_data_df = read_pandas_df(path_experiment_data, columns_source_gt_data, 
-                                        timestamp_col=time_data_setpoint, max_timestamp=max_timestamp)
+                                        timestamp_col=time_data_setpoint, max_timestamp=max_timestamp_agv)
     
     
     target_gt_data_df = read_pandas_df(path_experiment_data, columns_target_gt_data, 
-                                        timestamp_col=time_data_setpoint, max_timestamp=max_timestamp)
+                                        timestamp_col=time_data_setpoint, max_timestamp=max_timestamp_uav)
     
     # Extract origin from the first UGV GT pose
     first_agv_row = source_gt_data_df.iloc[0]
@@ -684,7 +687,7 @@ def plot_experiment_data(path_experiment_data, path_folder, experiment_type = "s
     agv_quat = first_agv_row[[source_gt_q0_data, source_gt_q1_data, source_gt_q2_data, source_gt_q3_data]].values
     agv_rpy = R.from_quat(agv_quat).as_euler('zyx', degrees=False)  # yaw, pitch, roll
     source_odom_origin = pose_to_matrix(np.concatenate((agv_pos, agv_rpy[::-1])))  # [x, y, z, roll, pitch, yaw]
-    source_odom_origin = pose_to_matrix([0.0,0.0,0.0,0.0,0.0,0.0])  # [x, y, z, roll, pitch, yaw]
+    source_odom_origin = pose_to_matrix([13.351, 27.385, 0.636, 0.001, 0.001, 3.079])  # [x, y, z, roll, pitch, yaw]
 
     # Extract origin from the first UAV GT pose
     first_uav_row = target_gt_data_df.iloc[0]
@@ -694,7 +697,7 @@ def plot_experiment_data(path_experiment_data, path_folder, experiment_type = "s
     target_odom_origin = pose_to_matrix(np.concatenate((uav_pos, uav_rpy[::-1])))  # [x, y, z, roll, pitch, yaw]
     # target_odom_origin = pose_to_matrix([5.0,-5.0,0.0,0.0,0.0,0.150])  # [x, y, z, roll, pitch, yaw]
     # target_odom_origin = pose_to_matrix([0.5,-0.5,0.0,0.0,0.0,0.150])  # [x, y, z, roll, pitch, yaw]
-    target_odom_origin = pose_to_matrix([0.5,-0.5,0.0,0.0,0.0,0.524])  # [x, y, z, roll, pitch, yaw]
+    target_odom_origin = pose_to_matrix([15.351, 23.385, 0.9, 0.0, 0.0, 0.028])  # [x, y, z, roll, pitch, yaw]
 
     t0 = target_gt_data_df[columns_target_gt_data[0]].iloc[0]
     
@@ -759,7 +762,7 @@ def plot_experiment_data(path_experiment_data, path_folder, experiment_type = "s
     ############################################# Pose-Graph plots ###############################################
 
     pose_graph_agv_df = read_pandas_df(agv_csv_path, pose_graph_agv_cols, timestamp_col="timestamp", max_timestamp=max_timestamp)
-    pose_graph_uav_df = read_pandas_df(uav_csv_path, pose_graph_uav_cols, timestamp_col="timestamp", max_timestamp=max_timestamp)
+    pose_graph_uav_df = read_pandas_df(uav_csv_path, pose_graph_uav_cols, timestamp_col="timestamp", max_timestamp=max_timestamp_uav)
 
     print("UGV pose graph shape:", pose_graph_agv_df.shape)
     print("UAV pose graph shape:", pose_graph_uav_df.shape)
@@ -768,16 +771,16 @@ def plot_experiment_data(path_experiment_data, path_folder, experiment_type = "s
     poses_uav = load_pose_graph(pose_graph_uav_df, pose_graph_uav_cols)
 
     #Get the anchors
-    anchor_target_df = read_pandas_df(path_experiment_data, anchor_target_uav_cols, timestamp_col=time_data_setpoint, max_timestamp=max_timestamp)
-    anchor_source_df = read_pandas_df(path_experiment_data, anchor_source_agv_cols, timestamp_col=time_data_setpoint, max_timestamp=max_timestamp)
+    anchor_target_df = read_pandas_df(path_experiment_data, anchor_target_uav_cols, timestamp_col=time_data_setpoint, max_timestamp=max_timestamp_uav)
+    anchor_source_df = read_pandas_df(path_experiment_data, anchor_source_agv_cols, timestamp_col=time_data_setpoint, max_timestamp=max_timestamp_agv)
     
     
     if(experiment_type == "dataset"):
         #Get the radar velocities
         radar_source_df = read_pandas_df(path_experiment_data, radar_source_cols, 
-                                        timestamp_col=time_data_setpoint, max_timestamp=max_timestamp)
+                                        timestamp_col=time_data_setpoint, max_timestamp=max_timestamp_agv)
         radar_target_df = read_pandas_df(path_experiment_data, radar_target_cols, 
-                                        timestamp_col=time_data_setpoint, max_timestamp=max_timestamp)
+                                        timestamp_col=time_data_setpoint, max_timestamp=max_timestamp_uav)
     
 
     if experiment_type == "basic_sim":
@@ -824,9 +827,8 @@ def plot_experiment_data(path_experiment_data, path_folder, experiment_type = "s
     if(experiment_type == "dataset"):
         #Plot radar
         plot_radar_velocities(path_folder, radar_source_df, radar_source_cols, label="UGV Radar", filename="radar_velocity_agv", gt_df = source_gt_data_df, 
-                            gt_cols = columns_source_gt_data, gt_origin = source_odom_origin,
-                            odom_df=source_odom_vel_data_df, odom_cols=columns_source_odom_vel_data, t_max=max_timestamp)
-        plot_radar_velocities(path_folder, radar_target_df, radar_target_cols, label="UAV Radar", filename="radar_velocity_uav", gt_df = target_gt_data_df, gt_cols = columns_target_gt_data, gt_origin = target_odom_origin, t_max=max_timestamp)    
+                            gt_cols = columns_source_gt_data, gt_origin = source_odom_origin, t_max=max_timestamp_agv)
+        plot_radar_velocities(path_folder, radar_target_df, radar_target_cols, label="UAV Radar", filename="radar_velocity_uav", gt_df = target_gt_data_df, gt_cols = columns_target_gt_data, gt_origin = target_odom_origin, t_max=max_timestamp_uav)    
      
 
 
@@ -1180,8 +1182,7 @@ def plot_posegraphs_3d_side_by_side(path, filename, poses_agv, poses_uav, gt_agv
 
 
 def plot_radar_velocities(path, radar_df, cols_radar, label="Radar", filename="radar_velocity",
-                          gt_df=None, gt_cols=None, gt_origin=None,
-                          odom_df=None, odom_cols=None, t_max=None):
+                          gt_df=None, gt_cols=None, gt_origin=None, t_max=None):
     """
     Plots smoothed radar linear velocities over time and optionally compares to
     estimated ground truth velocities and/or odometry velocities.
@@ -1209,23 +1210,9 @@ def plot_radar_velocities(path, radar_df, cols_radar, label="Radar", filename="r
 
     fig, axes = plt.subplots(3, 1, figsize=(15, 12), sharex=True)
 
-    # === Optional: Odometry velocity ===
-    if odom_df is not None and odom_cols is not None:
-        odom_df = odom_df.copy()
-        odom_df[odom_cols[0]] -= odom_df[odom_cols[0]].iloc[0]
-        odom_df = odom_df.drop_duplicates(subset=odom_cols[0])
-        odom_df = odom_df.sort_values(odom_cols[0])
-        odom_time = odom_df[odom_cols[0]].values
-        vx_odom = odom_df[odom_cols[1]].values
-        vy_odom = odom_df[odom_cols[2]].values
-        vz_odom = odom_df[odom_cols[3]].values
-        odom_available = True
-    else:
-        odom_available = False
-
     # === Optional: GT velocity ===
     gt_available = False
-    if gt_df is not None and gt_cols is not None and gt_origin is not None:
+    if gt_df is not None and gt_cols is not None:
         gt_df = gt_df.copy()
         gt_df[gt_cols[0]] -= gt_df[gt_cols[0]].iloc[0]
         gt_df = gt_df.drop_duplicates(subset=gt_cols[0])
@@ -1237,29 +1224,50 @@ def plot_radar_velocities(path, radar_df, cols_radar, label="Radar", filename="r
             interp_x = interp1d(gt_time, gt_df[gt_cols[1]], kind='linear', fill_value="extrapolate")
             interp_y = interp1d(gt_time, gt_df[gt_cols[2]], kind='linear', fill_value="extrapolate")
             interp_z = interp1d(gt_time, gt_df[gt_cols[3]], kind='linear', fill_value="extrapolate")
+            interp_qx = interp1d(gt_time, gt_df[gt_cols[4]], kind='linear', fill_value="extrapolate")
+            interp_qy = interp1d(gt_time, gt_df[gt_cols[5]], kind='linear', fill_value="extrapolate")
+            interp_qz = interp1d(gt_time, gt_df[gt_cols[6]], kind='linear', fill_value="extrapolate")
+            interp_qw = interp1d(gt_time, gt_df[gt_cols[7]], kind='linear', fill_value="extrapolate")
 
             x_uniform = interp_x(uniform_time)
             y_uniform = interp_y(uniform_time)
             z_uniform = interp_z(uniform_time)
+            qx_uniform = interp_qx(uniform_time)
+            qy_uniform = interp_qy(uniform_time)
+            qz_uniform = interp_qz(uniform_time)
+            qw_uniform = interp_qw(uniform_time)
 
             window = min(21, len(x_uniform) // 2 * 2 + 1)
+            window = max(window, 5)
             poly = 3
 
             vx_map = savgol_filter(x_uniform, window_length=window, polyorder=poly, deriv=1, delta=np.mean(np.diff(uniform_time)))
             vy_map = savgol_filter(y_uniform, window_length=window, polyorder=poly, deriv=1, delta=np.mean(np.diff(uniform_time)))
             vz_map = savgol_filter(z_uniform, window_length=window, polyorder=poly, deriv=1, delta=np.mean(np.diff(uniform_time)))
+            # Rotate GT map-frame velocity to robot body frame at each timestamp.
+            gt_vel_body = np.zeros((len(uniform_time), 3))
+            for i in range(len(uniform_time)):
+                q = np.array([qx_uniform[i], qy_uniform[i], qz_uniform[i], qw_uniform[i]], dtype=float)
+                qn = np.linalg.norm(q)
+                if qn < 1e-9:
+                    continue
+                q /= qn
+                R_map_to_body = R.from_quat(q).as_matrix().T
+                gt_vel_body[i, :] = R_map_to_body @ np.array([vx_map[i], vy_map[i], vz_map[i]])
 
-            R_map_to_local = gt_origin[:3, :3].T
-            gt_vel_local = R_map_to_local @ np.vstack((vx_map, vy_map, vz_map))
-            vx_gt, vy_gt, vz_gt = gt_vel_local[0], gt_vel_local[1], gt_vel_local[2]
-            gt_available = True
+            # Interpolate GT body velocity on radar timestamps for direct comparison.
+            valid = np.isfinite(gt_vel_body).all(axis=1)
+            if np.count_nonzero(valid) >= 3:
+                vx_gt = np.interp(time, uniform_time[valid], gt_vel_body[valid, 0])
+                vy_gt = np.interp(time, uniform_time[valid], gt_vel_body[valid, 1])
+                vz_gt = np.interp(time, uniform_time[valid], gt_vel_body[valid, 2])
+                gt_plot_time = time
+                gt_available = True
 
     # === Plot X ===
     axes[0].plot(time, vx, color='b', label=f"{label} Vx")
     if gt_available:
-        axes[0].plot(uniform_time, vx_gt, color='r', linestyle='--', linewidth='2.0', label='GT Vx')
-    if odom_available:
-        axes[0].plot(odom_time, vx_odom, color='r', linestyle='--', linewidth='2.0', label='GT Vx')
+        axes[0].plot(gt_plot_time, vx_gt, color='r', linestyle='--', linewidth='2.0', label='GT Vx')
     axes[0].set_ylabel("Vx (m/s)")
     # axes[0].legend()
     axes[0].grid()
@@ -1267,9 +1275,7 @@ def plot_radar_velocities(path, radar_df, cols_radar, label="Radar", filename="r
     # === Plot Y ===
     axes[1].plot(time, vy, color='b', label=f"{label} Vy")
     if gt_available:
-        axes[1].plot(uniform_time, vy_gt, color='r', linestyle='--', linewidth='2.0', label='GT Vy')
-    if odom_available:
-        axes[1].plot(odom_time, vy_odom, color='r', linestyle='--', linewidth='2.0', label='GT Vy')
+        axes[1].plot(gt_plot_time, vy_gt, color='r', linestyle='--', linewidth='2.0', label='GT Vy')
     axes[1].set_ylabel("Vy (m/s)")
     # axes[1].legend()
     axes[1].grid()
@@ -1277,9 +1283,8 @@ def plot_radar_velocities(path, radar_df, cols_radar, label="Radar", filename="r
     # === Plot Z ===
     axes[2].plot(time, vz, color='b', label=f"{label} Vz")
     if gt_available:
-        axes[2].plot(uniform_time, vz_gt, color='r', linestyle='--', linewidth='2.0', label='GT Vz')
-    if odom_available:
-        axes[2].plot(odom_time, vz_odom, color='r', linestyle='--',  linewidth='2.0', label='GT Vz')
+        axes[2].plot(gt_plot_time, vz_gt, color='r', linestyle='--', linewidth='2.0', label='GT Vz')
+
     axes[2].set_ylabel("Vz (m/s)")
     axes[2].set_xlabel("Time (s)")
     # axes[2].legend()

@@ -80,6 +80,8 @@ namespace posegraph
         int KF_id;
         pcl::PointCloud<pcl::PointXYZ>::Ptr radar_scan;
         Sophus::SE3d odom_pose;
+        rclcpp::Time timestamp;
+        Eigen::Vector3d radar_egovel;
     };
 
 

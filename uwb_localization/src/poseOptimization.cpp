@@ -636,9 +636,16 @@ Sophus::SE3d PoseOptimizationNode::integrateEgoVelIntoSE3(
         const Sophus::SE3d& odom_T_s,           // odom at source time (earlier)
         const Sophus::SE3d& odom_T_t,           // odom at target time (later)
         double dt){
+        // Keep odometry relative rotation and blend odometry translation with
+        // velocity-integrated translation in target/body coordinates.
+        const Sophus::SE3d t_T_s_odom = odom_T_t.inverse() * odom_T_s;
+        const Eigen::Vector3d t_odom = t_T_s_odom.translation();
+        const Eigen::Vector3d t_vel = -radar_vel_t * dt;
 
-        Eigen::Vector3d delta_t = radar_vel_t * dt;
-        return Sophus::SE3d{Eigen::Quaterniond::Identity(), -delta_t};
+        constexpr double kVelBlend = 0.4;  // 0 -> odom only, 1 -> velocity only
+        const Eigen::Vector3d t_blended = (1.0 - kVelBlend) * t_odom + kVelBlend * t_vel;
+
+        return Sophus::SE3d{t_T_s_odom.unit_quaternion(), t_blended};
     }
 
 bool PoseOptimizationNode::addMeasurementConstraints(ceres::Problem &problem, 
@@ -1087,6 +1094,8 @@ void PoseOptimizationNode::globalOptCb() {
             radar_agv.KF_id = agv_id_;
             radar_agv.odom_pose = agv_measurements_.odom_pose;
             radar_agv.radar_scan = agv_measurements_.radar_scan;
+            radar_agv.timestamp = agv_measurements_.timestamp;
+            radar_agv.radar_egovel = agv_measurements_.radar_egovel;
             radar_history_agv_.push_back(radar_agv);
 
 
@@ -1141,6 +1150,8 @@ void PoseOptimizationNode::globalOptCb() {
             radar_uav.KF_id = uav_id_;
             radar_uav.odom_pose = uav_measurements_.odom_pose;
             radar_uav.radar_scan = uav_measurements_.radar_scan;
+            radar_uav.timestamp = uav_measurements_.timestamp;
+            radar_uav.radar_egovel = uav_measurements_.radar_egovel;
             radar_history_uav_.push_back(radar_uav);
 
         
@@ -1237,6 +1248,8 @@ void PoseOptimizationNode::globalOptCb() {
             radar_agv.KF_id = agv_id_;
             radar_agv.odom_pose = agv_measurements_.odom_pose;
             radar_agv.radar_scan = agv_measurements_.radar_scan;
+            radar_agv.timestamp = agv_measurements_.timestamp;
+            radar_agv.radar_egovel = agv_measurements_.radar_egovel;
             radar_history_agv_.push_back(radar_agv);
             if (radar_history_agv_.size() > radar_history_size_) {
                 radar_history_agv_.pop_front();
@@ -1299,18 +1312,36 @@ void PoseOptimizationNode::globalOptCb() {
                         RCLCPP_WARN(this->get_logger(), "Computing Radar ICP for AGV nodes %d and %d", olderKF.KF_id, radar_agv.KF_id);
 
                         Eigen::Matrix4f T_icp = Eigen::Matrix4f::Identity();
+                        bool has_odom_guess = false;
                         // Optionally, compute an initial guess based on the relative odometry:
-                        if(using_odom_ && agv_measurements_.odom_ok) T_icp = (radar_agv.odom_pose.inverse() * olderKF.odom_pose).cast<float>().matrix();
+                        if(using_odom_ && agv_measurements_.odom_ok) {
+                            T_icp = (radar_agv.odom_pose.inverse() * olderKF.odom_pose).cast<float>().matrix();
+                            has_odom_guess = true;
+                        }
 
                         if (agv_measurements_.radar_velocity_ok) {
-                            Eigen::Vector3d radar_vel_body = T_agv_imu_.rotationMatrix() * agv_measurements_.radar_egovel;
-                            double dt_agv = (agv_measurements_.timestamp - prev_agv_measurements_.timestamp).seconds();
-                            T_icp = integrateEgoVelIntoSE3(
-                                radar_vel_body,
-                                prev_agv_measurements_.odom_pose,
-                                agv_measurements_.odom_pose,
-                                dt_agv
-                            ).cast<float>().matrix();
+                            const double dt_agv = (agv_measurements_.timestamp - olderKF.timestamp).seconds();
+                            if (dt_agv > 0.0) {
+                                Eigen::Vector3d v_t = T_agv_imu_.rotationMatrix() * agv_measurements_.radar_egovel;
+                                // Convert older-keyframe velocity into target frame and average.
+                                const Eigen::Matrix3d R_t_s = (radar_agv.odom_pose.inverse() * olderKF.odom_pose).rotationMatrix();
+                                Eigen::Vector3d v_s = T_agv_imu_.rotationMatrix() * olderKF.radar_egovel;
+                                Eigen::Vector3d v_pair_t = 0.5 * (v_t + R_t_s * v_s);
+
+                                Eigen::Matrix4f T_vel = integrateEgoVelIntoSE3(
+                                    v_pair_t,
+                                    olderKF.odom_pose,
+                                    agv_measurements_.odom_pose,
+                                    dt_agv
+                                ).cast<float>().matrix();
+
+                                if (has_odom_guess) {
+                                    // Keep odometry rotation; blend translations.
+                                    T_icp.block<3,1>(0,3) = 0.6f * T_icp.block<3,1>(0,3) + 0.4f * T_vel.block<3,1>(0,3);
+                                } else {
+                                    T_icp = T_vel;
+                                }
+                            }
                         }
                         
                         //If you are using radar pre-filter, filtered clouds come in the IMU frame
@@ -1354,6 +1385,8 @@ void PoseOptimizationNode::globalOptCb() {
             radar_uav.KF_id = uav_id_;
             radar_uav.odom_pose = uav_measurements_.odom_pose;
             radar_uav.radar_scan = uav_measurements_.radar_scan;
+            radar_uav.timestamp = uav_measurements_.timestamp;
+            radar_uav.radar_egovel = uav_measurements_.radar_egovel;
             radar_history_uav_.push_back(radar_uav);
             if (radar_history_uav_.size() > radar_history_size_) {
                 radar_history_uav_.pop_front();
@@ -1413,18 +1446,34 @@ void PoseOptimizationNode::globalOptCb() {
                         RCLCPP_WARN(this->get_logger(), "Computing Radar ICP for UAV nodes %d and %d", olderKF.KF_id, radar_uav.KF_id);
 
                         Eigen::Matrix4f T_icp = Eigen::Matrix4f::Identity();
+                        bool has_odom_guess = false;
                         // Optionally, compute an initial guess based on the relative odometry:
-                        if(using_odom_ && uav_measurements_.odom_ok) T_icp = (radar_uav.odom_pose.inverse() * olderKF.odom_pose).cast<float>().matrix();
+                        if(using_odom_ && uav_measurements_.odom_ok) {
+                            T_icp = (radar_uav.odom_pose.inverse() * olderKF.odom_pose).cast<float>().matrix();
+                            has_odom_guess = true;
+                        }
                         
                         if (uav_measurements_.radar_velocity_ok) {
-                            Eigen::Vector3d radar_vel_body = T_uav_imu_.rotationMatrix() * uav_measurements_.radar_egovel;
-                            double dt_uav = (uav_measurements_.timestamp - prev_uav_measurements_.timestamp).seconds();
-                            T_icp = integrateEgoVelIntoSE3(
-                                radar_vel_body,
-                                prev_uav_measurements_.odom_pose,
-                                uav_measurements_.odom_pose,
-                                dt_uav
-                            ).cast<float>().matrix();
+                            const double dt_uav = (uav_measurements_.timestamp - olderKF.timestamp).seconds();
+                            if (dt_uav > 0.0) {
+                                Eigen::Vector3d v_t = T_uav_imu_.rotationMatrix() * uav_measurements_.radar_egovel;
+                                const Eigen::Matrix3d R_t_s = (radar_uav.odom_pose.inverse() * olderKF.odom_pose).rotationMatrix();
+                                Eigen::Vector3d v_s = T_uav_imu_.rotationMatrix() * olderKF.radar_egovel;
+                                Eigen::Vector3d v_pair_t = 0.5 * (v_t + R_t_s * v_s);
+
+                                Eigen::Matrix4f T_vel = integrateEgoVelIntoSE3(
+                                    v_pair_t,
+                                    olderKF.odom_pose,
+                                    uav_measurements_.odom_pose,
+                                    dt_uav
+                                ).cast<float>().matrix();
+
+                                if (has_odom_guess) {
+                                    T_icp.block<3,1>(0,3) = 0.6f * T_icp.block<3,1>(0,3) + 0.4f * T_vel.block<3,1>(0,3);
+                                } else {
+                                    T_icp = T_vel;
+                                }
+                            }
                         }
                         
                         //If you are using radar pre-filter, filtered clouds come in the IMU frame
